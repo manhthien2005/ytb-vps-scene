@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
-from ytb_vps_v2.domain.backup import ManifestEntry
+from ytb_vps_v2.domain.backup import (
+    ManifestEntry,
+    canonical_manifest_bytes,
+)
 from ytb_vps_v2.domain.restore import (
     CleanupDecision,
     CleanupDenialReason,
@@ -43,6 +47,9 @@ class CleanupGuard:
         now: int,
         max_age: int,
         operator_enabled: bool,
+        required_parts: tuple[ManifestEntry, ...],
+        required_validations: tuple[ManifestEntry, ...],
+        required_work_keys: tuple[str, ...],
     ) -> CleanupDecision:
         if type(proof) is not CleanupProof:
             raise CleanupGuardError("Cleanup proof must be CleanupProof")
@@ -52,6 +59,35 @@ class CleanupGuard:
             raise CleanupGuardError("Cleanup evidence age must be non-negative")
         if type(operator_enabled) is not bool:
             raise CleanupGuardError("Cleanup operator flag must be boolean")
+        if (
+            type(required_parts) is not tuple
+            or not required_parts
+            or any(type(item) is not ManifestEntry for item in required_parts)
+        ):
+            raise CleanupGuardError("Required Parts must be non-empty manifest entries")
+        if (
+            type(required_validations) is not tuple
+            or not required_validations
+            or any(
+                type(item) is not ManifestEntry for item in required_validations
+            )
+        ):
+            raise CleanupGuardError(
+                "Required validations must be non-empty manifest entries"
+            )
+        if (
+            type(required_work_keys) is not tuple
+            or not required_work_keys
+            or any(
+                type(item) is not str or not item or item != item.strip()
+                for item in required_work_keys
+            )
+            or required_work_keys != tuple(sorted(required_work_keys))
+            or len(required_work_keys) != len(set(required_work_keys))
+        ):
+            raise CleanupGuardError(
+                "Required work keys must be non-empty, sorted, and unique"
+            )
 
         reasons: set[CleanupDenialReason] = set()
         if not operator_enabled:
@@ -62,8 +98,8 @@ class CleanupGuard:
             proof.manifest.input_archive,
             proof.manifest.state_snapshot,
             *proof.manifest.artifacts,
-            *proof.published_parts,
-            *proof.validation_artifacts,
+            *required_parts,
+            *required_validations,
         )
         expected_by_key = {str(item.key): item for item in expected_entries}
         if len(expected_by_key) != len(expected_entries):
@@ -84,16 +120,32 @@ class CleanupGuard:
         if mismatching_keys or extra_keys:
             reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
 
+        canonical = canonical_manifest_bytes(proof.manifest)
+        canonical_digest = (
+            len(canonical),
+            hashlib.sha256(canonical).hexdigest(),
+        )
+        if (
+            proof.manifest_entry.digest.size_bytes,
+            proof.manifest_entry.digest.sha256,
+        ) != canonical_digest:
+            reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
+        manifest_prefix = proof.manifest.state_snapshot.key.parent.parent
+        if proof.manifest_entry.key != manifest_prefix / "manifest-v1.json":
+            reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
+        if any(item.method != "sha256-readback" for item in proof.evidence):
+            reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
+
         if not _exact_evidence(proof.manifest.input_archive, observed_by_key):
             reasons.add(CleanupDenialReason.INPUT_NOT_DURABLE)
-        if not proof.published_parts or any(
+        if proof.published_parts != required_parts or any(
             not _exact_evidence(item, observed_by_key)
-            for item in proof.published_parts
+            for item in required_parts
         ):
             reasons.add(CleanupDenialReason.PARTS_NOT_VERIFIED)
-        if not proof.validation_artifacts or any(
+        if proof.validation_artifacts != required_validations or any(
             not _exact_evidence(item, observed_by_key)
-            for item in proof.validation_artifacts
+            for item in required_validations
         ):
             reasons.add(CleanupDenialReason.VALIDATIONS_NOT_VERIFIED)
 
@@ -105,7 +157,10 @@ class CleanupGuard:
 
         if not proof.snapshot_restorable:
             reasons.add(CleanupDenialReason.SNAPSHOT_NOT_RESTORABLE)
-        if proof.required_work_keys != proof.remote_work_keys:
+        if (
+            proof.required_work_keys != required_work_keys
+            or proof.remote_work_keys != required_work_keys
+        ):
             reasons.add(CleanupDenialReason.WORK_NOT_DURABLE)
 
         try:

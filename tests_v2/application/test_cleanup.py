@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import hashlib
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -9,6 +10,7 @@ from ytb_vps_v2.adapters.filesystem.cleanup import LocalDeletionTargetPolicy
 from ytb_vps_v2.application.cleanup import CleanupGuard, CleanupGuardError
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
+    canonical_manifest_bytes,
     FileDigest,
     ManifestEntry,
     SourceIdentity,
@@ -46,12 +48,19 @@ class CleanupGuardTests(unittest.TestCase):
             "cp-1",
             JobId("job-1"),
             source,
-            entry("checkpoints/input.mp4"),
-            entry("checkpoints/job-v2.sqlite", SHA_B),
-            (entry("checkpoints/workspace/a.json", SHA_C),),
+            entry("checkpoints/job-1/cp-1/input/source.mp4"),
+            entry("checkpoints/job-1/cp-1/state/job-v2.sqlite", SHA_B),
+            (entry("checkpoints/job-1/cp-1/workspace/a.json", SHA_C),),
             "created",
         )
-        self.manifest_entry = entry("checkpoints/manifest-v1.json", SHA_B)
+        manifest_bytes = canonical_manifest_bytes(self.manifest)
+        self.manifest_entry = ManifestEntry(
+            PurePosixPath("checkpoints/job-1/cp-1/manifest-v1.json"),
+            FileDigest(
+                len(manifest_bytes),
+                hashlib.sha256(manifest_bytes).hexdigest(),
+            ),
+        )
         self.part = entry("published/part-001.mp4", SHA_C)
         self.validation = entry("published/part-001.validation.json", SHA_B)
         expected = (
@@ -86,6 +95,9 @@ class CleanupGuardTests(unittest.TestCase):
             "now": 100,
             "max_age": 10,
             "operator_enabled": True,
+            "required_parts": (self.part,),
+            "required_validations": (self.validation,),
+            "required_work_keys": ("backup:1", "publish:1"),
         }
         values.update(changes)
         return self.guard.assess(**values)  # type: ignore[arg-type]
@@ -198,6 +210,69 @@ class CleanupGuardTests(unittest.TestCase):
 
         self.assertIn(CleanupDenialReason.MISMATCHING_EVIDENCE, decision.reasons)
         self.assertIn(CleanupDenialReason.WORK_NOT_DURABLE, decision.reasons)
+
+    def test_self_declared_empty_coverage_cannot_authorize_cleanup(self) -> None:
+        proof = replace(
+            self.proof,
+            published_parts=(),
+            validation_artifacts=(),
+            required_work_keys=(),
+            remote_work_keys=(),
+        )
+
+        decision = self._assess(proof)
+
+        self.assertFalse(decision.allowed)
+        self.assertIn(CleanupDenialReason.PARTS_NOT_VERIFIED, decision.reasons)
+        self.assertIn(
+            CleanupDenialReason.VALIDATIONS_NOT_VERIFIED,
+            decision.reasons,
+        )
+        self.assertIn(CleanupDenialReason.WORK_NOT_DURABLE, decision.reasons)
+
+    def test_empty_caller_requirements_are_rejected(self) -> None:
+        for name in ("required_parts", "required_validations", "required_work_keys"):
+            with self.subTest(name=name):
+                with self.assertRaises(CleanupGuardError):
+                    self._assess(**{name: ()})
+
+    def test_manifest_evidence_must_bind_to_canonical_manifest_bytes(self) -> None:
+        wrong_manifest_entry = entry(
+            "checkpoints/job-1/cp-1/manifest-v1.json",
+            SHA_B,
+        )
+        evidence = tuple(
+            replace(item, entry=wrong_manifest_entry)
+            if item.entry.key == self.manifest_entry.key
+            else item
+            for item in self.evidence
+        )
+        proof = replace(
+            self.proof,
+            manifest_entry=wrong_manifest_entry,
+            evidence=evidence,
+        )
+
+        decision = self._assess(proof)
+
+        self.assertFalse(decision.allowed)
+        self.assertIn(
+            CleanupDenialReason.MISMATCHING_EVIDENCE,
+            decision.reasons,
+        )
+
+    def test_untrusted_evidence_method_cannot_authorize_cleanup(self) -> None:
+        evidence = tuple(
+            replace(item, method="provider-metadata") for item in self.evidence
+        )
+
+        decision = self._assess(replace(self.proof, evidence=evidence))
+
+        self.assertFalse(decision.allowed)
+        self.assertIn(
+            CleanupDenialReason.MISMATCHING_EVIDENCE,
+            decision.reasons,
+        )
 
     def test_invalid_freshness_arguments_fail_closed(self) -> None:
         for changes in (

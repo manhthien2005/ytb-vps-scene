@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from ytb_vps_v2.adapters.filesystem.additive import LocalAdditiveObjectStore
 from ytb_vps_v2.adapters.filesystem.archive import VerifiedInputArchiver
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_file
+from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
 from ytb_vps_v2.application import restore as restore_module
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
 from ytb_vps_v2.domain.config import EffectiveConfig
+from ytb_vps_v2.domain.backup import canonical_manifest_bytes
 from ytb_vps_v2.domain.fingerprints import Fingerprint, stage_config_fingerprints
 from ytb_vps_v2.domain.models import Artifact, JobId, StageName, WorkUnit
 from ytb_vps_v2.ports.backup import BackupStoreError
@@ -96,7 +99,7 @@ class CheckpointRestorerTests(unittest.TestCase):
             "checkpoint-time",
         )
         records = self.state.completed_checkpoints(self.job_id)
-        self.manifest_key = records[0].manifest.key
+        self.manifest_entry = records[0].manifest
         self.restore_workspace = LocalStagedRestoreWorkspace()
         self.restorer = CheckpointRestorer(self.store, self.restore_workspace)
 
@@ -107,7 +110,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         target = self.restore_parent / "job-restored"
 
         result = self.restorer.restore(
-            self.manifest_key,
+            self.manifest_entry,
             target,
             self.restore_parent,
             100,
@@ -137,7 +140,7 @@ class CheckpointRestorerTests(unittest.TestCase):
 
         with self.assertRaises(RestoreError):
             self.restorer.restore(
-                self.manifest_key,
+                self.manifest_entry,
                 target,
                 self.restore_parent,
                 100,
@@ -169,7 +172,7 @@ class CheckpointRestorerTests(unittest.TestCase):
                     with mock.patch.object(self.store, "materialize", interrupted):
                         with self.assertRaises(RestoreError):
                             self.restorer.restore(
-                                self.manifest_key,
+                                self.manifest_entry,
                                 target,
                                 self.restore_parent,
                                 100,
@@ -179,7 +182,7 @@ class CheckpointRestorerTests(unittest.TestCase):
 
         retry_target = self.restore_parent / "retry-success"
         result = self.restorer.restore(
-            self.manifest_key,
+            self.manifest_entry,
             retry_target,
             self.restore_parent,
             101,
@@ -195,7 +198,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         ):
             with self.assertRaises(RestoreError):
                 self.restorer.restore(
-                    self.manifest_key,
+                    self.manifest_entry,
                     target,
                     self.restore_parent,
                     100,
@@ -203,6 +206,39 @@ class CheckpointRestorerTests(unittest.TestCase):
 
         self.assertFalse(target.exists())
         self.assertEqual(self._temporary_restore_paths(), ())
+
+    def test_staging_swap_on_failure_never_deletes_replacement(self) -> None:
+        displaced = self.restore_parent / "displaced-owned-staging"
+        replacement_path: Path | None = None
+
+        def swap_then_fail(*args: object, **kwargs: object):
+            nonlocal replacement_path
+            staging_paths = self._temporary_restore_paths()
+            self.assertEqual(len(staging_paths), 1)
+            replacement_path = staging_paths[0]
+            replacement_path.rename(displaced)
+            replacement_path.mkdir()
+            (replacement_path / "attacker.txt").write_bytes(b"do-not-delete")
+            raise BackupStoreError("injected failure after staging swap")
+
+        target = self.restore_parent / "swap-cleanup-failure"
+        with mock.patch.object(self.store, "materialize", swap_then_fail):
+            with self.assertRaisesRegex(RestoreError, "cleanup"):
+                self.restorer.restore(
+                    self.manifest_entry,
+                    target,
+                    self.restore_parent,
+                    100,
+                )
+
+        self.assertIsNotNone(replacement_path)
+        assert replacement_path is not None
+        self.assertEqual(
+            (replacement_path / "attacker.txt").read_bytes(),
+            b"do-not-delete",
+        )
+        self.assertTrue(displaced.is_dir())
+        self.assertFalse(target.exists())
 
     def test_state_is_materialized_first_and_final_revalidation_can_abort(self) -> None:
         real_materialize = self.store.materialize
@@ -233,7 +269,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         ):
             with self.assertRaises(RestoreError):
                 self.restorer.restore(
-                    self.manifest_key,
+                    self.manifest_entry,
                     target,
                     self.restore_parent,
                     100,
@@ -247,10 +283,15 @@ class CheckpointRestorerTests(unittest.TestCase):
         target = self.restore_parent / "race-target"
         real_publish = self.restore_workspace.publish
 
-        def competing_publish(source: Path, destination: Path, parent: Path) -> None:
+        def competing_publish(
+            source: Path,
+            destination: Path,
+            parent: Path,
+            expected_identity: tuple[int, int],
+        ) -> None:
             destination.mkdir()
             (destination / "winner.txt").write_bytes(b"winner")
-            real_publish(source, destination, parent)
+            real_publish(source, destination, parent, expected_identity)
 
         with mock.patch.object(
             self.restore_workspace,
@@ -259,7 +300,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         ):
             with self.assertRaises(RestoreError):
                 self.restorer.restore(
-                    self.manifest_key,
+                    self.manifest_entry,
                     target,
                     self.restore_parent,
                     100,
@@ -268,6 +309,36 @@ class CheckpointRestorerTests(unittest.TestCase):
         self.assertEqual((target / "winner.txt").read_bytes(), b"winner")
         self.assertEqual(tuple(target.iterdir()), (target / "winner.txt",))
         self.assertEqual(self._temporary_restore_paths(), ())
+
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows handle test")
+    def test_directory_publication_does_not_use_swappable_source_path(self) -> None:
+        source = self.restore_parent / ".pinned.restore-source"
+        source.mkdir()
+        (source / "identity.txt").write_bytes(b"verified-staging")
+        replacement = self.restore_parent / "attacker-replacement"
+        replacement.mkdir()
+        (replacement / "identity.txt").write_bytes(b"attacker")
+        displaced = self.restore_parent / "displaced"
+        target = self.restore_parent / "published"
+        real_rename = __import__("os").rename
+
+        def swap_before_path_rename(first: object, second: object) -> None:
+            real_rename(source, displaced)
+            real_rename(replacement, source)
+            real_rename(first, second)
+
+        with mock.patch("os.rename", swap_before_path_rename):
+            integrity_module.publish_directory_no_replace(
+                source,
+                target,
+                self.restore_parent,
+                integrity_module.directory_identity(source),
+            )
+
+        self.assertEqual(
+            (target / "identity.txt").read_bytes(),
+            b"verified-staging",
+        )
 
     def test_missing_or_corrupt_remote_object_never_publishes_target(self) -> None:
         entries = (
@@ -284,7 +355,7 @@ class CheckpointRestorerTests(unittest.TestCase):
                 with self.subTest(key=str(entry.key)):
                     with self.assertRaises(RestoreError):
                         self.restorer.restore(
-                            self.manifest_key,
+                            self.manifest_entry,
                             target,
                             self.restore_parent,
                             100,
@@ -301,7 +372,7 @@ class CheckpointRestorerTests(unittest.TestCase):
             target = self.restore_parent / "missing-object"
             with self.assertRaises(RestoreError):
                 self.restorer.restore(
-                    self.manifest_key,
+                    self.manifest_entry,
                     target,
                     self.restore_parent,
                     100,
@@ -311,14 +382,35 @@ class CheckpointRestorerTests(unittest.TestCase):
             missing.write_bytes(missing_bytes)
 
     def test_corrupt_manifest_never_creates_staging_or_target(self) -> None:
-        remote = self.remote_root.joinpath(*self.manifest_key.parts)
+        remote = self.remote_root.joinpath(*self.manifest_entry.key.parts)
         original = remote.read_bytes()
         remote.write_bytes(b"not canonical manifest")
         target = self.restore_parent / "corrupt-manifest"
         try:
             with self.assertRaises(RestoreError):
                 self.restorer.restore(
-                    self.manifest_key,
+                    self.manifest_entry,
+                    target,
+                    self.restore_parent,
+                    100,
+                )
+            self.assertFalse(target.exists())
+            self.assertEqual(self._temporary_restore_paths(), ())
+        finally:
+            remote.write_bytes(original)
+
+    def test_canonical_forged_manifest_fails_trusted_digest(self) -> None:
+        remote = self.remote_root.joinpath(*self.manifest_entry.key.parts)
+        original = remote.read_bytes()
+        forged = canonical_manifest_bytes(
+            replace(self.manifest, checkpoint_id="forged-checkpoint")
+        )
+        remote.write_bytes(forged)
+        target = self.restore_parent / "forged-manifest"
+        try:
+            with self.assertRaises(RestoreError):
+                self.restorer.restore(
+                    self.manifest_entry,
                     target,
                     self.restore_parent,
                     100,
@@ -331,7 +423,7 @@ class CheckpointRestorerTests(unittest.TestCase):
     def test_rejects_relative_target_or_different_staging_parent(self) -> None:
         with self.assertRaises(RestoreError):
             self.restorer.restore(
-                self.manifest_key,
+                self.manifest_entry,
                 Path("relative"),
                 self.restore_parent,
                 100,
@@ -340,7 +432,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         other.mkdir()
         with self.assertRaises(RestoreError):
             self.restorer.restore(
-                self.manifest_key,
+                self.manifest_entry,
                 self.restore_parent / "job",
                 other,
                 100,

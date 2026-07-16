@@ -7,7 +7,9 @@ from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.filesystem.integrity import (
     digest_file,
+    directory_identity,
     publish_directory_no_replace,
+    remove_owned_directory,
     reject_reparse_components,
     secure_root,
 )
@@ -63,6 +65,30 @@ def _version(connection: sqlite3.Connection) -> int:
     return value
 
 
+def _schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "ORDER BY type, name"
+        ).fetchall()
+    )
+
+
+def _require_current_schema(connection: sqlite3.Connection) -> None:
+    reference = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        migrate(reference)
+        expected = _schema_signature(reference)
+    finally:
+        reference.close()
+    if _schema_signature(connection) != expected:
+        raise StagedRestoreError("Staged SQLite schema does not match schema v2")
+
+
 def _artifact(row: sqlite3.Row) -> Artifact:
     dependencies = json.loads(row["dependencies_json"])
     if type(dependencies) is not list or any(
@@ -95,6 +121,7 @@ def inspect_staged_state(
         version = _version(connection)
         if version != SCHEMA_VERSION:
             raise StagedRestoreError("Staged SQLite must be migrated before inspection")
+        _require_current_schema(connection)
 
         jobs = connection.execute(
             "SELECT job_id, source_sha256 FROM jobs ORDER BY job_id"
@@ -197,6 +224,7 @@ def migrate_staged_state(path: Path) -> int | None:
         _require_integrity(connection)
         if _version(connection) != SCHEMA_VERSION:
             raise StagedRestoreError("Staged SQLite migration did not reach current schema")
+        _require_current_schema(connection)
         connection.close()
         connection = None
         with path.open("r+b") as handle:
@@ -231,5 +259,27 @@ class LocalStagedRestoreWorkspace:
     def digest(self, path: Path) -> FileDigest:
         return digest_file(path)
 
-    def publish(self, source: Path, destination: Path, parent: Path) -> None:
-        publish_directory_no_replace(source, destination, parent)
+    def identity(self, path: Path) -> tuple[int, int]:
+        return directory_identity(path)
+
+    def remove_owned(
+        self,
+        path: Path,
+        parent: Path,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        remove_owned_directory(path, parent, expected_identity)
+
+    def publish(
+        self,
+        source: Path,
+        destination: Path,
+        parent: Path,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        publish_directory_no_replace(
+            source,
+            destination,
+            parent,
+            expected_identity,
+        )

@@ -113,6 +113,12 @@ class StagedSqliteRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(StagedRestoreError, "newer"):
             inspect_staged_state(self.path, self.manifest)
 
+    def test_rejects_version_two_database_with_incomplete_or_altered_schema(self) -> None:
+        self._execute("DROP TABLE retry_events")
+
+        with self.assertRaisesRegex(StagedRestoreError, "schema"):
+            inspect_staged_state(self.path, self.manifest)
+
     def test_rejects_job_source_or_verified_input_mismatch(self) -> None:
         with self.assertRaises(StagedRestoreError):
             inspect_staged_state(

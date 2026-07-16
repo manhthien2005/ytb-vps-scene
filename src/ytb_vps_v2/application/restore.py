@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
@@ -20,10 +19,6 @@ class RestoreError(RuntimeError):
     """Raised when a checkpoint cannot be restored without touching active state."""
 
 
-def _bytes_digest(raw: bytes) -> FileDigest:
-    return FileDigest(len(raw), hashlib.sha256(raw).hexdigest())
-
-
 def _destination(
     workspace: StagedRestoreWorkspace,
     parent: Path,
@@ -35,21 +30,25 @@ def _destination(
     return destination
 
 
-def _remove_owned_staging(staging: Path, parent: Path) -> None:
-    if not staging.exists() and not staging.is_symlink():
-        return
+def _remove_owned_staging(
+    workspace: StagedRestoreWorkspace,
+    staging: Path,
+    parent: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    if not staging.exists() or staging.is_symlink():
+        raise RestoreError("Owned restore staging identity is missing")
     if (
         staging.parent != parent
         or not staging.name.startswith(".")
         or ".restore-" not in staging.name
     ):
         raise RestoreError("Owned restore staging identity is invalid")
-    if staging.is_symlink() or (
+    if (
         getattr(staging, "is_junction", None) is not None and staging.is_junction()
     ):
-        staging.unlink()
-        return
-    shutil.rmtree(staging)
+        raise RestoreError("Owned restore staging became a reparse point")
+    workspace.remove_owned(staging, parent, expected_identity)
 
 
 class CheckpointRestorer:
@@ -67,14 +66,17 @@ class CheckpointRestorer:
 
     def restore(
         self,
-        manifest_key: PurePosixPath,
+        manifest_entry: ManifestEntry,
         target: Path,
         staging_parent: Path,
         observed_at: int,
     ) -> RestoreResult:
         if not isinstance(target, Path) or not target.is_absolute():
             raise RestoreError("Restore target must be an absolute Path")
+        if type(manifest_entry) is not ManifestEntry:
+            raise RestoreError("Restore requires trusted manifest evidence")
         staging: Path | None = None
+        staging_identity: tuple[int, int] | None = None
         try:
             parent = self.workspace.secure_parent(staging_parent)
             self.workspace.reject_reparse(target.parent)
@@ -86,15 +88,26 @@ class CheckpointRestorer:
             ):
                 raise RestoreError("Restore target already exists")
 
-            raw = self.object_store.read_bytes(manifest_key, _MAX_MANIFEST_BYTES)
-            manifest_digest = _bytes_digest(raw)
+            raw = self.object_store.read_bytes(
+                manifest_entry.key,
+                _MAX_MANIFEST_BYTES,
+            )
+            observed_manifest = FileDigest(
+                len(raw),
+                hashlib.sha256(raw).hexdigest(),
+            )
+            if observed_manifest != manifest_entry.digest:
+                raise RestoreError("Restore manifest does not match trusted evidence")
             self.object_store.verify(
-                manifest_key,
-                manifest_digest,
+                manifest_entry.key,
+                manifest_entry.digest,
                 observed_at,
                 _VERIFY_METHOD,
             )
             manifest = parse_manifest_bytes(raw)
+            manifest_prefix = manifest.state_snapshot.key.parent.parent
+            if manifest_entry.key != manifest_prefix / "manifest-v1.json":
+                raise RestoreError("Restore manifest key does not match checkpoint layout")
 
             staging = Path(
                 tempfile.mkdtemp(
@@ -102,6 +115,7 @@ class CheckpointRestorer:
                     dir=parent,
                 )
             )
+            staging_identity = self.workspace.identity(staging)
             state_path = staging / "job-v2.sqlite"
             self.object_store.verify(
                 manifest.state_snapshot.key,
@@ -170,7 +184,12 @@ class CheckpointRestorer:
                 if self.workspace.digest(destination) != artifact.remote.digest:
                     raise RestoreError("Staged artifact failed final verification")
 
-            self.workspace.publish(staging, target, parent)
+            self.workspace.publish(
+                staging,
+                target,
+                parent,
+                staging_identity,
+            )
             staging = None
             return RestoreResult(
                 manifest.job_id,
@@ -191,8 +210,13 @@ class CheckpointRestorer:
         ) as exc:
             raise RestoreError("Verified staged checkpoint restore failed") from exc
         finally:
-            if staging is not None:
+            if staging is not None and staging_identity is not None:
                 try:
-                    _remove_owned_staging(staging, staging.parent)
-                except (OSError, RestoreError) as cleanup_error:
+                    _remove_owned_staging(
+                        self.workspace,
+                        staging,
+                        staging.parent,
+                        staging_identity,
+                    )
+                except (OSError, RuntimeError) as cleanup_error:
                     raise RestoreError("Restore staging cleanup failed") from cleanup_error

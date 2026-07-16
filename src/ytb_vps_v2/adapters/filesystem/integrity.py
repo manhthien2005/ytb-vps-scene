@@ -4,6 +4,7 @@ import ctypes
 import errno
 import hashlib
 import os
+import shutil
 import stat
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -239,7 +240,7 @@ def _validated_publication_parent(root: Path, destination: Path) -> Path:
 
 
 @contextmanager
-def _windows_publication_guard(parent: Path) -> Iterator[None]:
+def _windows_publication_guard(parent: Path) -> Iterator[object]:
     import ctypes
     from ctypes import wintypes
 
@@ -278,7 +279,7 @@ def _windows_publication_guard(parent: Path) -> Iterator[None]:
 
     handle = create_file(
         str(parent),
-        0x0080,
+        0x0080 | 0x0004,
         0x00000001 | 0x00000002,
         None,
         3,
@@ -294,7 +295,7 @@ def _windows_publication_guard(parent: Path) -> Iterator[None]:
             raise BackupStoreError("Publication directory handle is invalid")
         if information.dwFileAttributes & 0x00000400:
             raise BackupStoreError("Publication directory is a reparse point")
-        yield
+        yield handle
     finally:
         close_handle(handle)
 
@@ -384,49 +385,373 @@ def _rename_directory_no_replace(
     source: Path,
     destination: Path,
     parent: Path,
+    expected_identity: tuple[int, int],
 ) -> None:
     if os.name == "nt":
-        with _windows_publication_guard(parent):
-            os.rename(source, destination)
+        with _windows_publication_guard(parent) as parent_handle:
+            _windows_rename_directory_handle(
+                source,
+                destination,
+                expected_identity,
+                parent_handle,
+            )
         return
     with _posix_publication_directory(parent, parent) as directory_fd:
-        library = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(library, "renameat2", None)
-        if renameat2 is None:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_fd = os.open(source.name, flags, dir_fd=directory_fd)
+        try:
+            status = os.fstat(source_fd)
+            if (status.st_dev, status.st_ino) != expected_identity:
+                raise BackupStoreError("Restore staging identity changed")
+            library = ctypes.CDLL(None, use_errno=True)
+            renameat2 = getattr(library, "renameat2", None)
+            if renameat2 is None:
+                raise BackupStoreError(
+                    "Platform lacks atomic no-replace directory publication"
+                )
+            renameat2.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            renameat2.restype = ctypes.c_int
+
+            def rename_no_replace(first: str, second: str) -> None:
+                result = renameat2(
+                    directory_fd,
+                    os.fsencode(first),
+                    directory_fd,
+                    os.fsencode(second),
+                    1,
+                )
+                if result != 0:
+                    error_number = ctypes.get_errno()
+                    raise OSError(
+                        error_number or errno.EIO,
+                        os.strerror(error_number or errno.EIO),
+                    )
+
+            rename_no_replace(source.name, destination.name)
+            published = os.stat(
+                destination.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if (published.st_dev, published.st_ino) != expected_identity:
+                try:
+                    rename_no_replace(destination.name, source.name)
+                except OSError as rollback_error:
+                    raise BackupStoreError(
+                        "Published restore identity changed and rollback failed"
+                    ) from rollback_error
+                raise BackupStoreError("Published restore identity changed")
+        finally:
+            os.close(source_fd)
+
+
+def _windows_directory_information(
+    path: Path,
+    desired_access: int,
+    share_mode: int,
+) -> tuple[object, tuple[int, int], int, object]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _HandleInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        desired_access,
+        share_mode,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise BackupStoreError("Restore directory handle could not be opened")
+    information = _HandleInformation()
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (wintypes.HANDLE, ctypes.POINTER(_HandleInformation))
+    get_information.restype = wintypes.BOOL
+    if not get_information(handle, ctypes.byref(information)):
+        close_handle(handle)
+        raise BackupStoreError("Restore directory handle is invalid")
+    identity = (
+        information.dwVolumeSerialNumber,
+        (information.nFileIndexHigh << 32) | information.nFileIndexLow,
+    )
+    return handle, identity, information.dwFileAttributes, kernel32
+
+
+def _windows_rename_directory_handle(
+    source: Path,
+    destination: Path,
+    expected_identity: tuple[int, int],
+    parent_handle: object,
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    handle, identity, attributes, kernel32 = _windows_directory_information(
+        source,
+        0x00010000 | 0x00000080,
+        0x00000001 | 0x00000002,
+    )
+    try:
+        if attributes & 0x00000400 or identity != expected_identity:
+            raise BackupStoreError("Restore staging identity changed")
+        resolved_destination = str(destination.resolve(strict=False))
+        if resolved_destination.startswith("\\\\"):
+            destination_text = "\\??\\UNC\\" + resolved_destination.lstrip("\\")
+        else:
+            destination_text = "\\??\\" + resolved_destination
+
+        class _RenameInformation(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("RootDirectory", wintypes.HANDLE),
+                ("FileNameLength", wintypes.DWORD),
+                ("FileName", wintypes.WCHAR * 1),
+            ]
+
+        encoded_destination = destination_text.encode("utf-16-le")
+        buffer_size = (
+            _RenameInformation.FileName.offset
+            + len(encoded_destination)
+            + ctypes.sizeof(wintypes.WCHAR)
+        )
+        buffer = ctypes.create_string_buffer(buffer_size)
+        information = ctypes.cast(
+            buffer,
+            ctypes.POINTER(_RenameInformation),
+        ).contents
+        information.Flags = 0
+        information.RootDirectory = None
+        information.FileNameLength = len(encoded_destination)
+        ctypes.memmove(
+            ctypes.addressof(buffer) + _RenameInformation.FileName.offset,
+            encoded_destination,
+            len(encoded_destination),
+        )
+        setter = kernel32.SetFileInformationByHandle
+        setter.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        setter.restype = wintypes.BOOL
+        if not setter(
+            handle,
+            3,
+            ctypes.byref(buffer),
+            buffer_size,
+        ):
+            error_number = ctypes.get_last_error()
+            raise OSError(error_number, ctypes.FormatError(error_number))
+        if source.exists() or not destination.is_dir():
             raise BackupStoreError(
-                "Platform lacks atomic no-replace directory publication"
+                "Windows restore publication did not reach the exact target"
             )
-        renameat2.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
+        if directory_identity(destination) != expected_identity:
+            raise BackupStoreError("Windows restore publication identity changed")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def directory_identity(path: Path) -> tuple[int, int]:
+    value = _path("Directory", path)
+    _reject_reparse_components(value)
+    if not value.is_dir() or _is_reparse(value):
+        raise BackupStoreError("Directory identity requires a real directory")
+    if os.name == "nt":
+        handle, identity, attributes, kernel32 = _windows_directory_information(
+            value,
+            0x00000080,
+            0x00000001 | 0x00000002 | 0x00000004,
         )
-        renameat2.restype = ctypes.c_int
-        result = renameat2(
-            directory_fd,
-            os.fsencode(source.name),
-            directory_fd,
-            os.fsencode(destination.name),
-            1,
+        try:
+            if attributes & 0x00000400:
+                raise BackupStoreError("Directory identity is a reparse point")
+            return identity
+        finally:
+            kernel32.CloseHandle(handle)
+    status = os.lstat(value)
+    return status.st_dev, status.st_ino
+
+
+def _windows_remove_owned_directory(
+    path: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    handle, identity, attributes, kernel32 = _windows_directory_information(
+        path,
+        0x00010000 | 0x00000080,
+        0x00000001 | 0x00000002,
+    )
+    try:
+        if attributes & 0x00000400 or identity != expected_identity:
+            raise BackupStoreError("Owned restore directory identity changed")
+        for child in path.iterdir():
+            if _is_reparse(child):
+                if child.is_dir():
+                    child.rmdir()
+                else:
+                    child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        if any(path.iterdir()):
+            raise BackupStoreError("Owned restore directory is not empty")
+
+        class _DispositionInformation(ctypes.Structure):
+            _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+        disposition = _DispositionInformation(1)
+        setter = kernel32.SetFileInformationByHandle
+        setter.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
         )
-        if result != 0:
-            error_number = ctypes.get_errno()
-            raise OSError(
-                error_number or errno.EIO,
-                os.strerror(error_number or errno.EIO),
+        setter.restype = wintypes.BOOL
+        if not setter(
+            handle,
+            4,
+            ctypes.byref(disposition),
+            ctypes.sizeof(disposition),
+        ):
+            error_number = ctypes.get_last_error()
+            raise OSError(error_number, ctypes.FormatError(error_number))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _posix_remove_contents(directory_fd: int) -> None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    for name in os.listdir(directory_fd):
+        status = os.stat(
+            name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if stat.S_ISDIR(status.st_mode):
+            child_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                _posix_remove_contents(child_fd)
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+def remove_owned_directory(
+    path: Path,
+    parent: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    value = _path("Owned restore directory", path)
+    resolved_parent = secure_root(parent)
+    try:
+        if value.parent.resolve(strict=True) != resolved_parent:
+            raise BackupStoreError("Owned restore directory escapes its parent")
+        if directory_identity(value) != expected_identity:
+            raise BackupStoreError("Owned restore directory identity changed")
+        if os.name == "nt":
+            with _windows_publication_guard(resolved_parent):
+                _windows_remove_owned_directory(value, expected_identity)
+            return
+        with _posix_publication_directory(
+            resolved_parent,
+            resolved_parent,
+        ) as parent_fd:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
             )
+            directory_fd = os.open(value.name, flags, dir_fd=parent_fd)
+            try:
+                status = os.fstat(directory_fd)
+                if (status.st_dev, status.st_ino) != expected_identity:
+                    raise BackupStoreError("Owned restore directory identity changed")
+                _posix_remove_contents(directory_fd)
+                current = os.stat(
+                    value.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (current.st_dev, current.st_ino) != expected_identity:
+                    raise BackupStoreError("Owned restore directory identity changed")
+                os.rmdir(value.name, dir_fd=parent_fd)
+            finally:
+                os.close(directory_fd)
+    except BackupStoreError:
+        raise
+    except OSError as exc:
+        raise BackupStoreError("Owned restore directory could not be removed") from exc
 
 
 def publish_directory_no_replace(
     source: Path,
     destination: Path,
     parent: Path,
+    expected_identity: tuple[int, int],
 ) -> None:
     source_path = _path("Staging directory", source)
     destination_path = _path("Restore destination", destination)
     resolved_parent = secure_root(parent)
+    if (
+        type(expected_identity) is not tuple
+        or len(expected_identity) != 2
+        or any(type(item) is not int or item < 0 for item in expected_identity)
+    ):
+        raise BackupStoreError("Restore staging identity is invalid")
     try:
         if (
             source_path.parent.resolve(strict=True) != resolved_parent
@@ -438,13 +763,20 @@ def publish_directory_no_replace(
         _reject_reparse_components(source_path)
         if not source_path.is_dir() or _is_reparse(source_path):
             raise BackupStoreError("Restore staging directory is unsafe")
+        if directory_identity(source_path) != expected_identity:
+            raise BackupStoreError("Restore staging identity changed")
         if (
             destination_path.exists()
             or destination_path.is_symlink()
             or _is_reparse(destination_path)
         ):
             raise BackupStoreError("Restore destination already exists")
-        _rename_directory_no_replace(source_path, destination_path, resolved_parent)
+        _rename_directory_no_replace(
+            source_path,
+            destination_path,
+            resolved_parent,
+            expected_identity,
+        )
         try:
             sync_directory(resolved_parent)
         except BackupStoreError as sync_error:
@@ -453,6 +785,7 @@ def publish_directory_no_replace(
                     destination_path,
                     source_path,
                     resolved_parent,
+                    expected_identity,
                 )
                 sync_directory(resolved_parent)
             except (BackupStoreError, OSError) as rollback_error:

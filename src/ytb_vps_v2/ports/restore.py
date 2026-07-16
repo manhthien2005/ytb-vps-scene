@@ -23,4 +23,19 @@ class StagedRestoreWorkspace(Protocol):
 
     def digest(self, path: Path) -> FileDigest: ...
 
-    def publish(self, source: Path, destination: Path, parent: Path) -> None: ...
+    def identity(self, path: Path) -> tuple[int, int]: ...
+
+    def remove_owned(
+        self,
+        path: Path,
+        parent: Path,
+        expected_identity: tuple[int, int],
+    ) -> None: ...
+
+    def publish(
+        self,
+        source: Path,
+        destination: Path,
+        parent: Path,
+        expected_identity: tuple[int, int],
+    ) -> None: ...
