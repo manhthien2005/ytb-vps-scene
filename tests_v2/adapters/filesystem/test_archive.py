@@ -53,6 +53,14 @@ class VerifiedInputArchiverTests(unittest.TestCase):
         self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
         self.assertEqual(second.verified_at, "time-2")
 
+    def test_matching_repeat_retries_directory_sync(self) -> None:
+        self.archiver.archive(self.source, JobId("job-1"), "time-1")
+
+        with mock.patch.object(archive_module, "sync_directory") as sync:
+            self.archiver.archive(self.source, JobId("job-1"), "time-2")
+
+        sync.assert_called_once()
+
     def test_conflicting_existing_archive_is_never_overwritten(self) -> None:
         evidence = self.archiver.archive(self.source, JobId("job"), "time")
         destination = self.archive_root.joinpath(*evidence.archive.key.parts)

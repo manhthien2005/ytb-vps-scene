@@ -10,6 +10,8 @@ from ytb_vps_v2.adapters.filesystem.integrity import (
     digest_file,
     publish_additively,
     secure_root,
+    sync_directory,
+    verified_existing_file,
 )
 from ytb_vps_v2.domain.backup import (
     FileDigest,
@@ -62,10 +64,8 @@ class VerifiedInputArchiver:
             )
             destination = destination_for(self.root, key, initial)
             if destination.exists():
-                if digest_file(destination) != initial:
-                    raise BackupStoreError(
-                        "Existing input archive conflicts with source identity"
-                    )
+                verified_existing_file(self.root, key, initial)
+                sync_directory(destination.parent)
                 return VerifiedInputArchive(identity, _entry(key, initial), timestamp)
             temporary = destination.with_name(
                 f".{destination.name}.{uuid.uuid4().hex}.part"
@@ -74,7 +74,7 @@ class VerifiedInputArchiver:
             latest = digest_file(source)
             if copied != initial or latest != initial:
                 raise BackupStoreError("Source changed while it was being archived")
-            publish_additively(temporary, destination, initial)
+            publish_additively(temporary, destination, initial, self.root)
             return VerifiedInputArchive(identity, _entry(key, initial), timestamp)
         except BackupStoreError:
             raise

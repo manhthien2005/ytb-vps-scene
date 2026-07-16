@@ -19,10 +19,39 @@ def _path(name: str, value: object) -> Path:
     return value
 
 
+def _is_reparse(path: Path) -> bool:
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise BackupStoreError("Path metadata cannot be inspected") from exc
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    junction_check = getattr(path, "is_junction", None)
+    if junction_check is not None:
+        try:
+            if junction_check():
+                return True
+        except OSError as exc:
+            raise BackupStoreError("Junction metadata cannot be inspected") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(status, "st_file_attributes", 0)
+    return bool(reparse_flag and attributes & reparse_flag)
+
+
+def _reject_reparse_components(path: Path) -> None:
+    absolute = Path(os.path.abspath(path))
+    for candidate in reversed((absolute, *absolute.parents)):
+        if _is_reparse(candidate):
+            raise BackupStoreError("Path contains a symbolic link or reparse point")
+
+
 def secure_root(root: Path) -> Path:
     value = _path("Storage root", root)
     try:
-        if value.is_symlink() or not value.is_dir():
+        _reject_reparse_components(value)
+        if not value.is_dir():
             raise BackupStoreError("Storage root must be an existing real directory")
         return value.resolve(strict=True)
     except BackupStoreError:
@@ -34,7 +63,7 @@ def secure_root(root: Path) -> Path:
 def regular_file(path: Path) -> Path:
     value = _path("File", path)
     try:
-        if value.is_symlink():
+        if _is_reparse(value):
             raise BackupStoreError("File must not be a symbolic link")
         status = value.stat()
         if not stat.S_ISREG(status.st_mode):
@@ -81,8 +110,10 @@ def destination_for(
     try:
         for part in entry.key.parts[:-1]:
             current = current / part
+            if _is_reparse(current):
+                raise BackupStoreError("Object parent path is unsafe")
             if current.exists():
-                if current.is_symlink() or not current.is_dir():
+                if not current.is_dir():
                     raise BackupStoreError("Object parent path is unsafe")
             else:
                 current.mkdir()
@@ -91,7 +122,7 @@ def destination_for(
             resolved_root
         ):
             raise BackupStoreError("Object path escapes its storage root")
-        if destination.exists() and destination.is_symlink():
+        if _is_reparse(destination):
             raise BackupStoreError("Object destination must not be a symbolic link")
         return destination
     except BackupStoreError:
@@ -111,7 +142,7 @@ def existing_path(root: Path, key: PurePosixPath) -> Path:
     try:
         for part in entry.key.parts:
             current = current / part
-            if current.is_symlink():
+            if _is_reparse(current):
                 raise BackupStoreError("Object path contains a symbolic link")
             if not current.exists():
                 raise BackupStoreError("Object does not exist")
@@ -178,17 +209,63 @@ def sync_directory(directory: Path) -> None:
             raise BackupStoreError("Storage directory could not be synchronized") from exc
 
 
-def publish_additively(
-    temporary: Path, destination: Path, expected: FileDigest
-) -> None:
+def _publication_identity(root: Path, destination: Path) -> tuple[int, int, str]:
+    resolved_root = secure_root(root)
+    parent = destination.parent
+    _reject_reparse_components(parent)
     try:
-        os.link(temporary, destination)
-    except FileExistsError:
-        if digest_file(destination) != expected:
-            raise BackupStoreError("Existing durable object conflicts with expected bytes")
-        return
+        if not parent.is_dir():
+            raise BackupStoreError("Publication parent is not a directory")
+        resolved_parent = parent.resolve(strict=True)
+        if os.path.commonpath((str(resolved_root), str(resolved_parent))) != str(
+            resolved_root
+        ):
+            raise BackupStoreError("Publication parent escapes its storage root")
+        status = parent.stat(follow_symlinks=False)
+        return (
+            status.st_dev,
+            status.st_ino,
+            os.path.normcase(str(resolved_parent)),
+        )
+    except BackupStoreError:
+        raise
     except OSError as exc:
-        raise BackupStoreError("Durable object could not be published") from exc
-    sync_directory(destination.parent)
-    if digest_file(destination) != expected:
-        raise BackupStoreError("Published durable object failed verification")
+        raise BackupStoreError("Publication parent identity cannot be verified") from exc
+
+
+def publish_additively(
+    temporary: Path,
+    destination: Path,
+    expected: FileDigest,
+    root: Path,
+) -> None:
+    created_by_call = False
+    before = _publication_identity(root, destination)
+    try:
+        try:
+            os.link(temporary, destination)
+            created_by_call = True
+        except FileExistsError:
+            if digest_file(destination) != expected:
+                raise BackupStoreError(
+                    "Existing durable object conflicts with expected bytes"
+                )
+        except OSError as exc:
+            raise BackupStoreError("Durable object could not be published") from exc
+        after = _publication_identity(root, destination)
+        if after != before:
+            raise BackupStoreError("Publication parent changed during commit")
+        sync_directory(destination.parent)
+        if digest_file(destination) != expected:
+            raise BackupStoreError("Published durable object failed verification")
+    except BaseException:
+        if created_by_call:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                sync_directory(destination.parent)
+            except BackupStoreError:
+                pass
+        raise

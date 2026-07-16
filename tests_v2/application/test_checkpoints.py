@@ -214,7 +214,7 @@ class CheckpointPublisherTests(unittest.TestCase):
                     "cp-record-failure",
                     self.workspace,
                     self.snapshot_root,
-                    "same-time",
+                    "time-1",
                 )
         self.assertEqual(self.state.completed_checkpoints(self.job_id), ())
         manifest = CheckpointPublisher(
@@ -224,9 +224,10 @@ class CheckpointPublisherTests(unittest.TestCase):
             "cp-record-failure",
             self.workspace,
             self.snapshot_root,
-            "same-time",
+            "time-2",
         )
         self.assertEqual(manifest.checkpoint_id, "cp-record-failure")
+        self.assertEqual(manifest.created_at, "time-1")
 
     def test_missing_input_or_snapshot_failure_records_nothing(self) -> None:
         other = JobId("job-without-input")

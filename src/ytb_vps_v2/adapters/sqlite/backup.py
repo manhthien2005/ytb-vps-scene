@@ -5,7 +5,11 @@ import sqlite3
 import uuid
 from pathlib import Path, PurePosixPath
 
-from ytb_vps_v2.adapters.filesystem.integrity import digest_file, sync_directory
+from ytb_vps_v2.adapters.filesystem.integrity import (
+    digest_file,
+    publish_additively,
+    secure_root,
+)
 from ytb_vps_v2.adapters.sqlite.schema import SCHEMA_VERSION, StateStoreError
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -47,8 +51,12 @@ def create_sqlite_snapshot(
         raise StateStoreError("SQLite snapshot key is unsafe") from exc
     if placeholder.key.name != destination.name:
         raise StateStoreError("SQLite snapshot key must name its destination file")
-    if not destination.parent.is_dir() or destination.parent.is_symlink():
-        raise StateStoreError("SQLite snapshot parent must be an existing real directory")
+    try:
+        snapshot_root = secure_root(destination.parent)
+    except BackupStoreError as exc:
+        raise StateStoreError(
+            "SQLite snapshot parent must be an existing real directory"
+        ) from exc
     if destination.exists() or destination.is_symlink():
         raise StateStoreError("SQLite snapshot destination already exists")
 
@@ -57,7 +65,6 @@ def create_sqlite_snapshot(
     )
     target: sqlite3.Connection | None = None
     inspection: sqlite3.Connection | None = None
-    published_by_call = False
     try:
         target = sqlite3.connect(temporary, isolation_level=None)
         _backup_connection(connection, target)
@@ -75,28 +82,11 @@ def create_sqlite_snapshot(
 
         _fsync_file(temporary)
         digest = digest_file(temporary)
-        try:
-            os.link(temporary, destination)
-            published_by_call = True
-        except OSError as exc:
-            raise StateStoreError("SQLite snapshot could not be published") from exc
-        sync_directory(destination.parent)
-        if digest_file(destination) != digest:
-            raise StateStoreError("SQLite snapshot failed published verification")
+        publish_additively(temporary, destination, digest, snapshot_root)
         return ManifestEntry(key, digest)
     except StateStoreError:
-        if published_by_call:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
         raise
     except (sqlite3.DatabaseError, BackupStoreError, OSError) as exc:
-        if published_by_call:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
         raise StateStoreError("SQLite backup snapshot failed") from exc
     finally:
         if target is not None:

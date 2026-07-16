@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from ytb_vps_v2.adapters.filesystem.integrity import digest_file
+from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.sqlite import backup as backup_module
 from ytb_vps_v2.adapters.sqlite.backup import create_sqlite_snapshot
 from ytb_vps_v2.adapters.sqlite.schema import (
@@ -228,17 +229,11 @@ class SqliteBackupSnapshotTests(unittest.TestCase):
                 self.assertEqual(tuple(self.snapshot_dir.glob("*.part")), ())
 
     def test_post_publish_verification_failure_removes_only_owned_snapshot(self) -> None:
-        real_digest = backup_module.digest_file
-        calls = 0
-
-        def fail_second_digest(path: Path) -> FileDigest:
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                raise BackupStoreError("injected final verification failure")
-            return real_digest(path)
-
-        with mock.patch.object(backup_module, "digest_file", fail_second_digest):
+        with mock.patch.object(
+            integrity_module,
+            "digest_file",
+            side_effect=BackupStoreError("injected final verification failure"),
+        ):
             with self.assertRaises(StateStoreError):
                 create_sqlite_snapshot(self.connection, self.destination, self.key)
 

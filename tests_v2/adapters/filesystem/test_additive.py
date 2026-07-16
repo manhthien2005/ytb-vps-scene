@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 from unittest import mock
 
 from ytb_vps_v2.adapters.filesystem import additive as additive_module
+from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.filesystem.additive import LocalAdditiveObjectStore
 from ytb_vps_v2.adapters.filesystem.integrity import digest_file
 from ytb_vps_v2.domain.backup import FileDigest
@@ -43,6 +44,51 @@ class LocalAdditiveObjectStoreTests(unittest.TestCase):
 
         self.assertEqual(result.digest, self.expected)
         self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
+
+    def test_matching_existing_object_retries_directory_sync(self) -> None:
+        self.store.put(self.source, self.key, self.expected)
+
+        with mock.patch.object(additive_module, "sync_directory") as sync:
+            self.store.put(self.source, self.key, self.expected)
+
+        sync.assert_called_once()
+
+    def test_directory_sync_failure_cannot_become_false_success_on_retry(self) -> None:
+        destination = self.root.joinpath(*self.key.parts)
+        with mock.patch.object(
+            integrity_module,
+            "sync_directory",
+            side_effect=BackupStoreError("injected directory sync failure"),
+        ):
+            with self.assertRaises(BackupStoreError):
+                self.store.put(self.source, self.key, self.expected)
+
+        self.assertFalse(destination.exists())
+        result = self.store.put(self.source, self.key, self.expected)
+        self.assertEqual(result.digest, self.expected)
+
+    def test_parent_identity_change_during_publish_is_detected_and_cleaned(self) -> None:
+        destination = self.root.joinpath(*self.key.parts)
+        with mock.patch.object(
+            integrity_module,
+            "_publication_identity",
+            side_effect=((1, 1, "before"), (2, 2, "after")),
+        ):
+            with self.assertRaises(BackupStoreError):
+                self.store.put(self.source, self.key, self.expected)
+
+        self.assertFalse(destination.exists())
+
+    def test_reparse_or_junction_root_is_rejected(self) -> None:
+        path_type = type(self.root)
+        with mock.patch.object(
+            path_type,
+            "is_junction",
+            return_value=True,
+            create=not hasattr(path_type, "is_junction"),
+        ):
+            with self.assertRaises(BackupStoreError):
+                LocalAdditiveObjectStore(self.root)
 
     def test_conflicting_existing_object_is_never_overwritten(self) -> None:
         destination = self.root.joinpath(*self.key.parts)

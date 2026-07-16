@@ -203,10 +203,20 @@ def canonical_manifest_bytes(manifest: CheckpointManifest) -> bytes:
         "state_snapshot": _entry_dict(manifest.state_snapshot),
         "version": manifest.version,
     }
-    return (
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
-    ).encode("utf-8")
+    try:
+        return (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise DomainInvariantError(
+            "Checkpoint manifest contains invalid Unicode"
+        ) from exc
 
 
 def _closed_dict(name: str, value: object, fields: set[str]) -> dict[str, object]:

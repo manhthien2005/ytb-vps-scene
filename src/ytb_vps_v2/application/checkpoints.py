@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.domain.backup import (
@@ -192,10 +193,23 @@ class CheckpointPublisher:
                     handle.flush()
                     os.fsync(handle.fileno())
                 manifest_entry = ManifestEntry(manifest_key, _bytes_digest(raw))
-                self._put_exact(manifest_path, manifest_entry)
-                published = self.object_store.read_bytes(
-                    manifest_key, _MAX_MANIFEST_BYTES
-                )
+                try:
+                    self._put_exact(manifest_path, manifest_entry)
+                    published = self.object_store.read_bytes(
+                        manifest_key, _MAX_MANIFEST_BYTES
+                    )
+                except (CheckpointError, BackupStoreError):
+                    published = self.object_store.read_bytes(
+                        manifest_key, _MAX_MANIFEST_BYTES
+                    )
+                    existing = parse_manifest_bytes(published)
+                    if replace(existing, created_at=manifest.created_at) != manifest:
+                        raise
+                    manifest = existing
+                    raw = published
+                    manifest_entry = ManifestEntry(
+                        manifest_key, _bytes_digest(published)
+                    )
                 if published != raw or parse_manifest_bytes(published) != manifest:
                     raise CheckpointError(
                         "Published checkpoint manifest failed read-back verification"
@@ -205,7 +219,7 @@ class CheckpointPublisher:
                     identifier,
                     manifest_entry,
                     state_entry,
-                    timestamp,
+                    manifest.created_at,
                 )
                 return manifest
         except CheckpointError:

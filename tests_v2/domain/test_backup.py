@@ -209,6 +209,13 @@ class ManifestSerializationTests(unittest.TestCase):
         with self.assertRaises(DomainInvariantError):
             parse_manifest_bytes(raw)
 
+    def test_parser_wraps_escaped_lone_surrogate_as_domain_error(self) -> None:
+        raw = canonical_manifest_bytes(manifest()).replace(
+            b'"source.mp4"', b'"\\ud800.mp4"'
+        )
+        with self.assertRaises(DomainInvariantError):
+            parse_manifest_bytes(raw)
+
 
 if __name__ == "__main__":
     unittest.main()

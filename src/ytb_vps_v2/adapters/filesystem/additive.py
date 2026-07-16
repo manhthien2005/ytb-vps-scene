@@ -10,6 +10,8 @@ from ytb_vps_v2.adapters.filesystem.integrity import (
     existing_path,
     publish_additively,
     secure_root,
+    sync_directory,
+    verified_existing_file,
 )
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
 from ytb_vps_v2.ports.backup import BackupStoreError
@@ -33,10 +35,8 @@ class LocalAdditiveObjectStore:
                 raise BackupStoreError("Source does not match expected object digest")
             destination = destination_for(self.root, key, expected)
             if destination.exists():
-                if digest_file(destination) != expected:
-                    raise BackupStoreError(
-                        "Existing additive object conflicts with expected bytes"
-                    )
+                verified_existing_file(self.root, key, expected)
+                sync_directory(destination.parent)
                 return ManifestEntry(key, expected)
             temporary = destination.with_name(
                 f".{destination.name}.{uuid.uuid4().hex}.part"
@@ -44,7 +44,7 @@ class LocalAdditiveObjectStore:
             copied = _copy_to_temp(source, temporary)
             if copied != expected or digest_file(source) != expected:
                 raise BackupStoreError("Source changed during additive copy")
-            publish_additively(temporary, destination, expected)
+            publish_additively(temporary, destination, expected, self.root)
             return ManifestEntry(key, expected)
         except BackupStoreError:
             raise
