@@ -33,6 +33,13 @@ from ytb_vps_v2.domain.models import (
     WorkUnit,
 )
 from ytb_vps_v2.domain.parts import MAX_PART_SECONDS, target_part_count
+from ytb_vps_v2.domain.restore import (
+    CleanupDecision,
+    CleanupDenialReason,
+    CleanupProof,
+    RemoteObjectEvidence,
+    RestoreResult,
+)
 from ytb_vps_v2.domain.timeline import FrameInterval, Seconds, Timeline, to_fraction
 
 
@@ -43,6 +50,9 @@ __all__ = [
     "Cue",
     "CheckpointManifest",
     "CheckpointRecord",
+    "CleanupDecision",
+    "CleanupDenialReason",
+    "CleanupProof",
     "DomainInvariantError",
     "FileDigest",
     "Fingerprint",
@@ -56,6 +66,8 @@ __all__ = [
     "Part",
     "PipelineMode",
     "RegionKind",
+    "RemoteObjectEvidence",
+    "RestoreResult",
     "Seconds",
     "StageName",
     "StageConfigFingerprint",
