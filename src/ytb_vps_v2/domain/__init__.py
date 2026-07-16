@@ -1,3 +1,12 @@
+from ytb_vps_v2.domain.backup import (
+    CheckpointManifest,
+    FileDigest,
+    ManifestEntry,
+    SourceIdentity,
+    VerifiedInputArchive,
+    canonical_manifest_bytes,
+    parse_manifest_bytes,
+)
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import (
     Fingerprint,
@@ -31,7 +40,9 @@ __all__ = [
     "BlurRegion",
     "BoundingBox",
     "Cue",
+    "CheckpointManifest",
     "DomainInvariantError",
+    "FileDigest",
     "Fingerprint",
     "FrameInterval",
     "Job",
@@ -39,6 +50,7 @@ __all__ = [
     "InvalidationPlan",
     "MAX_PART_SECONDS",
     "MediaIdentity",
+    "ManifestEntry",
     "Part",
     "PipelineMode",
     "RegionKind",
@@ -47,11 +59,15 @@ __all__ = [
     "StageConfigFingerprint",
     "STAGE_ORDER",
     "Timeline",
+    "SourceIdentity",
+    "VerifiedInputArchive",
     "WorkStatus",
     "WorkUnit",
     "target_part_count",
+    "canonical_manifest_bytes",
     "fingerprint_value",
     "stage_config_fingerprints",
     "stage_config_projection",
+    "parse_manifest_bytes",
     "to_fraction",
 ]
