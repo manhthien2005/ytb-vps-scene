@@ -49,6 +49,11 @@ def _reject_reparse_components(path: Path) -> None:
             raise BackupStoreError("Path contains a symbolic link or reparse point")
 
 
+def reject_reparse_components(path: Path) -> None:
+    value = _path("Path", path)
+    _reject_reparse_components(value)
+
+
 def secure_root(root: Path) -> Path:
     value = _path("Storage root", root)
     try:

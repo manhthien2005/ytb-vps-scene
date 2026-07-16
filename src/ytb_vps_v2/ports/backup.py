@@ -5,6 +5,7 @@ from typing import Protocol, runtime_checkable
 
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry, VerifiedInputArchive
 from ytb_vps_v2.domain.models import JobId
+from ytb_vps_v2.domain.restore import RemoteObjectEvidence
 
 
 class BackupStoreError(RuntimeError):
@@ -25,6 +26,21 @@ class AdditiveObjectStore(Protocol):
     ) -> ManifestEntry: ...
 
     def read_bytes(self, key: PurePosixPath, max_bytes: int) -> bytes: ...
+
+    def verify(
+        self,
+        key: PurePosixPath,
+        expected: FileDigest,
+        observed_at: int,
+        method: str,
+    ) -> RemoteObjectEvidence: ...
+
+    def materialize(
+        self,
+        key: PurePosixPath,
+        destination: Path,
+        expected: FileDigest,
+    ) -> ManifestEntry: ...
 
 
 @runtime_checkable

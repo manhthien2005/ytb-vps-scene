@@ -4,13 +4,19 @@ from ytb_vps_v2.ports.backup import (
     FileIntegrity,
     SourceArchiver,
 )
+from ytb_vps_v2.ports.cleanup import (
+    DeletionTargetPolicy,
+    UnsafeDeletionTargetError,
+)
 from ytb_vps_v2.ports.state import StateRepository
 
 
 __all__ = [
     "AdditiveObjectStore",
     "BackupStoreError",
+    "DeletionTargetPolicy",
     "FileIntegrity",
     "SourceArchiver",
     "StateRepository",
+    "UnsafeDeletionTargetError",
 ]

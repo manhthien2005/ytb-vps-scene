@@ -14,6 +14,8 @@ from ytb_vps_v2.adapters.filesystem.integrity import (
     verified_existing_file,
 )
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
+from ytb_vps_v2.domain.errors import DomainInvariantError
+from ytb_vps_v2.domain.restore import RemoteObjectEvidence
 from ytb_vps_v2.ports.backup import BackupStoreError
 
 
@@ -75,3 +77,77 @@ class LocalAdditiveObjectStore:
             raise
         except OSError as exc:
             raise BackupStoreError("Object could not be read") from exc
+
+    def verify(
+        self,
+        key: PurePosixPath,
+        expected: FileDigest,
+        observed_at: int,
+        method: str,
+    ) -> RemoteObjectEvidence:
+        if type(expected) is not FileDigest:
+            raise BackupStoreError("Expected object digest must be FileDigest")
+        try:
+            path = existing_path(self.root, key)
+            observed = digest_file(path)
+            if observed != expected:
+                raise BackupStoreError("Remote object does not match expected digest")
+            return RemoteObjectEvidence(
+                ManifestEntry(key, observed),
+                observed_at,
+                method,
+            )
+        except BackupStoreError:
+            raise
+        except DomainInvariantError as exc:
+            raise BackupStoreError("Remote verification arguments are invalid") from exc
+        except OSError as exc:
+            raise BackupStoreError("Remote object verification failed") from exc
+
+    def materialize(
+        self,
+        key: PurePosixPath,
+        destination: Path,
+        expected: FileDigest,
+    ) -> ManifestEntry:
+        if type(expected) is not FileDigest:
+            raise BackupStoreError("Expected object digest must be FileDigest")
+        if not isinstance(destination, Path) or not destination.is_absolute():
+            raise BackupStoreError("Materialization destination must be an absolute Path")
+        temporary: Path | None = None
+        try:
+            source = verified_existing_file(self.root, key, expected)
+            parent = secure_root(destination.parent)
+            prepared = destination_for(
+                parent,
+                PurePosixPath(destination.name),
+                expected,
+            )
+            if prepared != destination:
+                raise BackupStoreError("Materialization destination is not canonical")
+            if destination.exists():
+                verified_existing_file(
+                    parent,
+                    PurePosixPath(destination.name),
+                    expected,
+                )
+                sync_directory(parent)
+                return ManifestEntry(key, expected)
+            temporary = destination.with_name(
+                f".{destination.name}.{uuid.uuid4().hex}.part"
+            )
+            copied = _copy_to_temp(source, temporary)
+            if copied != expected or digest_file(source) != expected:
+                raise BackupStoreError("Remote object changed during materialization")
+            publish_additively(temporary, destination, expected, parent)
+            return ManifestEntry(key, expected)
+        except BackupStoreError:
+            raise
+        except (DomainInvariantError, OSError) as exc:
+            raise BackupStoreError("Object materialization failed") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
