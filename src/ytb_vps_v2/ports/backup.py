@@ -23,3 +23,14 @@ class AdditiveObjectStore(Protocol):
     def put(
         self, source: Path, key: PurePosixPath, expected: FileDigest
     ) -> ManifestEntry: ...
+
+    def read_bytes(self, key: PurePosixPath, max_bytes: int) -> bytes: ...
+
+
+@runtime_checkable
+class FileIntegrity(Protocol):
+    def secure_root(self, root: Path) -> Path: ...
+
+    def existing(
+        self, root: Path, key: PurePosixPath, expected: FileDigest
+    ) -> Path: ...

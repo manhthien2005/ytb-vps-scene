@@ -85,6 +85,17 @@ class LocalAdditiveObjectStoreTests(unittest.TestCase):
         self.assertFalse(hasattr(self.store, "delete"))
         self.assertFalse(hasattr(self.store, "replace"))
 
+    def test_reads_small_objects_with_an_explicit_size_bound(self) -> None:
+        self.store.put(self.source, self.key, self.expected)
+
+        self.assertEqual(self.store.read_bytes(self.key, 1024), b"artifact-bytes")
+        with self.assertRaises(BackupStoreError):
+            self.store.read_bytes(self.key, 3)
+        with self.assertRaises(BackupStoreError):
+            self.store.read_bytes(PurePosixPath("missing.json"), 1024)
+        with self.assertRaises(BackupStoreError):
+            self.store.read_bytes(PurePosixPath("../escape.json"), 1024)
+
 
 if __name__ == "__main__":
     unittest.main()

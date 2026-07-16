@@ -100,6 +100,54 @@ def destination_for(
         raise BackupStoreError("Object destination cannot be prepared") from exc
 
 
+def existing_path(root: Path, key: PurePosixPath) -> Path:
+    try:
+        entry = ManifestEntry(key, FileDigest(0, "0" * 64))
+    except DomainInvariantError as exc:
+        raise BackupStoreError("Object key is unsafe") from exc
+    resolved_root = secure_root(root)
+    candidate = resolved_root.joinpath(*entry.key.parts)
+    current = resolved_root
+    try:
+        for part in entry.key.parts:
+            current = current / part
+            if current.is_symlink():
+                raise BackupStoreError("Object path contains a symbolic link")
+            if not current.exists():
+                raise BackupStoreError("Object does not exist")
+        resolved = candidate.resolve(strict=True)
+        if os.path.commonpath((str(resolved_root), str(resolved))) != str(
+            resolved_root
+        ):
+            raise BackupStoreError("Object path escapes its storage root")
+        return regular_file(candidate)
+    except BackupStoreError:
+        raise
+    except OSError as exc:
+        raise BackupStoreError("Object path cannot be verified") from exc
+
+
+def verified_existing_file(
+    root: Path, key: PurePosixPath, expected: FileDigest
+) -> Path:
+    if type(expected) is not FileDigest:
+        raise BackupStoreError("Expected file digest must be FileDigest")
+    candidate = existing_path(root, key)
+    if digest_file(candidate) != expected:
+        raise BackupStoreError("Existing file does not match expected digest")
+    return candidate
+
+
+class LocalFileIntegrity:
+    def secure_root(self, root: Path) -> Path:
+        return secure_root(root)
+
+    def existing(
+        self, root: Path, key: PurePosixPath, expected: FileDigest
+    ) -> Path:
+        return verified_existing_file(root, key, expected)
+
+
 def copy_to_temp(source: Path, temporary: Path) -> FileDigest:
     source_file = regular_file(source)
     temporary_path = _path("Temporary file", temporary)

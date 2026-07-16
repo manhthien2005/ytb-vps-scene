@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
 from ytb_vps_v2.domain.backup import (
@@ -41,6 +42,10 @@ class StateRepository(Protocol):
     def completed_checkpoints(
         self, job_id: JobId
     ) -> tuple[CheckpointRecord, ...]: ...
+
+    def create_snapshot(
+        self, destination: Path, key: PurePosixPath
+    ) -> ManifestEntry: ...
 
     def put_work_unit(self, job_id: JobId, unit: WorkUnit, at: str) -> None: ...
 

@@ -76,6 +76,15 @@ class SqliteStateStore:
             self.connection.close()
             self.connection = None
 
+    def create_snapshot(
+        self, destination: Path, key: PurePosixPath
+    ) -> ManifestEntry:
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        from ytb_vps_v2.adapters.sqlite.backup import create_sqlite_snapshot
+
+        return create_sqlite_snapshot(self.connection, destination, key)
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self.connection
