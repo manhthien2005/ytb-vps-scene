@@ -207,6 +207,24 @@ class CheckpointRestorerTests(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertEqual(self._temporary_restore_paths(), ())
 
+    def test_migration_interruption_removes_owned_staging(self) -> None:
+        target = self.restore_parent / "migration-failure"
+        with mock.patch.object(
+            self.restore_workspace,
+            "migrate_state",
+            side_effect=RuntimeError("injected migration interruption"),
+        ):
+            with self.assertRaises(RestoreError):
+                self.restorer.restore(
+                    self.manifest_entry,
+                    target,
+                    self.restore_parent,
+                    100,
+                )
+
+        self.assertFalse(target.exists())
+        self.assertEqual(self._temporary_restore_paths(), ())
+
     def test_staging_swap_on_failure_never_deletes_replacement(self) -> None:
         displaced = self.restore_parent / "displaced-owned-staging"
         replacement_path: Path | None = None
