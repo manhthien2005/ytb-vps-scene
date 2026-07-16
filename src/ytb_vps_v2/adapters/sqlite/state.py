@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError, connect_database
+from ytb_vps_v2.application.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
-from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus, WorkUnit
+from ytb_vps_v2.domain.models import (
+    Artifact,
+    JobId,
+    StageName,
+    WorkStatus,
+    WorkUnit,
+)
 from ytb_vps_v2.domain.state import RetryEvent, StateTransitionError
 
 
@@ -302,3 +310,137 @@ class SqliteStateStore:
             )
             for row in rows
         )
+
+    def commit_artifact(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        artifact: Artifact,
+        at: str,
+    ) -> None:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        if type(artifact) is not Artifact:
+            raise StateStoreError("Committed artifact must be Artifact")
+        timestamp = _text("Artifact commit timestamp", at, 128)
+        dependencies_json = json.dumps(
+            artifact.dependencies,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT stage, status FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if row is None or row["status"] != WorkStatus.RUNNING.value:
+                raise StateTransitionError(
+                    f"Artifact owner work unit is not running: {key}"
+                )
+            if row["stage"] != artifact.owner.value:
+                raise StateTransitionError(
+                    f"Artifact owner does not match work unit stage: {key}"
+                )
+            connection.execute(
+                "INSERT INTO artifacts("
+                "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
+                "dependencies_json, is_valid, committed_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                (
+                    job.value,
+                    artifact.name,
+                    str(artifact.relative_path),
+                    artifact.size_bytes,
+                    artifact.sha256,
+                    artifact.owner.value,
+                    dependencies_json,
+                    timestamp,
+                ),
+            )
+            cursor = connection.execute(
+                "UPDATE work_units SET status=?, error_kind=NULL, "
+                "error_message=NULL, updated_at=? "
+                "WHERE job_id=? AND unit_key=? AND status=?",
+                (
+                    WorkStatus.SUCCEEDED.value,
+                    timestamp,
+                    job.value,
+                    key,
+                    WorkStatus.RUNNING.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StateTransitionError(
+                    f"Work unit changed before artifact commit: {key}"
+                )
+
+    def valid_artifacts(self, job_id: JobId) -> tuple[Artifact, ...]:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            rows = self.connection.execute(
+                "SELECT name, relative_path, size_bytes, sha256, owner_stage, "
+                "dependencies_json FROM artifacts "
+                "WHERE job_id=? AND is_valid=1 ORDER BY name",
+                (job.value,),
+            ).fetchall()
+            return tuple(
+                Artifact(
+                    row["name"],
+                    PurePosixPath(row["relative_path"]),
+                    row["size_bytes"],
+                    row["sha256"],
+                    StageName(row["owner_stage"]),
+                    tuple(json.loads(row["dependencies_json"])),
+                )
+                for row in rows
+            )
+        except (sqlite3.DatabaseError, ValueError, TypeError) as exc:
+            raise StateStoreError("Unable to read valid artifacts") from exc
+
+    def apply_invalidation(
+        self,
+        job_id: JobId,
+        plan: InvalidationPlan,
+        at: str,
+    ) -> tuple[str, ...]:
+        job = _job_id(job_id)
+        if type(plan) is not InvalidationPlan:
+            raise StateStoreError("Invalidation must be InvalidationPlan")
+        timestamp = _text("Invalidation timestamp", at, 128)
+        if not plan.affected_stages:
+            return ()
+        stages = tuple(stage.value for stage in plan.affected_stages)
+        placeholders = ",".join("?" for _ in stages)
+        with self._transaction() as connection:
+            job_exists = connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone()
+            if job_exists is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = connection.execute(
+                f"SELECT unit_key FROM work_units WHERE job_id=? "
+                f"AND stage IN ({placeholders}) AND status<>? ORDER BY unit_key",
+                (job.value, *stages, WorkStatus.INVALID.value),
+            ).fetchall()
+            connection.execute(
+                f"UPDATE work_units SET status=?, error_kind=NULL, "
+                f"error_message=NULL, updated_at=? WHERE job_id=? "
+                f"AND stage IN ({placeholders}) AND status<>?",
+                (
+                    WorkStatus.INVALID.value,
+                    timestamp,
+                    job.value,
+                    *stages,
+                    WorkStatus.INVALID.value,
+                ),
+            )
+            connection.execute(
+                f"UPDATE artifacts SET is_valid=0 WHERE job_id=? "
+                f"AND owner_stage IN ({placeholders}) AND is_valid=1",
+                (job.value, *stages),
+            )
+            return tuple(row["unit_key"] for row in rows)

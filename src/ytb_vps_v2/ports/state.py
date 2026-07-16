@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from ytb_vps_v2.application.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
-from ytb_vps_v2.domain.models import JobId, WorkUnit
+from ytb_vps_v2.domain.models import Artifact, JobId, WorkUnit
 from ytb_vps_v2.domain.state import RetryEvent
 
 
@@ -35,3 +36,20 @@ class StateRepository(Protocol):
     def recover_stale_work(self, at: str) -> tuple[tuple[JobId, str], ...]: ...
 
     def retry_events(self, job_id: JobId, unit_key: str) -> tuple[RetryEvent, ...]: ...
+
+    def commit_artifact(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        artifact: Artifact,
+        at: str,
+    ) -> None: ...
+
+    def valid_artifacts(self, job_id: JobId) -> tuple[Artifact, ...]: ...
+
+    def apply_invalidation(
+        self,
+        job_id: JobId,
+        plan: InvalidationPlan,
+        at: str,
+    ) -> tuple[str, ...]: ...
