@@ -6,6 +6,7 @@ from ytb_vps_v2.domain.fingerprints import (
     stage_config_fingerprints,
     stage_config_projection,
 )
+from ytb_vps_v2.domain.invalidation import InvalidationPlan, STAGE_ORDER
 from ytb_vps_v2.domain.models import (
     Artifact,
     BlurRegion,
@@ -35,6 +36,7 @@ __all__ = [
     "FrameInterval",
     "Job",
     "JobId",
+    "InvalidationPlan",
     "MAX_PART_SECONDS",
     "MediaIdentity",
     "Part",
@@ -43,6 +45,7 @@ __all__ = [
     "Seconds",
     "StageName",
     "StageConfigFingerprint",
+    "STAGE_ORDER",
     "Timeline",
     "WorkStatus",
     "WorkUnit",

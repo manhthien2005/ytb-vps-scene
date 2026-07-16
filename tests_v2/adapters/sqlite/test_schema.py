@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ytb_vps_v2.adapters.sqlite.schema import (
     SCHEMA_VERSION,
@@ -83,6 +84,19 @@ class SqliteSchemaTests(unittest.TestCase):
         wrong_name = self.path.with_name("job.sqlite")
         with self.assertRaisesRegex(StateStoreError, "job-v2.sqlite"):
             connect_database(wrong_name)
+
+    def test_degraded_durability_pragma_is_rejected(self) -> None:
+        memory_connection = sqlite3.connect(":memory:", isolation_level=None)
+
+        with patch(
+            "ytb_vps_v2.adapters.sqlite.schema.sqlite3.connect",
+            return_value=memory_connection,
+        ):
+            with self.assertRaisesRegex(StateStoreError, "durability"):
+                connect_database(self.path)
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            memory_connection.execute("SELECT 1")
 
 
 if __name__ == "__main__":

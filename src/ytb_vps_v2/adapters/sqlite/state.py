@@ -7,8 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError, connect_database
-from ytb_vps_v2.application.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
+from ytb_vps_v2.domain.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.models import (
     Artifact,
     JobId,
@@ -85,6 +85,12 @@ class SqliteStateStore:
             if connection.in_transaction:
                 connection.rollback()
             raise StateStoreError("SQLite state transaction failed") from exc
+        except BaseException as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if isinstance(exc, (ValueError, TypeError)):
+                raise StateStoreError("Stored SQLite state is invalid") from exc
+            raise
 
     def create_job(
         self,
@@ -386,17 +392,42 @@ class SqliteStateStore:
                 "WHERE job_id=? AND is_valid=1 ORDER BY name",
                 (job.value,),
             ).fetchall()
-            return tuple(
-                Artifact(
-                    row["name"],
-                    PurePosixPath(row["relative_path"]),
-                    row["size_bytes"],
-                    row["sha256"],
-                    StageName(row["owner_stage"]),
-                    tuple(json.loads(row["dependencies_json"])),
+            artifacts: list[Artifact] = []
+            for row in rows:
+                raw_dependencies = row["dependencies_json"]
+                decoded = json.loads(raw_dependencies)
+                if type(decoded) is not list or any(
+                    type(item) is not str
+                    or not item
+                    or item != item.strip()
+                    for item in decoded
+                ):
+                    raise StateStoreError(
+                        "Stored artifact dependencies must be a JSON string array"
+                    )
+                dependencies = tuple(decoded)
+                canonical = json.dumps(
+                    dependencies,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
                 )
-                for row in rows
-            )
+                if raw_dependencies != canonical:
+                    raise StateStoreError(
+                        "Stored artifact dependencies are not canonical JSON"
+                    )
+                artifacts.append(
+                    Artifact(
+                        row["name"],
+                        PurePosixPath(row["relative_path"]),
+                        row["size_bytes"],
+                        row["sha256"],
+                        StageName(row["owner_stage"]),
+                        dependencies,
+                    )
+                )
+            return tuple(artifacts)
+        except StateStoreError:
+            raise
         except (sqlite3.DatabaseError, ValueError, TypeError) as exc:
             raise StateStoreError("Unable to read valid artifacts") from exc
 

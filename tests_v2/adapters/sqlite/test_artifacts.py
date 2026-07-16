@@ -120,6 +120,56 @@ class SqliteArtifactTests(unittest.TestCase):
             ("first",),
         )
 
+    def test_failed_and_succeeded_units_reject_new_commits_and_restarts(self) -> None:
+        self._running("ocr:failed", StageName.OCR)
+        self.store.fail_work_unit(
+            self.job_id,
+            "ocr:failed",
+            "ProviderError",
+            "failed",
+            "failure",
+        )
+        with self.assertRaises(StateTransitionError):
+            self.store.commit_artifact(
+                self.job_id,
+                "ocr:failed",
+                self._artifact("failed", StageName.OCR),
+                "commit-failed",
+            )
+
+        self._running("ocr:succeeded", StageName.OCR)
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:succeeded",
+            self._artifact("succeeded", StageName.OCR),
+            "commit-success",
+        )
+        with self.assertRaises(StateTransitionError):
+            self.store.start_work_unit(self.job_id, "ocr:succeeded", "restart")
+        with self.assertRaises(StateTransitionError):
+            self.store.commit_artifact(
+                self.job_id,
+                "ocr:succeeded",
+                self._artifact("second-success", StageName.OCR),
+                "commit-again",
+            )
+
+    def test_malformed_artifact_dependency_json_is_rejected(self) -> None:
+        self._running("ocr:1", StageName.OCR)
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:1",
+            self._artifact("ocr-one", StageName.OCR),
+            "committed",
+        )
+        self.store.connection.execute(
+            "UPDATE artifacts SET dependencies_json=? WHERE job_id=?",
+            ('"abc"', self.job_id.value),
+        )
+
+        with self.assertRaises(StateStoreError):
+            self.store.valid_artifacts(self.job_id)
+
     def test_invalidation_preserves_independent_units_and_artifacts(self) -> None:
         for index, stage in enumerate(StageName):
             key = f"{stage.value.lower()}:1"

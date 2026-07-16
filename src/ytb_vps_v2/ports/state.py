@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ytb_vps_v2.application.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
+from ytb_vps_v2.domain.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.models import Artifact, JobId, WorkUnit
 from ytb_vps_v2.domain.state import RetryEvent
 

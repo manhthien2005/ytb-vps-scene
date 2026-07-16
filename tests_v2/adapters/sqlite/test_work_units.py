@@ -122,6 +122,27 @@ class SqliteWorkUnitTests(unittest.TestCase):
             self.assertEqual(unit.status, WorkStatus.PENDING)
             self.assertEqual(unit.attempts, 1)
 
+    def test_corrupt_row_conversion_rolls_back_and_releases_transaction(self) -> None:
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("ocr:corrupt", StageName.OCR),
+            "t1",
+        )
+        self.store.connection.execute(
+            "UPDATE work_units SET stage='BROKEN' WHERE job_id=? AND unit_key=?",
+            (self.job_id.value, "ocr:corrupt"),
+        )
+
+        with self.assertRaises(StateStoreError):
+            self.store.start_work_unit(self.job_id, "ocr:corrupt", "t2")
+
+        row = self.store.connection.execute(
+            "SELECT status FROM work_units WHERE job_id=? AND unit_key=?",
+            (self.job_id.value, "ocr:corrupt"),
+        ).fetchone()
+        self.assertEqual(row["status"], WorkStatus.PENDING.value)
+        self.assertFalse(self.store.connection.in_transaction)
+
 
 if __name__ == "__main__":
     unittest.main()

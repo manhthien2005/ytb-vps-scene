@@ -105,9 +105,19 @@ def connect_database(path: Path) -> sqlite3.Connection:
         connection = sqlite3.connect(path, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA busy_timeout=5000")
+        foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
+        if (
+            foreign_keys != 1
+            or str(journal_mode).lower() != "wal"
+            or synchronous != 2
+        ):
+            raise StateStoreError(
+                "SQLite durability settings could not be enforced"
+            )
         migrate(connection)
         return connection
     except StateStoreError:

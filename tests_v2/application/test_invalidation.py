@@ -176,6 +176,12 @@ class InvalidationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             STAGE_DEPENDENCIES[StageName.OCR] = ()  # type: ignore[index]
 
+    def test_invalidation_plan_is_an_inward_domain_contract(self) -> None:
+        self.assertEqual(
+            InvalidationPlan.__module__,
+            "ytb_vps_v2.domain.invalidation",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
