@@ -1,4 +1,11 @@
 from ytb_vps_v2.domain.errors import DomainInvariantError
+from ytb_vps_v2.domain.fingerprints import (
+    Fingerprint,
+    StageConfigFingerprint,
+    fingerprint_value,
+    stage_config_fingerprints,
+    stage_config_projection,
+)
 from ytb_vps_v2.domain.models import (
     Artifact,
     BlurRegion,
@@ -24,6 +31,7 @@ __all__ = [
     "BoundingBox",
     "Cue",
     "DomainInvariantError",
+    "Fingerprint",
     "FrameInterval",
     "Job",
     "JobId",
@@ -34,9 +42,13 @@ __all__ = [
     "RegionKind",
     "Seconds",
     "StageName",
+    "StageConfigFingerprint",
     "Timeline",
     "WorkStatus",
     "WorkUnit",
     "target_part_count",
+    "fingerprint_value",
+    "stage_config_fingerprints",
+    "stage_config_projection",
     "to_fraction",
 ]
