@@ -7,12 +7,12 @@ from ytb_vps_v2.adapters.sqlite.schema import (
 )
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.adapters.sqlite.restore import (
-    RestoreArtifact,
-    RestoreLayout,
+    LocalStagedRestoreWorkspace,
     StagedRestoreError,
     inspect_staged_state,
     migrate_staged_state,
 )
+from ytb_vps_v2.domain.restore import RestoreArtifact, RestoreLayout
 
 
 __all__ = [
@@ -27,4 +27,5 @@ __all__ = [
     "inspect_staged_state",
     "RestoreArtifact",
     "RestoreLayout",
+    "LocalStagedRestoreWorkspace",
 ]

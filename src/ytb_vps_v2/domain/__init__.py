@@ -38,6 +38,8 @@ from ytb_vps_v2.domain.restore import (
     CleanupDenialReason,
     CleanupProof,
     RemoteObjectEvidence,
+    RestoreArtifact,
+    RestoreLayout,
     RestoreResult,
 )
 from ytb_vps_v2.domain.timeline import FrameInterval, Seconds, Timeline, to_fraction
@@ -67,6 +69,8 @@ __all__ = [
     "PipelineMode",
     "RegionKind",
     "RemoteObjectEvidence",
+    "RestoreArtifact",
+    "RestoreLayout",
     "RestoreResult",
     "Seconds",
     "StageName",

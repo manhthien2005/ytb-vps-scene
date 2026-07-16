@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import PurePosixPath
 
 from ytb_vps_v2.domain.backup import CheckpointManifest, ManifestEntry
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -92,6 +93,46 @@ class RestoreResult:
             raise DomainInvariantError(
                 "Restore migration source must precede the resulting schema version"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreArtifact:
+    relative_path: PurePosixPath
+    remote: ManifestEntry
+
+    def __post_init__(self) -> None:
+        if type(self.remote) is not ManifestEntry:
+            raise DomainInvariantError("Restore artifact remote must be ManifestEntry")
+        ManifestEntry(self.relative_path, self.remote.digest)
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreLayout:
+    job_id: JobId
+    archive_key: PurePosixPath
+    input_remote: ManifestEntry
+    artifacts: tuple[RestoreArtifact, ...]
+    schema_version: int
+
+    def __post_init__(self) -> None:
+        if type(self.job_id) is not JobId:
+            raise DomainInvariantError("Restore layout job ID must be JobId")
+        if type(self.input_remote) is not ManifestEntry:
+            raise DomainInvariantError("Restore layout input must be ManifestEntry")
+        ManifestEntry(self.archive_key, self.input_remote.digest)
+        if type(self.artifacts) is not tuple or any(
+            type(item) is not RestoreArtifact for item in self.artifacts
+        ):
+            raise DomainInvariantError(
+                "Restore layout artifacts must be RestoreArtifact values"
+            )
+        paths = tuple(str(item.relative_path) for item in self.artifacts)
+        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+            raise DomainInvariantError(
+                "Restore layout artifact paths must be sorted and unique"
+            )
+        if type(self.schema_version) is not int or self.schema_version < 1:
+            raise DomainInvariantError("Restore layout schema version must be positive")
 
 
 class CleanupDenialReason(str, Enum):

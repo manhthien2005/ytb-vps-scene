@@ -5,21 +5,11 @@ import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from ytb_vps_v2.adapters.filesystem.integrity import (
-    digest_file,
-    publish_directory_no_replace,
-    reject_reparse_components,
-    secure_root,
-)
-from ytb_vps_v2.adapters.sqlite.restore import (
-    StagedRestoreError,
-    inspect_staged_state,
-    migrate_staged_state,
-)
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry, parse_manifest_bytes
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.restore import RestoreResult
 from ytb_vps_v2.ports.backup import AdditiveObjectStore, BackupStoreError
+from ytb_vps_v2.ports.restore import StagedRestoreWorkspace
 
 
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -34,10 +24,14 @@ def _bytes_digest(raw: bytes) -> FileDigest:
     return FileDigest(len(raw), hashlib.sha256(raw).hexdigest())
 
 
-def _destination(parent: Path, relative: PurePosixPath) -> Path:
+def _destination(
+    workspace: StagedRestoreWorkspace,
+    parent: Path,
+    relative: PurePosixPath,
+) -> Path:
     destination = parent.joinpath(*relative.parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    reject_reparse_components(destination.parent)
+    workspace.reject_reparse(destination.parent)
     return destination
 
 
@@ -59,10 +53,17 @@ def _remove_owned_staging(staging: Path, parent: Path) -> None:
 
 
 class CheckpointRestorer:
-    def __init__(self, object_store: AdditiveObjectStore) -> None:
+    def __init__(
+        self,
+        object_store: AdditiveObjectStore,
+        workspace: StagedRestoreWorkspace,
+    ) -> None:
         if not isinstance(object_store, AdditiveObjectStore):
             raise RestoreError("Restore object store does not satisfy its contract")
         self.object_store = object_store
+        if not isinstance(workspace, StagedRestoreWorkspace):
+            raise RestoreError("Restore workspace does not satisfy its contract")
+        self.workspace = workspace
 
     def restore(
         self,
@@ -75,8 +76,8 @@ class CheckpointRestorer:
             raise RestoreError("Restore target must be an absolute Path")
         staging: Path | None = None
         try:
-            parent = secure_root(staging_parent)
-            reject_reparse_components(target.parent)
+            parent = self.workspace.secure_parent(staging_parent)
+            self.workspace.reject_reparse(target.parent)
             if target.parent.resolve(strict=True) != parent:
                 raise RestoreError("Restore staging must share the target parent")
             ManifestEntry(PurePosixPath(target.name), FileDigest(0, "0" * 64))
@@ -114,10 +115,11 @@ class CheckpointRestorer:
                 manifest.state_snapshot.digest,
             )
 
-            migrated_from = migrate_staged_state(state_path)
-            layout = inspect_staged_state(state_path, manifest)
+            migrated_from = self.workspace.migrate_state(state_path)
+            layout = self.workspace.inspect_state(state_path, manifest)
 
             input_destination = _destination(
+                self.workspace,
                 staging / "archive",
                 layout.archive_key,
             )
@@ -135,6 +137,7 @@ class CheckpointRestorer:
 
             for artifact in layout.artifacts:
                 destination = _destination(
+                    self.workspace,
                     staging / "workspace",
                     artifact.relative_path,
                 )
@@ -150,24 +153,24 @@ class CheckpointRestorer:
                     artifact.remote.digest,
                 )
 
-            final_layout = inspect_staged_state(state_path, manifest)
+            final_layout = self.workspace.inspect_state(state_path, manifest)
             if final_layout != layout:
                 raise RestoreError("Staged restore layout changed during materialization")
             if (
                 migrated_from is None
-                and digest_file(state_path) != manifest.state_snapshot.digest
+                and self.workspace.digest(state_path) != manifest.state_snapshot.digest
             ):
                 raise RestoreError("Staged state snapshot changed during restore")
-            if digest_file(input_destination) != layout.input_remote.digest:
+            if self.workspace.digest(input_destination) != layout.input_remote.digest:
                 raise RestoreError("Staged input failed final verification")
             for artifact in layout.artifacts:
                 destination = (staging / "workspace").joinpath(
                     *artifact.relative_path.parts
                 )
-                if digest_file(destination) != artifact.remote.digest:
+                if self.workspace.digest(destination) != artifact.remote.digest:
                     raise RestoreError("Staged artifact failed final verification")
 
-            publish_directory_no_replace(staging, target, parent)
+            self.workspace.publish(staging, target, parent)
             staging = None
             return RestoreResult(
                 manifest.job_id,
@@ -180,7 +183,6 @@ class CheckpointRestorer:
             raise
         except (
             BackupStoreError,
-            StagedRestoreError,
             DomainInvariantError,
             OSError,
             RuntimeError,

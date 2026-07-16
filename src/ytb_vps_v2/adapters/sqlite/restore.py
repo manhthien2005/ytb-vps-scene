@@ -3,10 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from ytb_vps_v2.adapters.filesystem.integrity import digest_file
+from ytb_vps_v2.adapters.filesystem.integrity import (
+    digest_file,
+    publish_directory_no_replace,
+    reject_reparse_components,
+    secure_root,
+)
 from ytb_vps_v2.adapters.sqlite.schema import (
     SCHEMA_VERSION,
     StateStoreError,
@@ -15,26 +19,12 @@ from ytb_vps_v2.adapters.sqlite.schema import (
 from ytb_vps_v2.domain.backup import CheckpointManifest, FileDigest, ManifestEntry
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import Artifact, JobId, StageName
+from ytb_vps_v2.domain.restore import RestoreArtifact, RestoreLayout
 from ytb_vps_v2.ports.backup import BackupStoreError
 
 
 class StagedRestoreError(RuntimeError):
     """Raised when staged SQLite state is not an exact restorable checkpoint."""
-
-
-@dataclass(frozen=True, slots=True)
-class RestoreArtifact:
-    relative_path: PurePosixPath
-    remote: ManifestEntry
-
-
-@dataclass(frozen=True, slots=True)
-class RestoreLayout:
-    job_id: JobId
-    archive_key: PurePosixPath
-    input_remote: ManifestEntry
-    artifacts: tuple[RestoreArtifact, ...]
-    schema_version: int
 
 
 def _connection(path: Path, *, readonly: bool) -> sqlite3.Connection:
@@ -219,3 +209,27 @@ def migrate_staged_state(path: Path) -> int | None:
     finally:
         if connection is not None:
             connection.close()
+
+
+class LocalStagedRestoreWorkspace:
+    def secure_parent(self, parent: Path) -> Path:
+        return secure_root(parent)
+
+    def reject_reparse(self, path: Path) -> None:
+        reject_reparse_components(path)
+
+    def migrate_state(self, path: Path) -> int | None:
+        return migrate_staged_state(path)
+
+    def inspect_state(
+        self,
+        path: Path,
+        manifest: CheckpointManifest,
+    ) -> RestoreLayout:
+        return inspect_staged_state(path, manifest)
+
+    def digest(self, path: Path) -> FileDigest:
+        return digest_file(path)
+
+    def publish(self, source: Path, destination: Path, parent: Path) -> None:
+        publish_directory_no_replace(source, destination, parent)

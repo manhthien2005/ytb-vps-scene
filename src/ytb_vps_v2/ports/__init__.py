@@ -9,6 +9,7 @@ from ytb_vps_v2.ports.cleanup import (
     UnsafeDeletionTargetError,
 )
 from ytb_vps_v2.ports.state import StateRepository
+from ytb_vps_v2.ports.restore import StagedRestoreWorkspace
 
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "FileIntegrity",
     "SourceArchiver",
     "StateRepository",
+    "StagedRestoreWorkspace",
     "UnsafeDeletionTargetError",
 ]

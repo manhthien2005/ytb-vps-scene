@@ -9,6 +9,7 @@ from ytb_vps_v2.adapters.filesystem.additive import LocalAdditiveObjectStore
 from ytb_vps_v2.adapters.filesystem.archive import VerifiedInputArchiver
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_file
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
+from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
 from ytb_vps_v2.application import restore as restore_module
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
@@ -96,7 +97,8 @@ class CheckpointRestorerTests(unittest.TestCase):
         )
         records = self.state.completed_checkpoints(self.job_id)
         self.manifest_key = records[0].manifest.key
-        self.restorer = CheckpointRestorer(self.store)
+        self.restore_workspace = LocalStagedRestoreWorkspace()
+        self.restorer = CheckpointRestorer(self.store, self.restore_workspace)
 
     def _temporary_restore_paths(self) -> tuple[Path, ...]:
         return tuple(self.restore_parent.glob(".*.restore-*"))
@@ -187,8 +189,8 @@ class CheckpointRestorerTests(unittest.TestCase):
     def test_failure_before_final_publish_removes_owned_staging(self) -> None:
         target = self.restore_parent / "publish-failure"
         with mock.patch.object(
-            restore_module,
-            "publish_directory_no_replace",
+            self.restore_workspace,
+            "publish",
             side_effect=BackupStoreError("injected final publication failure"),
         ):
             with self.assertRaises(RestoreError):
@@ -211,7 +213,7 @@ class CheckpointRestorerTests(unittest.TestCase):
             return real_materialize(*args, **kwargs)
 
         target = self.restore_parent / "final-validation-failure"
-        real_inspect = restore_module.inspect_staged_state
+        real_inspect = self.restore_workspace.inspect_state
         inspections = 0
 
         def fail_second_inspection(*args: object, **kwargs: object):
@@ -224,8 +226,8 @@ class CheckpointRestorerTests(unittest.TestCase):
         with (
             mock.patch.object(self.store, "materialize", recording_materialize),
             mock.patch.object(
-                restore_module,
-                "inspect_staged_state",
+                self.restore_workspace,
+                "inspect_state",
                 fail_second_inspection,
             ),
         ):
@@ -243,7 +245,7 @@ class CheckpointRestorerTests(unittest.TestCase):
 
     def test_target_creation_race_never_overwrites_the_winner(self) -> None:
         target = self.restore_parent / "race-target"
-        real_publish = restore_module.publish_directory_no_replace
+        real_publish = self.restore_workspace.publish
 
         def competing_publish(source: Path, destination: Path, parent: Path) -> None:
             destination.mkdir()
@@ -251,8 +253,8 @@ class CheckpointRestorerTests(unittest.TestCase):
             real_publish(source, destination, parent)
 
         with mock.patch.object(
-            restore_module,
-            "publish_directory_no_replace",
+            self.restore_workspace,
+            "publish",
             competing_publish,
         ):
             with self.assertRaises(RestoreError):
@@ -343,6 +345,11 @@ class CheckpointRestorerTests(unittest.TestCase):
                 other,
                 100,
             )
+
+    def test_application_restore_depends_only_on_inward_ports_and_domain(self) -> None:
+        source = Path(restore_module.__file__).read_text(encoding="utf-8")
+
+        self.assertNotIn("ytb_vps_v2.adapters", source)
 
 
 if __name__ == "__main__":
