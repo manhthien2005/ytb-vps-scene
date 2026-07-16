@@ -169,3 +169,50 @@ historical evidence.
   explicit later interface/operations work rather than hidden behavior here.
 - Next step: create and execute the Phase 4 versioned SQLite state, migration,
   work-unit transition, artifact commit, retry-history, and stale-run plan.
+
+## 2026-07-16T21:03:26+07:00 — Phase 4 SQLite state and artifact contracts
+
+- Objective: implement a versioned SQLite state store with durable job and work-
+  unit transitions, retry history, atomic artifact records, exact invalidation,
+  and stale-run recovery.
+- Contract/invariant: schema version 1 is explicit and rejects unknown future
+  versions; foreign keys, WAL, synchronous FULL, and busy timeout are enabled and
+  verified; state transitions use compare-and-swap guards; artifact insertion and
+  SUCCEEDED transition share one transaction; every exceptional transaction path
+  rolls back; invalidation affects only selected stages and their artifacts.
+- Changed files: `src/ytb_vps_v2/adapters/__init__.py`,
+  `src/ytb_vps_v2/adapters/sqlite/__init__.py`,
+  `src/ytb_vps_v2/adapters/sqlite/schema.py`,
+  `src/ytb_vps_v2/adapters/sqlite/state.py`,
+  `src/ytb_vps_v2/domain/state.py`,
+  `src/ytb_vps_v2/domain/invalidation.py`,
+  `src/ytb_vps_v2/domain/__init__.py`,
+  `src/ytb_vps_v2/application/invalidation.py`,
+  `src/ytb_vps_v2/ports/__init__.py`, `src/ytb_vps_v2/ports/state.py`,
+  the SQLite and invalidation tests under `tests_v2/`, the Phase 4 plan, the
+  master plan status, and this audit log.
+- Tests/gates: observed focused schema, transition, artifact, invalidation, and
+  review-regression tests fail before implementation; ran 65-test v2 discovery,
+  compileall, rollback and reopen checks, dependency-direction and forbidden-
+  legacy-import scans, full phase diff review, staged filename review, secret
+  filename gate, `git diff --check`, the legacy discovery baseline, and two
+  independent review passes.
+- Result: all 65 v2 tests passed on Python 3.12.10; compile, schema and pragma
+  verification, guarded transitions, atomic rollback, stale recovery, canonical
+  dependency decoding, and repository gates passed. The first independent review
+  found transaction rollback, dependency JSON validation, dependency direction,
+  and durability readback gaps; commit `ae22de2` resolved all findings and added
+  the requested regression coverage. Re-review found no Critical, Important, or
+  Minor issue and returned `Ready: Yes`. The untouched legacy suite remained at
+  62 tests with 8 failures and 9 errors.
+- Phase commits: `da18806d0f6ab37a6e131f74082457414a7103c0`,
+  `b74e30dd5f59ef572144e48316b495f544726730`,
+  `57680f23755f5c9a014ebc7f33e4ffb3fcbbcfc1`, and
+  `ae22de204f2563da81cf9f232a519f79acc2648b`.
+- Remaining risk: Python 3.10 is unavailable locally, so its evidence still
+  depends on CI after an authorized push. SQLite now durably records artifact
+  metadata but does not yet create, fsync, rename, or validate filesystem
+  artifacts. Input archival, checkpoint copies, config snapshots, and their
+  orchestration remain later phases.
+- Next step: create and execute the Phase 5 verified-input, additive checkpoint-
+  backup, manifest, and SQLite-snapshot plan.

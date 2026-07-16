@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phases 0–3 complete; Phase 4 SQLite state planning is next
+Status: Phases 0–4 complete; Phase 5 verified input and checkpoint backup planning is next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
