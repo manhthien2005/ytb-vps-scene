@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
 import stat
@@ -376,3 +378,89 @@ def publish_additively(
             except BackupStoreError:
                 pass
         raise
+
+
+def _rename_directory_no_replace(
+    source: Path,
+    destination: Path,
+    parent: Path,
+) -> None:
+    if os.name == "nt":
+        with _windows_publication_guard(parent):
+            os.rename(source, destination)
+        return
+    with _posix_publication_directory(parent, parent) as directory_fd:
+        library = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(library, "renameat2", None)
+        if renameat2 is None:
+            raise BackupStoreError(
+                "Platform lacks atomic no-replace directory publication"
+            )
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            directory_fd,
+            os.fsencode(source.name),
+            directory_fd,
+            os.fsencode(destination.name),
+            1,
+        )
+        if result != 0:
+            error_number = ctypes.get_errno()
+            raise OSError(
+                error_number or errno.EIO,
+                os.strerror(error_number or errno.EIO),
+            )
+
+
+def publish_directory_no_replace(
+    source: Path,
+    destination: Path,
+    parent: Path,
+) -> None:
+    source_path = _path("Staging directory", source)
+    destination_path = _path("Restore destination", destination)
+    resolved_parent = secure_root(parent)
+    try:
+        if (
+            source_path.parent.resolve(strict=True) != resolved_parent
+            or destination_path.parent.resolve(strict=True) != resolved_parent
+        ):
+            raise BackupStoreError(
+                "Restore publication must remain within one anchored parent"
+            )
+        _reject_reparse_components(source_path)
+        if not source_path.is_dir() or _is_reparse(source_path):
+            raise BackupStoreError("Restore staging directory is unsafe")
+        if (
+            destination_path.exists()
+            or destination_path.is_symlink()
+            or _is_reparse(destination_path)
+        ):
+            raise BackupStoreError("Restore destination already exists")
+        _rename_directory_no_replace(source_path, destination_path, resolved_parent)
+        try:
+            sync_directory(resolved_parent)
+        except BackupStoreError as sync_error:
+            try:
+                _rename_directory_no_replace(
+                    destination_path,
+                    source_path,
+                    resolved_parent,
+                )
+                sync_directory(resolved_parent)
+            except (BackupStoreError, OSError) as rollback_error:
+                raise BackupStoreError(
+                    "Restore publication synchronization and rollback failed"
+                ) from rollback_error
+            raise sync_error
+    except BackupStoreError:
+        raise
+    except OSError as exc:
+        raise BackupStoreError("Restore directory could not be published") from exc
