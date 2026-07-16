@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "name": "ch_PP-OCRv3_det_infer",
+      "archive": "ch_PP-OCRv3_det_infer.tar",
+      "url": "https://paddleocr.bj.bcebos.com/PP-OCRv3/chinese/ch_PP-OCRv3_det_infer.tar",
+      "sha256": "8682b39d9b9edb03cb91cf0b0fa8bc2dabf87bf941a88049efc97e62328f1892"
+    },
+    {
+      "name": "ch_PP-OCRv3_rec_infer",
+      "archive": "ch_PP-OCRv3_rec_infer.tar",
+      "url": "https://paddleocr.bj.bcebos.com/PP-OCRv3/chinese/ch_PP-OCRv3_rec_infer.tar",
+      "sha256": "f92b13dc91c92e0f220d095412695c429f7e70907467d2f780f339eeb83bb7b1"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "ppocrv3-chinese.jpg",
+      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.6/doc/imgs/11.jpg",
+      "sha256": "2bb78629be3a6b29025d85db3677642c267d0ff176706ab963e8cb0c132df10b"
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+﻿runtime:
+  data_root: /srv/ytb-vps
+  secrets_root: /root/.config/ytb-vps/secrets
+  lock_file: /run/lock/ytb-vps.lock
+
+queue:
+  extensions: [".mp4", ".mkv", ".mov", ".webm"]
+  continue_after_failure: true
+  auto_sync_input: true
+  background_backup: true
+  wait_for_background_backup: false
+  backup_workers: 1
+  cleanup_after_upload: true
+  poll_interval_seconds: 30
+
+media:
+  target_fps: 30
+  max_width: 1920
+  max_height: 1080
+  chunk_seconds: 120
+  fallback_chunk_seconds: 120
+  ffmpeg_threads: 6
+
+resources:
+  minimum_free_gib: 30
+  minimum_free_inodes: 10000
+  required_swap_gib: 0
+  omp_threads: 1
+
+ocr:
+  backend: auto
+  container_image: ytb-vps-ocr-legacy:0.1.0
+  onnx_python: /opt/ytb-vps-ocr-onnx/bin/python
+  onnx_worker: /opt/ytb-vps/containers/ocr-onnx/worker.py
+  onnx_library_path: /opt/ytb-vps-ocr-onnx/lib/python3.10/site-packages/nvidia/cudnn/lib:/usr/local/cuda/targets/x86_64-linux/lib:/usr/lib/wsl/lib
+  gpu_memory_mb: 5200
+  sample_fps: 2.0
+  scan_width: 640
+  parallel_chunks: 1
+  language: ch
+  minimum_confidence: 0.55
+  scan_min_y_ratio: 0.0
+  scan_max_y_ratio: 1.0
+  subtitle_min_y_ratio: 0.58
+  subtitle_max_y_ratio: 0.96
+  subtitle_center_min_x_ratio: 0.20
+  subtitle_center_max_x_ratio: 0.80
+  subtitle_center_min_y_ratio: 0.86
+  retry_attempts: 2
+  det_model_dir: /models/ch_PP-OCRv3_det_infer
+  rec_model_dir: /models/ch_PP-OCRv3_rec_infer
+
+tracking:
+  max_gap_frames: 15
+  minimum_duration_frames: 3
+  cue_lead_frames: 3
+  cue_tail_frames: 3
+  cue_min_gap_frames: 1
+  cue_prevent_overlap: true
+  text_similarity: 0.72
+  line_cluster_y_ratio: 0.055
+  minimum_text_chars: 2
+  box_padding: 6
+  static_blur_enabled: true
+  static_blur_sample_frames: 10
+  static_blur_min_samples: 5
+  static_blur_position_tolerance_px: 12
+  static_blur_min_y_ratio: 0.0
+  static_blur_max_y_ratio: 1.0
+  static_blur_subtitle_padding: 6
+
+translation:
+  # cue_translation is the compatibility default. Use scene_voiceover only for new jobs.
+  mode: cue_translation
+  codex_executable: codex
+  model: cx/gpt-5.5
+  style_version: 5
+  batch_size: 150
+  context_window_cues: 12
+  timeout_seconds: 900
+  retry_attempts: 2
+  # A permanently failing single cue is omitted from Vietnamese subtitle/TTS,
+  # while its Chinese text remains covered by the blur plan.
+  skip_failed_cues: true
+  max_skipped_cues: 3
+  scene_gap_seconds: 1.2
+  scene_max_seconds: 24.0
+  scene_max_source_chars: 1800
+  scene_timing_tolerance_seconds: 1.5
+  scene_retry_attempts: 2
+  scene_tts_max_speed: 1.18
+
+tts:
+  voice: BV074_streaming
+  resource_id: "7102355709945188865"
+  rate: "1.0"
+  group_gap_seconds: 0.0
+  short_group_gap_seconds: 0.45
+  short_group_min_duration_seconds: 1.4
+  max_group_chars: 90
+  max_group_duration_seconds: 4.0
+  query_attempts: 40
+  query_interval_seconds: 2.0
+  retry_attempts: 3
+  shorten_attempts: 0
+  max_fit_speed: 1.35
+  hard_fit_speed: 1.35
+  slot_borrow_seconds: 0.0
+  micro_spill_seconds: 0.0
+  allow_tts_spill: false
+  fit_tolerance_seconds: 0.08
+  silence_trim_enabled: true
+  silence_trim_threshold_db: -45
+  silence_trim_start_duration: 0.02
+  silence_trim_stop_duration: 0.05
+  device_json: /root/.config/ytb-vps/secrets/capcut-device.json
+
+render:
+  font_file: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+  font_size: 42
+  outline: 4
+  encoder: auto
+  nvenc_preset: fast
+  nvenc_cq: 20
+  crf: 20
+  preset: veryfast
+  mirror_video: true
+  blur_mode: subtitle_band
+  subtitle_band_auto: true
+  output_speed: 1.0
+  original_audio_volume: 0.2
+  original_audio_duck_volume: 0.08
+  audio_ducking_enabled: true
+  bottom_blur_y_ratio: 0.82
+  subtitle_band_x_ratio: 0.0
+  subtitle_band_y_ratio: 0.83
+  subtitle_band_width_ratio: 1.0
+  subtitle_band_height_ratio: 0.14
+  subtitle_band_min_cues: 1
+  subtitle_band_candidate_min_y_ratio: 0.58
+  subtitle_band_candidate_max_y_ratio: 0.98
+  subtitle_band_y_offset_ratio: 0.0
+  ocr_box_min_y_ratio: 0.68
+  ocr_box_min_x_ratio: 0.08
+  ocr_box_max_x_ratio: 0.92
+  blur_kernel: 41
+  blur_temporal_alpha: 0.72
+  box_padding: 18
+  box_padding_x: 10
+  box_padding_y: 4
+  static_blur_padding: 4
+  min_subtitle_seconds: 0.8
+  logo_enabled: true
+  logo_path: /opt/ytb-vps/new-logo.png
+  logo_width_ratio: 0.192
+  logo_margin_x: 16
+  logo_margin_y: 16
+
+drive:
+  enabled: true
+  remote_root: gdrive:YTB-VPS
+  config_file: /root/.config/ytb-vps/secrets/rclone.conf
+  transfers: 1
+  checkers: 2
+  retry_attempts: 5
+  chunk_size: 1M
+  disable_http2: true
+

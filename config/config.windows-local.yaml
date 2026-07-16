@@ -1,0 +1,49 @@
+﻿runtime:
+  data_root: C:/Work/YTB
+  secrets_root: C:/Work/YTB/secrets
+  lock_file: C:/Work/YTB/ytb-vps.lock
+
+queue:
+  auto_sync_input: false
+  cleanup_after_upload: false
+  background_backup: false
+  wait_for_background_backup: true
+
+media:
+  ffmpeg_threads: 2
+
+resources:
+  minimum_free_gib: 5
+  minimum_free_inodes: 1000
+  required_swap_gib: 0
+  omp_threads: 1
+
+ocr:
+  backend: docker
+  container_image: ytb-vps-ocr-legacy:0.1.0
+  gpu_memory_mb: 3000
+  sample_fps: 2.0
+  scan_width: 640
+  parallel_chunks: 1
+  ffmpeg_threads: 2
+  omp_threads: 1
+  onnx_intra_threads: 1
+  onnx_inter_threads: 1
+
+translation:
+  codex_executable: codex
+  model: cx/gpt-5.5
+  timeout_seconds: 900
+
+tts:
+  device_json: C:/Work/YTB/secrets/capcut-device.json
+
+render:
+  font_file: C:/Windows/Fonts/arialbd.ttf
+  encoder: libx264
+  preset: veryfast
+  crf: 20
+  logo_enabled: false
+
+drive:
+  enabled: false
