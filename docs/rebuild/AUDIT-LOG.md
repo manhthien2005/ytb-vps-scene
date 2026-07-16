@@ -271,3 +271,74 @@ historical evidence.
   disabled.
 - Next step: create and execute the Phase 6 staged-restore, checksum/integrity,
   atomic-swap, allowed-root, and deny-by-default cleanup plan.
+
+## 2026-07-16T22:31:14+07:00 — Phase 6 staged restore and cleanup guard
+
+- Objective: restore a trusted additive checkpoint through isolated staging and
+  an atomic no-replace directory publication, while exposing only a deny-by-
+  default cleanup authorization decision backed by fresh complete remote proof.
+- Contract/invariant: restore requires a trusted manifest `ManifestEntry`, binds
+  canonical manifest bytes to its digest and checkpoint prefix, materializes the
+  state snapshot first, requires exact SQLite integrity/foreign-key/schema-v2
+  conformance, derives the archive/workspace layout from staged state, re-hashes
+  every local file, and never merges with or overwrites an existing target.
+  Publication and failure cleanup carry a pinned staging identity; Windows uses
+  handle-based rename/removal, POSIX uses anchored directory descriptors and
+  post-rename identity rollback, and rollback conflicts evacuate the target to
+  a random no-replace quarantine. Cleanup assessment requires independent,
+  non-empty Part/validation/work requirements, canonical manifest binding,
+  exact `sha256-readback` evidence, freshness, restorable snapshot state, full
+  work coverage, explicit operator enablement, and allowed-root preflight. It
+  performs no deletion and is not wired to the CLI or runtime.
+- Changed files: `src/ytb_vps_v2/domain/restore.py` and domain exports;
+  `src/ytb_vps_v2/ports/{backup,cleanup,restore}.py` and port exports;
+  `src/ytb_vps_v2/adapters/filesystem/{additive,cleanup,integrity}.py` and
+  exports; `src/ytb_vps_v2/adapters/sqlite/restore.py` and exports;
+  `src/ytb_vps_v2/application/{restore,cleanup}.py` and exports; Phase 6 domain,
+  filesystem, SQLite, restore, cleanup, and architecture tests under `tests_v2/`;
+  the Phase 6 plan, this audit log, and the master-plan status.
+- Tests/gates: observed focused domain, object-store, allowed-root, staged-SQLite,
+  end-to-end restore, cleanup-denial, architecture, and every review regression
+  fail before implementation; ran the 165-test v2 discovery, compileall, exact
+  schema-v1 migration and schema-v2 conformance checks, corrupt/missing object
+  cases, canonical forged-manifest rejection, interruption before and after each
+  materialization, migration interruption, final-validation and publish faults,
+  existing-target and target-creation races, staging-swap cleanup, directory-
+  sync rollback `EEXIST`, the full cleanup denial matrix, a real Windows junction
+  preflight, dependency-direction and forbidden-legacy-import scans, package
+  independence, secret filename and diff gates, the legacy baseline, and final
+  independent re-review.
+- Result: all 165 v2 tests passed on Python 3.12.10; two synthetic symlink tests
+  were skipped because this Windows account cannot create symlinks, while the
+  real Windows junction check returned `REAL_WINDOWS_JUNCTION_REJECTED`.
+  Compile, dependency direction, trusted-manifest binding, exact staged schema,
+  interruption/retry, pinned Windows publication, fail-closed rollback,
+  independent cleanup coverage, runtime cleanup-disablement, and repository
+  gates passed. The initial review found Important manifest authenticity,
+  cleanup completeness, staging publication/removal race, inward-dependency,
+  and incomplete-schema gaps; the fix commits below added reproductions and
+  resolved them. Final re-review found no Critical, Important, or Minor issue
+  and returned `Ready: Yes`. The untouched legacy suite remained at 62 tests
+  with 8 failures and 9 errors.
+- Phase commits: `16fdd017d158c51fbebc3b41a328c1ddf71dee03`,
+  `bfdfa905add7eb49c5d61d7341e10ef0d376cad7`,
+  `ea69ca484deb26a55193d68b1249fee309d85d8f`,
+  `3ad617ee5b7d9bafe7598f3f47bdce02adf157e4`,
+  `9d6055e08ea83b19bda10944bce316de80cb01cd`,
+  `a35d95bf15da4f6da38fdaf3698a568ab2f39d8d`,
+  `2309adc736fd3476a626d3205344531aa09f14e2`,
+  `0fa8c0c06feb6a2706341f515d9528533c7c46aa`, and
+  `54f1b81811e1bc0992b886bf2b1bce464cd29284`.
+- Remaining risk: Python 3.10 and the POSIX handle/rollback path are unavailable
+  on this Windows host and still require CI after an authorized push. The local
+  additive adapter is not a production remote provider. A rollback conflict can
+  intentionally retain a random quarantine for operator inspection rather than
+  risk leaving a target published or deleting an unowned directory. Restore
+  callers must obtain trusted manifest evidence from durable state; runtime/CLI
+  wiring arrives later. Schema-v1 structural migration is tested, but a genuine
+  v1 checkpoint without the v2 verified-input row still fails closed. Windows
+  directory fsync remains best-effort. Active-target replacement is intentionally
+  unsupported. Cleanup remains disabled globally, has no deletion executor, and
+  is not connected to any public entry point.
+- Next step: create and execute the Phase 7 deterministic offline 30-second
+  vertical-slice, stage interruption, resume, audio, and no-audio plan.
