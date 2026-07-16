@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytb-vps-scene-v2"
+version = "0.1.0.dev0"
+description = "Resumable VPS video localization pipeline v2"
+requires-python = ">=3.10,<3.13"
+dependencies = []
+
+[project.scripts]
+ytb-vps-v2 = "ytb_vps_v2.interfaces.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ytb_vps_v2*"]
