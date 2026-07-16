@@ -78,3 +78,45 @@ historical evidence.
   after an authorized user pushes the branch and CI runs.
 - Next step: create and execute the Phase 2 canonical timeline and domain-model
   plan.
+
+## 2026-07-16T20:21:36+07:00 — Phase 2 canonical timeline and domain models
+
+- Objective: implement the pure v2 canonical timeline, immutable typed domain
+  models, portable artifact identifiers, and 30-minute publish Part count without
+  importing or changing the legacy runtime.
+- Contract/invariant: canonical processing uses exact `Fraction` arithmetic at
+  integer 30 FPS by default; intervals are half-open with floor start and ceiling
+  end; runtime constructors reject booleans, fractional indexes, invalid nested
+  types, unsupported enums, non-finite rationals, unsafe paths, invalid checksums,
+  and inconsistent Part metadata; artifact paths use `PurePosixPath` regardless
+  of host OS; Part count is `max(1, ceil(duration / 1800))`.
+- Changed files: `src/ytb_vps_v2/domain/__init__.py`,
+  `src/ytb_vps_v2/domain/errors.py`, `src/ytb_vps_v2/domain/models.py`,
+  `src/ytb_vps_v2/domain/parts.py`, `src/ytb_vps_v2/domain/timeline.py`,
+  `tests_v2/domain/__init__.py`, `tests_v2/domain/test_models.py`,
+  `tests_v2/domain/test_parts.py`, `tests_v2/domain/test_timeline.py`, and this
+  audit log.
+- Tests/gates: observed focused tests fail before each implementation slice; ran
+  `python -m unittest discover -s tests_v2 -v`, `python -m compileall -q
+  src/ytb_vps_v2 tests_v2`, direct 29.97 FPS end-frame and 30-minute ceiling
+  assertions, forbidden legacy-import scans, full phase diff review, staged
+  filename review, secret filename gate, `git diff --check`, legacy baseline
+  discovery with `PYTHONPATH=app`, and two independent code-review passes.
+- Result: all 24 v2 tests passed on Python 3.12.10; compile, exact timeline
+  fixtures for 24/25/29.97/30 FPS, direct invariant assertions, import
+  independence, and repository gates passed. The first independent review found
+  runtime type, cross-platform path, enum/nested-type, and non-finite rational
+  gaps; commit `ce66708` resolved them with regression tests. The second review
+  found no Critical, Important, or Minor defect and returned `Ready: Yes`. The
+  untouched legacy suite remained at its audited baseline of 62 tests with 8
+  failures and 9 errors.
+- Phase commits: `9ffa05b2fe57848b732d6d0425d21cabaaebe4da`,
+  `47d94e5e2b4254641a41bea8d516c71edec72880`,
+  `5729be846537a81b92c585fda4ccb23ef9aba1c3`, and
+  `ce66708aaa7516ab7bddcc0646eeeccd37c6a460`.
+- Remaining risk: Python 3.10 is not installed on the local Windows host, so its
+  execution evidence still depends on the configured CI after an authorized
+  push. Future adapters must convert filesystem-native paths into the canonical
+  `PurePosixPath` artifact identifier at the domain boundary.
+- Next step: create and execute the Phase 3 typed effective-configuration,
+  compatibility-key, fingerprint, dependency-graph, and exact-invalidation plan.
