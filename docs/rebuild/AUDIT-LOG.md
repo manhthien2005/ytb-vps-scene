@@ -216,3 +216,58 @@ historical evidence.
   orchestration remain later phases.
 - Next step: create and execute the Phase 5 verified-input, additive checkpoint-
   backup, manifest, and SQLite-snapshot plan.
+
+## 2026-07-16T21:47:22+07:00 — Phase 5 verified input and checkpoint backup
+
+- Objective: make source identity, input archival, additive checkpoint objects,
+  canonical manifests, and SQLite backup snapshots durable and independently
+  verifiable before expensive processing starts.
+- Contract/invariant: source and object paths are confined and reject symlink,
+  junction, and reparse components; files are streamed through SHA-256, fsynced,
+  published without replacement, and read back; post-INGEST work requires a
+  matching verified-input row; schema v2 migration preserves v1 state; SQLite
+  snapshots use the backup API and exact `integrity_check`; checkpoint data is
+  published before its manifest and completion is recorded only after manifest
+  read-back succeeds.
+- Changed files: `src/ytb_vps_v2/domain/backup.py`, domain exports,
+  `src/ytb_vps_v2/ports/backup.py`, state-port methods,
+  `src/ytb_vps_v2/adapters/filesystem/{__init__,integrity,archive,additive}.py`,
+  `src/ytb_vps_v2/adapters/sqlite/{__init__,schema,state,backup}.py`,
+  `src/ytb_vps_v2/application/{__init__,checkpoints}.py`, the Phase 5 domain,
+  filesystem, SQLite, and checkpoint tests under `tests_v2/`, the Phase 5 plan,
+  the master plan status, and this audit log.
+- Tests/gates: observed focused manifest, filesystem, migration, input-gate,
+  snapshot, and checkpoint tests fail before each implementation slice; ran 114-
+  test v2 discovery, the 49-test Phase 5 suite, compileall, real schema-v1
+  migration, active-transaction rejection, backup and integrity faults, directory-
+  sync and guarded-publication faults, retry with a changed timestamp, strict
+  manifest/Unicode round trips, a real Windows junction-source rejection,
+  dependency-direction and forbidden-legacy-import scans, secret filename and
+  staged filename gates, `git diff --check`, the legacy baseline, and three
+  independent review passes.
+- Result: all 114 v2 tests passed on Python 3.12.10; one synthetic symlink test was
+  skipped because this Windows account cannot create symlinks, while the real
+  junction reproduction passed. The first review found directory-sync retry,
+  changed-timestamp retry, reparse/path-race, and lone-surrogate gaps; `b147156`
+  fixed them with regressions. Re-review found remaining source-parent junction
+  and transient pathname-swap gaps; `1869ff3` added full parent-component checks,
+  a non-delete-sharing Windows directory guard, and POSIX `dir_fd`/`O_NOFOLLOW`
+  publication. Final re-review found no Critical, Important, or Minor issue and
+  returned `Ready: Yes`. The untouched legacy suite remained at 62 tests with 8
+  failures and 9 errors.
+- Phase commits: `dc5722c3625913b07acea63a42b3eff057c6689b`,
+  `458add607770ac669522f2a09bc9e31bbb8c4565`,
+  `a8655948177e9f8c6174e0aae9192d1ca22156e0`,
+  `628e9b3fdd61b83c9f489efb9e4058e796c8b15a`,
+  `b1471566409d250226e9059024e846999a3b97e6`, and
+  `1869ff359e7125296da3a183a66e8a01a701019b`.
+- Remaining risk: Python 3.10 and the POSIX directory-descriptor path are not
+  executable on this Windows host and still require CI after an authorized push.
+  The additive local store is the deterministic contract adapter, not a production
+  remote provider; fresh remote evidence arrives with publishing work. Staged
+  restore, cleanup policy/fault denial, and supported empty-workspace recovery are
+  Phase 6 and later gates. Windows directory fsync remains best-effort where the
+  platform does not expose a supported directory handle operation. Cleanup remains
+  disabled.
+- Next step: create and execute the Phase 6 staged-restore, checksum/integrity,
+  atomic-swap, allowed-root, and deny-by-default cleanup plan.
