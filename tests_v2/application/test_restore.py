@@ -340,6 +340,52 @@ class CheckpointRestorerTests(unittest.TestCase):
             b"verified-staging",
         )
 
+    def test_sync_rollback_conflict_evacuates_published_target(self) -> None:
+        source = self.restore_parent / ".sync-failure.restore-source"
+        source.mkdir()
+        (source / "identity.txt").write_bytes(b"verified-staging")
+        target = self.restore_parent / "sync-failure-target"
+        expected_identity = integrity_module.directory_identity(source)
+        real_rename = integrity_module._rename_directory_no_replace
+        calls = 0
+
+        def conflict_on_preferred_rollback(*args: object, **kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise BackupStoreError("injected EEXIST rollback conflict")
+            real_rename(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                integrity_module,
+                "_rename_directory_no_replace",
+                conflict_on_preferred_rollback,
+            ),
+            mock.patch.object(
+                integrity_module,
+                "sync_directory",
+                side_effect=BackupStoreError("injected sync failure"),
+            ),
+        ):
+            with self.assertRaises(BackupStoreError):
+                integrity_module.publish_directory_no_replace(
+                    source,
+                    target,
+                    self.restore_parent,
+                    expected_identity,
+                )
+
+        self.assertFalse(target.exists())
+        quarantines = tuple(
+            self.restore_parent.glob(".sync-failure-target.rollback-*")
+        )
+        self.assertEqual(len(quarantines), 1)
+        self.assertEqual(
+            (quarantines[0] / "identity.txt").read_bytes(),
+            b"verified-staging",
+        )
+
     def test_missing_or_corrupt_remote_object_never_publishes_target(self) -> None:
         entries = (
             self.manifest.input_archive,

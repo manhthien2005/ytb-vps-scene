@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import stat
+import uuid
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
@@ -443,15 +444,58 @@ def _rename_directory_no_replace(
                 follow_symlinks=False,
             )
             if (published.st_dev, published.st_ino) != expected_identity:
-                try:
-                    rename_no_replace(destination.name, source.name)
-                except OSError as rollback_error:
+                evacuated = False
+                for _ in range(16):
+                    quarantine = (
+                        f".{destination.name}.rollback-{uuid.uuid4().hex}"
+                    )
+                    try:
+                        rename_no_replace(destination.name, quarantine)
+                    except FileExistsError:
+                        continue
+                    evacuated = True
+                    break
+                if not evacuated:
                     raise BackupStoreError(
-                        "Published restore identity changed and rollback failed"
-                    ) from rollback_error
+                        "Published restore identity changed and evacuation failed"
+                    )
                 raise BackupStoreError("Published restore identity changed")
         finally:
             os.close(source_fd)
+
+
+def _rollback_published_directory(
+    published: Path,
+    original: Path,
+    parent: Path,
+    expected_identity: tuple[int, int],
+) -> Path:
+    try:
+        _rename_directory_no_replace(
+            published,
+            original,
+            parent,
+            expected_identity,
+        )
+        return original
+    except (BackupStoreError, OSError) as preferred_error:
+        for _ in range(16):
+            quarantine = parent / (
+                f".{published.name}.rollback-{uuid.uuid4().hex}"
+            )
+            try:
+                _rename_directory_no_replace(
+                    published,
+                    quarantine,
+                    parent,
+                    expected_identity,
+                )
+                return quarantine
+            except (FileExistsError, BackupStoreError, OSError):
+                continue
+        raise BackupStoreError(
+            "Restore publication could not be evacuated after rollback conflict"
+        ) from preferred_error
 
 
 def _windows_directory_information(
@@ -779,7 +823,7 @@ def publish_directory_no_replace(
             sync_directory(resolved_parent)
         except BackupStoreError as sync_error:
             try:
-                _rename_directory_no_replace(
+                _rollback_published_directory(
                     destination_path,
                     source_path,
                     resolved_parent,
