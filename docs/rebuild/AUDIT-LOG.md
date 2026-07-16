@@ -120,3 +120,52 @@ historical evidence.
   `PurePosixPath` artifact identifier at the domain boundary.
 - Next step: create and execute the Phase 3 typed effective-configuration,
   compatibility-key, fingerprint, dependency-graph, and exact-invalidation plan.
+
+## 2026-07-16T20:43:04+07:00 — Phase 3 typed configuration and invalidation
+
+- Objective: implement immutable typed effective configuration, an explicit
+  legacy-key compatibility boundary, deterministic per-stage SHA-256
+  fingerprints, and exact dependency-graph invalidation while preserving
+  unaffected work.
+- Contract/invariant: unknown keys warn or fail according to an explicit policy
+  and are never silently ignored; alias conflicts fail instead of guessing;
+  warnings contain paths but no raw values; `scene_voiceover` and enabled cleanup
+  fail explicitly; runtime parallelism, retry, and timeout values never enter
+  content fingerprints; invalidation follows the immutable ordered graph from
+  INGEST through BACKUP.
+- Changed files: `src/ytb_vps_v2/domain/config.py`,
+  `src/ytb_vps_v2/domain/fingerprints.py`,
+  `src/ytb_vps_v2/domain/__init__.py`,
+  `src/ytb_vps_v2/interfaces/config_compat.py`,
+  `src/ytb_vps_v2/application/__init__.py`,
+  `src/ytb_vps_v2/application/invalidation.py`,
+  `tests_v2/config/__init__.py`, `tests_v2/config/test_config_types.py`,
+  `tests_v2/config/test_config_compat.py`,
+  `tests_v2/domain/test_fingerprints.py`,
+  `tests_v2/application/__init__.py`,
+  `tests_v2/application/test_invalidation.py`, this audit log, and the master
+  plan status.
+- Tests/gates: observed every focused test module and review regression fail
+  before implementation; ran 47-test v2 discovery, focused config/fingerprint/
+  invalidation suites, compileall, direct TTS invalidation assertion,
+  cross-process fingerprint stability, forbidden legacy-import scan, full phase
+  diff review, staged filename review, secret filename gate, `git diff --check`,
+  legacy discovery with `PYTHONPATH=app`, and two independent review passes.
+- Result: all 47 v2 tests passed on Python 3.12.10; compile, canonical hashing,
+  unknown-key handling, alias conflicts, runtime hash exclusion, typed ordered
+  invalidation, and repository gates passed. The first review found positive
+  max-fit range, exact nested-schema, raw rational-type, and mutable dependency-
+  graph gaps; commit `3f3bfd5` resolved all four with regression tests. Re-review
+  found no Critical, Important, or Minor issue and returned `Ready: Yes`. The
+  untouched legacy suite remained at 62 tests with 8 failures and 9 errors.
+- Phase commits: `f9dc86fb81a711bfd2b4d6f78301a31c455fd26b`,
+  `6c430b451aa0d537cc114d2bba6565eb1497084a`,
+  `2948f66d6c8366b9e073496bca956c2dba49f817`,
+  `f71236ff534b74c3738aad3cced870615610c4cd`, and
+  `3f3bfd5b31e1f9dd442d0d10c830c8e11df91a8f`.
+- Remaining risk: Python 3.10 is not installed on the local Windows host. This
+  phase parses already-loaded mappings; YAML file loading, doctor/inspection
+  presentation, and expansion of the safe compatibility-key surface remain
+  explicit later interface/operations work rather than hidden behavior here.
+- Next step: create and execute the Phase 4 versioned SQLite state, migration,
+  work-unit transition, artifact commit, retry-history, and stale-run plan.
