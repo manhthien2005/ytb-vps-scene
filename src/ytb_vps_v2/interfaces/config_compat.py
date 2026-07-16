@@ -66,9 +66,13 @@ def _pop_fraction(
     default: Fraction,
     path: str,
 ) -> Fraction:
-    value = section.pop(key, default)
+    if key not in section:
+        return default
+    value = section.pop(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ConfigError(f"{path}.{key} must be an int, float, or string")
     try:
-        return to_fraction(value)  # type: ignore[arg-type]
+        return to_fraction(value)
     except DomainInvariantError as exc:
         raise ConfigError(f"{path}.{key} must be a finite rational") from exc
 

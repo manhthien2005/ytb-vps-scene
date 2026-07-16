@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import (
@@ -22,10 +23,12 @@ STAGE_ORDER = (
     StageName.BACKUP,
 )
 
-STAGE_DEPENDENCIES: dict[StageName, tuple[StageName, ...]] = {
-    stage: (() if index == 0 else (STAGE_ORDER[index - 1],))
-    for index, stage in enumerate(STAGE_ORDER)
-}
+STAGE_DEPENDENCIES: Mapping[StageName, tuple[StageName, ...]] = MappingProxyType(
+    {
+        stage: (() if index == 0 else (STAGE_ORDER[index - 1],))
+        for index, stage in enumerate(STAGE_ORDER)
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

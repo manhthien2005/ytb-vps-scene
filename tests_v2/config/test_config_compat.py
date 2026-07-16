@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from decimal import Decimal
 from fractions import Fraction
 
 from ytb_vps_v2.domain.config import ConfigError
@@ -113,6 +114,8 @@ class ConfigCompatibilityTests(unittest.TestCase):
             {"render": {"mirror_video": 1}},
             {"ocr": {"sample_fps": "nan"}},
             {"translation": {"model": " padded"}},
+            {"tts": {"rate": Fraction(1)}},
+            {"tts": {"rate": Decimal("1.0")}},
         )
         for raw in invalid:
             with self.subTest(raw=raw):

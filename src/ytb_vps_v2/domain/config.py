@@ -46,7 +46,7 @@ def _boolean(name: str, value: object) -> None:
 
 
 def _nested(name: str, value: object, expected: type[object]) -> None:
-    if not isinstance(value, expected):
+    if type(value) is not expected:
         raise ConfigError(f"{name} must be {expected.__name__}")
 
 
@@ -150,7 +150,12 @@ class TtsConfig:
             minimum=Fraction(0),
             minimum_inclusive=False,
         )
-        _fraction("TTS maximum fit speed", self.max_fit_speed, minimum=Fraction(1))
+        _fraction(
+            "TTS maximum fit speed",
+            self.max_fit_speed,
+            minimum=Fraction(0),
+            minimum_inclusive=False,
+        )
 
 
 @dataclass(frozen=True, slots=True)

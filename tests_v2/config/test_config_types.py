@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass
 from fractions import Fraction
 
 from ytb_vps_v2.domain.config import (
@@ -74,13 +74,24 @@ class ConfigTypeTests(unittest.TestCase):
             SafetyConfig(cleanup_after_upload=0)  # type: ignore[arg-type]
 
     def test_effective_config_validates_nested_types_and_cross_fields(self) -> None:
+        @dataclass(frozen=True)
+        class DerivedMediaConfig(MediaConfig):
+            extra_field: str = "unapproved"
+
         with self.assertRaises(ConfigError):
             EffectiveConfig(media="media")  # type: ignore[arg-type]
+        with self.assertRaises(ConfigError):
+            EffectiveConfig(media=DerivedMediaConfig())
         with self.assertRaisesRegex(ConfigError, "sample FPS"):
             EffectiveConfig(
                 media=MediaConfig(target_fps=1),
                 ocr=OcrConfig(sample_fps=Fraction(2)),
             )
+
+    def test_max_fit_speed_accepts_every_positive_fraction(self) -> None:
+        config = TtsConfig(max_fit_speed=Fraction(1, 2))
+
+        self.assertEqual(config.max_fit_speed, Fraction(1, 2))
 
 
 if __name__ == "__main__":

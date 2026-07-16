@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from ytb_vps_v2.application.invalidation import InvalidationPlan, plan_invalidation
+from ytb_vps_v2.application.invalidation import (
+    STAGE_DEPENDENCIES,
+    InvalidationPlan,
+    plan_invalidation,
+)
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
@@ -167,6 +171,10 @@ class InvalidationTests(unittest.TestCase):
             with self.subTest(factory=factory):
                 with self.assertRaises(DomainInvariantError):
                     factory()  # type: ignore[misc]
+
+    def test_stage_dependency_graph_cannot_be_mutated(self) -> None:
+        with self.assertRaises(TypeError):
+            STAGE_DEPENDENCIES[StageName.OCR] = ()  # type: ignore[index]
 
 
 if __name__ == "__main__":
