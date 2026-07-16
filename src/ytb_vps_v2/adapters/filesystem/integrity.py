@@ -388,12 +388,11 @@ def _rename_directory_no_replace(
     expected_identity: tuple[int, int],
 ) -> None:
     if os.name == "nt":
-        with _windows_publication_guard(parent) as parent_handle:
+        with _windows_publication_guard(parent):
             _windows_rename_directory_handle(
                 source,
                 destination,
                 expected_identity,
-                parent_handle,
             )
         return
     with _posix_publication_directory(parent, parent) as directory_fd:
@@ -522,7 +521,6 @@ def _windows_rename_directory_handle(
     source: Path,
     destination: Path,
     expected_identity: tuple[int, int],
-    parent_handle: object,
 ) -> None:
     import ctypes
     from ctypes import wintypes
