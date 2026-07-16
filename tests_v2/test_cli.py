@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+
+
+class CliTests(unittest.TestCase):
+    def test_version_command_returns_zero_and_prints_version(self) -> None:
+        from ytb_vps_v2.interfaces.cli import main
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = main(["version"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.getvalue().strip(), "ytb-vps-v2 0.1.0.dev0")
+
+    def test_module_entry_point_runs_development_cli(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = "src"
+
+        result = subprocess.run(
+            [sys.executable, "-m", "ytb_vps_v2", "version"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ytb-vps-v2 0.1.0.dev0")
+
+
+if __name__ == "__main__":
+    unittest.main()
