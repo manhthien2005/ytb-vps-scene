@@ -29,7 +29,7 @@ class SqliteSchemaTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        self.assertEqual(SCHEMA_VERSION, 1)
+        self.assertEqual(SCHEMA_VERSION, 2)
         self.assertEqual(
             connection.execute("PRAGMA user_version").fetchone()[0],
             SCHEMA_VERSION,
@@ -47,6 +47,8 @@ class SqliteSchemaTests(unittest.TestCase):
                 "work_units",
                 "artifacts",
                 "retry_events",
+                "input_archives",
+                "checkpoint_snapshots",
             }.issubset(tables)
         )
 
@@ -70,7 +72,7 @@ class SqliteSchemaTests(unittest.TestCase):
 
     def test_future_schema_version_fails_explicitly(self) -> None:
         connection = connect_database(self.path)
-        connection.execute("PRAGMA user_version=2")
+        connection.execute("PRAGMA user_version=3")
         connection.close()
 
         with self.assertRaisesRegex(StateStoreError, "newer schema version"):

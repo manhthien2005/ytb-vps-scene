@@ -7,6 +7,14 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError, connect_database
+from ytb_vps_v2.domain.backup import (
+    CheckpointRecord,
+    FileDigest,
+    ManifestEntry,
+    SourceIdentity,
+    VerifiedInputArchive,
+)
+from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
 from ytb_vps_v2.domain.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.models import (
@@ -137,6 +145,181 @@ class SqliteStateStore:
             if stored != expected:
                 raise StateStoreError("Job configuration conflicts with stored snapshot")
 
+    def record_verified_input(
+        self,
+        job_id: JobId,
+        evidence: VerifiedInputArchive,
+    ) -> None:
+        job = _job_id(job_id)
+        if type(evidence) is not VerifiedInputArchive:
+            raise StateStoreError("Verified input must be VerifiedInputArchive")
+        with self._transaction() as connection:
+            stored_job = connection.execute(
+                "SELECT source_sha256 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone()
+            if stored_job is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            if stored_job["source_sha256"] != evidence.source.digest.sha256:
+                raise StateStoreError(
+                    "Verified input does not match the job source identity"
+                )
+            existing = connection.execute(
+                "SELECT source_name, archive_key, size_bytes, sha256 "
+                "FROM input_archives WHERE job_id=?",
+                (job.value,),
+            ).fetchone()
+            values = (
+                evidence.source.name,
+                str(evidence.archive.key),
+                evidence.archive.digest.size_bytes,
+                evidence.archive.digest.sha256,
+            )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO input_archives("
+                    "job_id, source_name, archive_key, size_bytes, sha256, verified_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    (job.value, *values, evidence.verified_at),
+                )
+                return
+            stored = (
+                existing["source_name"],
+                existing["archive_key"],
+                existing["size_bytes"],
+                existing["sha256"],
+            )
+            if stored != values:
+                raise StateStoreError("Verified input conflicts with stored archive")
+
+    def verified_input(self, job_id: JobId) -> VerifiedInputArchive | None:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            row = self.connection.execute(
+                "SELECT j.source_sha256, i.source_name, i.archive_key, "
+                "i.size_bytes, i.sha256, i.verified_at "
+                "FROM jobs j LEFT JOIN input_archives i ON i.job_id=j.job_id "
+                "WHERE j.job_id=?",
+                (job.value,),
+            ).fetchone()
+            if row is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            if row["archive_key"] is None:
+                return None
+            digest = FileDigest(row["size_bytes"], row["sha256"])
+            if digest.sha256 != row["source_sha256"]:
+                raise StateStoreError("Stored input archive does not match job source")
+            return VerifiedInputArchive(
+                SourceIdentity(row["source_name"], digest),
+                ManifestEntry(PurePosixPath(row["archive_key"]), digest),
+                row["verified_at"],
+            )
+        except StateStoreError:
+            raise
+        except (sqlite3.DatabaseError, DomainInvariantError, ValueError, TypeError) as exc:
+            raise StateStoreError("Unable to read verified input") from exc
+
+    def record_checkpoint(
+        self,
+        job_id: JobId,
+        checkpoint_id: str,
+        manifest: ManifestEntry,
+        state_snapshot: ManifestEntry,
+        at: str,
+    ) -> None:
+        job = _job_id(job_id)
+        identifier = _text("Checkpoint ID", checkpoint_id, 128)
+        if type(manifest) is not ManifestEntry:
+            raise StateStoreError("Checkpoint manifest must be ManifestEntry")
+        if type(state_snapshot) is not ManifestEntry:
+            raise StateStoreError("Checkpoint state snapshot must be ManifestEntry")
+        timestamp = _text("Checkpoint completion time", at, 128)
+        try:
+            record = CheckpointRecord(
+                job, identifier, manifest, state_snapshot, timestamp
+            )
+        except DomainInvariantError as exc:
+            raise StateStoreError("Checkpoint evidence is invalid") from exc
+        with self._transaction() as connection:
+            durable_input = connection.execute(
+                "SELECT 1 FROM input_archives i JOIN jobs j ON j.job_id=i.job_id "
+                "WHERE i.job_id=? AND i.sha256=j.source_sha256",
+                (job.value,),
+            ).fetchone()
+            if durable_input is None:
+                raise StateStoreError(
+                    "Checkpoint requires matching verified input evidence"
+                )
+            existing = connection.execute(
+                "SELECT manifest_key, manifest_size_bytes, manifest_sha256, "
+                "state_key, state_size_bytes, state_sha256 "
+                "FROM checkpoint_snapshots WHERE job_id=? AND checkpoint_id=?",
+                (job.value, identifier),
+            ).fetchone()
+            values = (
+                str(record.manifest.key),
+                record.manifest.digest.size_bytes,
+                record.manifest.digest.sha256,
+                str(record.state_snapshot.key),
+                record.state_snapshot.digest.size_bytes,
+                record.state_snapshot.digest.sha256,
+            )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO checkpoint_snapshots("
+                    "job_id, checkpoint_id, manifest_key, manifest_size_bytes, "
+                    "manifest_sha256, state_key, state_size_bytes, state_sha256, "
+                    "completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (job.value, identifier, *values, timestamp),
+                )
+                return
+            stored = tuple(existing[index] for index in range(6))
+            if stored != values:
+                raise StateStoreError("Checkpoint evidence conflicts with stored record")
+
+    def completed_checkpoints(
+        self, job_id: JobId
+    ) -> tuple[CheckpointRecord, ...]:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?", (job.value,)
+            ).fetchone() is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = self.connection.execute(
+                "SELECT checkpoint_id, manifest_key, manifest_size_bytes, "
+                "manifest_sha256, state_key, state_size_bytes, state_sha256, "
+                "completed_at FROM checkpoint_snapshots WHERE job_id=? "
+                "ORDER BY checkpoint_id",
+                (job.value,),
+            ).fetchall()
+            return tuple(
+                CheckpointRecord(
+                    job,
+                    row["checkpoint_id"],
+                    ManifestEntry(
+                        PurePosixPath(row["manifest_key"]),
+                        FileDigest(
+                            row["manifest_size_bytes"], row["manifest_sha256"]
+                        ),
+                    ),
+                    ManifestEntry(
+                        PurePosixPath(row["state_key"]),
+                        FileDigest(row["state_size_bytes"], row["state_sha256"]),
+                    ),
+                    row["completed_at"],
+                )
+                for row in rows
+            )
+        except StateStoreError:
+            raise
+        except (sqlite3.DatabaseError, DomainInvariantError, ValueError, TypeError) as exc:
+            raise StateStoreError("Unable to read checkpoint evidence") from exc
+
     def put_work_unit(self, job_id: JobId, unit: WorkUnit, at: str) -> None:
         job = _job_id(job_id)
         if type(unit) is not WorkUnit:
@@ -202,6 +385,22 @@ class SqliteStateStore:
         key = _text("Work unit key", unit_key)
         timestamp = _text("Work unit timestamp", at, 128)
         with self._transaction() as connection:
+            current = connection.execute(
+                "SELECT stage FROM work_units WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if current is None:
+                raise StateTransitionError(f"Work unit cannot start: {key}")
+            if current["stage"] != StageName.INGEST.value:
+                durable_input = connection.execute(
+                    "SELECT 1 FROM input_archives i JOIN jobs j ON j.job_id=i.job_id "
+                    "WHERE i.job_id=? AND i.sha256=j.source_sha256",
+                    (job.value,),
+                ).fetchone()
+                if durable_input is None:
+                    raise StateTransitionError(
+                        f"Work unit requires durable input before start: {key}"
+                    )
             cursor = connection.execute(
                 "UPDATE work_units SET status=?, attempts=attempts+1, "
                 "error_kind=NULL, error_message=NULL, updated_at=? "

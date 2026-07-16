@@ -1,5 +1,6 @@
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
+    CheckpointRecord,
     FileDigest,
     ManifestEntry,
     SourceIdentity,
@@ -41,6 +42,7 @@ __all__ = [
     "BoundingBox",
     "Cue",
     "CheckpointManifest",
+    "CheckpointRecord",
     "DomainInvariantError",
     "FileDigest",
     "Fingerprint",

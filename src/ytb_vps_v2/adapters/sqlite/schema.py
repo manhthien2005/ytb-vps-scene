@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StateStoreError(RuntimeError):
@@ -66,6 +66,34 @@ COMMIT;
 """
 
 
+_MIGRATION_2 = """
+BEGIN IMMEDIATE;
+CREATE TABLE input_archives (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+    source_name TEXT NOT NULL,
+    archive_key TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    sha256 TEXT NOT NULL,
+    verified_at TEXT NOT NULL
+);
+CREATE TABLE checkpoint_snapshots (
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    checkpoint_id TEXT NOT NULL,
+    manifest_key TEXT NOT NULL,
+    manifest_size_bytes INTEGER NOT NULL CHECK (manifest_size_bytes >= 0),
+    manifest_sha256 TEXT NOT NULL,
+    state_key TEXT NOT NULL,
+    state_size_bytes INTEGER NOT NULL CHECK (state_size_bytes >= 0),
+    state_sha256 TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, checkpoint_id),
+    UNIQUE (job_id, manifest_key)
+);
+PRAGMA user_version=2;
+COMMIT;
+"""
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     if not isinstance(connection, sqlite3.Connection):
         raise StateStoreError("Migration requires a SQLite connection")
@@ -77,6 +105,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         if version == 0:
             connection.executescript(_MIGRATION_1)
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version == 1:
+            connection.executescript(_MIGRATION_2)
         final_version = connection.execute("PRAGMA user_version").fetchone()[0]
         if final_version != SCHEMA_VERSION:
             raise StateStoreError(

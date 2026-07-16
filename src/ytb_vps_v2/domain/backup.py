@@ -112,6 +112,29 @@ class VerifiedInputArchive:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointRecord:
+    job_id: JobId
+    checkpoint_id: str
+    manifest: ManifestEntry
+    state_snapshot: ManifestEntry
+    completed_at: str
+
+    def __post_init__(self) -> None:
+        if type(self.job_id) is not JobId:
+            raise DomainInvariantError("Checkpoint record job ID must be JobId")
+        _text("Checkpoint record ID", self.checkpoint_id, 128)
+        if type(self.manifest) is not ManifestEntry:
+            raise DomainInvariantError("Checkpoint record manifest must be ManifestEntry")
+        if type(self.state_snapshot) is not ManifestEntry:
+            raise DomainInvariantError(
+                "Checkpoint record state snapshot must be ManifestEntry"
+            )
+        _text("Checkpoint completion time", self.completed_at, 128)
+        if self.manifest.key == self.state_snapshot.key:
+            raise DomainInvariantError("Checkpoint record keys must be distinct")
+
+
+@dataclass(frozen=True, slots=True)
 class CheckpointManifest:
     version: int
     checkpoint_id: str

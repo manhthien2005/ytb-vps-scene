@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
+from ytb_vps_v2.domain.backup import (
+    FileDigest,
+    ManifestEntry,
+    SourceIdentity,
+    VerifiedInputArchive,
+)
 from ytb_vps_v2.domain.config import EffectiveConfig, OcrConfig
 from ytb_vps_v2.domain.fingerprints import Fingerprint, stage_config_fingerprints
 from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus, WorkUnit
@@ -23,6 +29,15 @@ class SqliteWorkUnitTests(unittest.TestCase):
         self.source = Fingerprint("a" * 64)
         self.config = stage_config_fingerprints(EffectiveConfig())
         self.store.create_job(self.job_id, self.source, self.config, "t0")
+        digest = FileDigest(1, "a" * 64)
+        self.store.record_verified_input(
+            self.job_id,
+            VerifiedInputArchive(
+                SourceIdentity("source.mp4", digest),
+                ManifestEntry(PurePosixPath("inputs/source.mp4"), digest),
+                "verified",
+            ),
+        )
 
     def test_job_and_pending_unit_survive_reopen(self) -> None:
         self.store.put_work_unit(

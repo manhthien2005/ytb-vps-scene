@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from ytb_vps_v2.domain.backup import (
+    CheckpointRecord,
+    ManifestEntry,
+    VerifiedInputArchive,
+)
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
 from ytb_vps_v2.domain.invalidation import InvalidationPlan
 from ytb_vps_v2.domain.models import Artifact, JobId, WorkUnit
@@ -17,6 +22,25 @@ class StateRepository(Protocol):
         config_fingerprints: tuple[StageConfigFingerprint, ...],
         at: str,
     ) -> None: ...
+
+    def record_verified_input(
+        self, job_id: JobId, evidence: VerifiedInputArchive
+    ) -> None: ...
+
+    def verified_input(self, job_id: JobId) -> VerifiedInputArchive | None: ...
+
+    def record_checkpoint(
+        self,
+        job_id: JobId,
+        checkpoint_id: str,
+        manifest: ManifestEntry,
+        state_snapshot: ManifestEntry,
+        at: str,
+    ) -> None: ...
+
+    def completed_checkpoints(
+        self, job_id: JobId
+    ) -> tuple[CheckpointRecord, ...]: ...
 
     def put_work_unit(self, job_id: JobId, unit: WorkUnit, at: str) -> None: ...
 
