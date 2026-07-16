@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from fractions import Fraction
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
+from ytb_vps_v2.domain.timeline import FrameInterval, Timeline, to_fraction
 
 
 class TimelineTests(unittest.TestCase):
@@ -66,6 +67,42 @@ class TimelineTests(unittest.TestCase):
                 )
                 self.assertLess(interval.start_frame, interval.end_frame)
                 self.assertEqual(interval.end_frame, 300)
+
+    def test_frame_indexes_must_be_real_integers(self) -> None:
+        invalid_intervals = (
+            (False, 1),
+            (0, True),
+            (0.5, 1),
+            (0, 1.5),
+        )
+        for start_frame, end_frame in invalid_intervals:
+            with self.subTest(start_frame=start_frame, end_frame=end_frame):
+                with self.assertRaises(DomainInvariantError):
+                    FrameInterval(start_frame, end_frame)  # type: ignore[arg-type]
+
+        timeline = Timeline()
+        for start_frame, end_frame in ((False, 1), (0, 1.5)):
+            with self.subTest(start_frame=start_frame, end_frame=end_frame):
+                with self.assertRaises(DomainInvariantError):
+                    timeline.normalize_source_interval(  # type: ignore[arg-type]
+                        start_frame,
+                        end_frame,
+                        30,
+                        1,
+                    )
+
+    def test_non_finite_and_boolean_rationals_raise_domain_errors(self) -> None:
+        invalid_values = (
+            True,
+            float("nan"),
+            float("inf"),
+            Decimal("NaN"),
+            Decimal("Infinity"),
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaises(DomainInvariantError):
+                    to_fraction(value)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import (
@@ -65,7 +65,7 @@ class DomainModelTests(unittest.TestCase):
         unit = WorkUnit("ocr:000001", StageName.OCR)
         artifact = Artifact(
             name="ocr-chunk-000001",
-            relative_path=Path("ocr/chunk-000001.jsonl"),
+            relative_path=PurePosixPath("ocr/chunk-000001.jsonl"),
             size_bytes=42,
             sha256="a" * 64,
             owner=StageName.OCR,
@@ -76,7 +76,7 @@ class DomainModelTests(unittest.TestCase):
         self.assertEqual(unit.attempts, 0)
         self.assertEqual(artifact.owner, StageName.OCR)
         with self.assertRaises(DomainInvariantError):
-            Artifact("bad", Path("bad"), 1, "not-a-sha", StageName.OCR)
+            Artifact("bad", PurePosixPath("bad"), 1, "not-a-sha", StageName.OCR)
 
     def test_part_requires_valid_index_and_ordered_unique_chunks(self) -> None:
         part = Part(1, 2, self.interval, (0, 1, 2))
@@ -108,6 +108,71 @@ class DomainModelTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DomainInvariantError, "Unsupported pipeline mode"):
             Job(JobId("abc123"), media, "scene_voiceover")  # type: ignore[arg-type]
+
+    def test_integer_fields_reject_booleans_and_fractional_values(self) -> None:
+        invalid_factories = (
+            lambda: BoundingBox(False, 0, 10, 10),
+            lambda: BoundingBox(0, 0, 10.5, 10),
+            lambda: MediaIdentity(Fraction(1), Fraction(30), Timeline(), True, 1080, True),
+            lambda: Cue(1.5, self.interval, self.box, "text"),
+            lambda: WorkUnit("ocr:1", StageName.OCR, attempts=False),
+            lambda: Artifact("a", PurePosixPath("a.json"), 1.5, "a" * 64, StageName.OCR),
+            lambda: Part(True, 1, self.interval, (0,)),
+            lambda: Part(1, 1.5, self.interval, (0,)),
+            lambda: Part(1, 1, self.interval, (False,)),
+        )
+        for factory in invalid_factories:
+            with self.subTest(factory=factory):
+                with self.assertRaises(DomainInvariantError):
+                    factory()  # type: ignore[misc]
+
+    def test_nested_models_and_enums_are_validated_at_runtime(self) -> None:
+        invalid_factories = (
+            lambda: Job("abc123", self._media()),
+            lambda: Job(JobId("abc123"), "media"),
+            lambda: Cue(1, "interval", self.box, "text"),
+            lambda: Cue(1, self.interval, "box", "text"),
+            lambda: BlurRegion("dynamic_blur", self.interval, self.box),
+            lambda: WorkUnit("ocr:1", "OCR"),
+            lambda: WorkUnit("ocr:1", StageName.OCR, "PENDING"),
+            lambda: Artifact("a", PurePosixPath("a.json"), 1, "a" * 64, "OCR"),
+            lambda: Part(1, 1, "interval", (0,)),
+        )
+        for factory in invalid_factories:
+            with self.subTest(factory=factory):
+                with self.assertRaises(DomainInvariantError):
+                    factory()  # type: ignore[misc]
+
+    def test_artifact_paths_use_portable_relative_posix_format(self) -> None:
+        invalid_paths = (
+            PurePosixPath("."),
+            PurePosixPath("../secret"),
+            PurePosixPath(r"..\secret"),
+            PurePosixPath(r"\secret"),
+            PurePosixPath("C:secret"),
+            PurePosixPath(r"C:\secret"),
+            PurePosixPath(r"\\server\share"),
+            PurePosixPath(r"nested\artifact.json"),
+            PureWindowsPath("nested/artifact.json"),
+            Path("nested/artifact.json"),
+        )
+        for path in invalid_paths:
+            with self.subTest(path=path):
+                with self.assertRaises(DomainInvariantError):
+                    Artifact("a", path, 1, "a" * 64, StageName.OCR)
+
+        artifact = Artifact(
+            "a",
+            PurePosixPath("nested/artifact.json"),
+            1,
+            "a" * 64,
+            StageName.OCR,
+        )
+        self.assertEqual(artifact.relative_path.as_posix(), "nested/artifact.json")
+
+    @staticmethod
+    def _media() -> MediaIdentity:
+        return MediaIdentity(Fraction(1), Fraction(30), Timeline(), 1920, 1080, True)
 
 
 if __name__ == "__main__":

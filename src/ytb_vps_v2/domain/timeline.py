@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
+from math import isfinite
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
 
@@ -11,16 +12,29 @@ Seconds = int | float | str | Decimal | Fraction
 
 
 def to_fraction(value: Seconds) -> Fraction:
-    if isinstance(value, Fraction):
-        return value
-    if isinstance(value, Decimal):
-        return Fraction(value)
-    if isinstance(value, float):
-        return Fraction(str(value))
+    if isinstance(value, bool):
+        raise DomainInvariantError(f"Invalid rational value: {value!r}")
     try:
-        return Fraction(value)
-    except (TypeError, ValueError, ZeroDivisionError) as exc:
+        if isinstance(value, Fraction):
+            result = value
+        elif isinstance(value, Decimal):
+            if not value.is_finite():
+                raise ValueError("Decimal value must be finite")
+            result = Fraction(value)
+        elif isinstance(value, float):
+            if not isfinite(value):
+                raise ValueError("Float value must be finite")
+            result = Fraction(str(value))
+        else:
+            result = Fraction(value)
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
         raise DomainInvariantError(f"Invalid rational value: {value!r}") from exc
+    return result
+
+
+def _require_frame_index(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DomainInvariantError(f"{name} must be an integer")
 
 
 def _floor(value: Fraction) -> int:
@@ -37,6 +51,8 @@ class FrameInterval:
     end_frame: int
 
     def __post_init__(self) -> None:
+        _require_frame_index("Frame interval start", self.start_frame)
+        _require_frame_index("Frame interval end", self.end_frame)
         if self.start_frame < 0:
             raise DomainInvariantError("Frame interval start must be non-negative")
         if self.end_frame <= self.start_frame:
@@ -47,6 +63,7 @@ class FrameInterval:
         return self.end_frame - self.start_frame
 
     def contains(self, frame_index: int) -> bool:
+        _require_frame_index("Frame index", frame_index)
         return self.start_frame <= frame_index < self.end_frame
 
 
@@ -94,6 +111,8 @@ class Timeline:
         source_fps: Seconds,
         duration_seconds: Seconds,
     ) -> FrameInterval:
+        _require_frame_index("Source frame interval start", start_source_frame)
+        _require_frame_index("Source frame interval end", end_source_frame)
         if start_source_frame < 0 or end_source_frame <= start_source_frame:
             raise DomainInvariantError("Source frame interval must be non-empty")
         source_rate = to_fraction(source_fps)
