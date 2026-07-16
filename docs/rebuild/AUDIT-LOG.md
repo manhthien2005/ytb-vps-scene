@@ -42,3 +42,39 @@ historical evidence.
   implementation has not started; Python 3.10 is not installed on this dev host.
 - Next step: obtain written-spec approval, invoke `superpowers:writing-plans`, and
   produce the detailed Phase 1 implementation plan before code changes.
+
+## 2026-07-16T19:56:48+07:00 — Phase 1 package scaffold
+
+- Objective: create an independent installable v2 package, development CLI,
+  Python 3.10 CI contract, and developer guide without changing legacy runtime
+  code or the public `ytb-vps` entry point.
+- Contract/invariant: `src/ytb_vps_v2` does not import `ytb_vps`; only the
+  temporary `ytb-vps-v2` script is registered; production targets Python 3.10;
+  the legacy package and command remain unchanged until cutover.
+- Changed files: `pyproject.toml`, `.github/workflows/v2-ci.yml`,
+  `src/ytb_vps_v2/__init__.py`, `src/ytb_vps_v2/__main__.py`,
+  `src/ytb_vps_v2/interfaces/__init__.py`,
+  `src/ytb_vps_v2/interfaces/cli.py`, `tests_v2/__init__.py`,
+  `tests_v2/test_package_smoke.py`, `tests_v2/test_cli.py`,
+  `tests_v2/test_ci_contract.py`, `docs/rebuild/DEVELOPMENT.md`, and this audit
+  log.
+- Tests/gates: observed each new test fail before implementation; ran
+  `python -m compileall -q src tests_v2`,
+  `python -m unittest discover -s tests_v2 -t . -v`, the package import and
+  Python-range assertion, `ytb-vps-v2 version`, legacy-import scan, public
+  entry-point scan, editable install, wheel build, offline wheel install into a
+  clean temporary venv, full phase diff review, staged filename review, secret
+  filename gate, `git diff --check`, and independent code review.
+- Result: all 6 v2 tests passed; compile, editable install, wheel build, clean
+  install, import, module entry, and console entry passed on Python 3.12.10. The
+  legacy suite remained at its audited baseline of 62 tests with 8 failures and
+  9 errors. Independent review found no Critical or Important implementation
+  defect; its required audit gap is resolved by this entry.
+- Phase commits: `6441b81cb27f5c4eb275aece0dac0f034e27ffa9`,
+  `f5ee7ae5e21fb7e3d2fe85f5a1d0e1fb5f4ef1b4`, and
+  `7236a454050e271284fae48b52d150f0600bfe9f`.
+- Remaining risk: Python 3.10 is not installed on the local Windows host. The
+  configured GitHub Actions job becomes the Python 3.10 execution evidence only
+  after an authorized user pushes the branch and CI runs.
+- Next step: create and execute the Phase 2 canonical timeline and domain-model
+  plan.
