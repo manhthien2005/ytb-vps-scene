@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import PurePosixPath, PureWindowsPath
+from types import MappingProxyType
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -22,6 +23,14 @@ from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
 SCHEMA_VERSION = 1
 OFFLINE_FRAME_COUNT = 900
 OFFLINE_DURATION_SECONDS = Fraction(30)
+MEDIA_ARTIFACT_PATH = PurePosixPath("artifacts/ingest/media.json")
+OCR_ARTIFACT_PATH = PurePosixPath("artifacts/ocr/ocr.json")
+TRACK_ARTIFACT_PATH = PurePosixPath("artifacts/track/track.json")
+TRANSLATION_ARTIFACT_PATH = PurePosixPath("artifacts/translate/translation.json")
+TTS_ARTIFACT_PATH = PurePosixPath("artifacts/tts/tts.json")
+RENDER_PLAN_ARTIFACT_PATH = PurePosixPath("artifacts/render/render-plan.json")
+PUBLICATION_ARTIFACT_PATH = PurePosixPath("artifacts/publish/publication.json")
+CHECKPOINT_ARTIFACT_PATH = PurePosixPath("artifacts/backup/checkpoint.json")
 
 
 def _require_exact(name: str, value: object, expected: type[object]) -> None:
@@ -65,6 +74,29 @@ def _digest(name: str, value: object) -> FileDigest:
     return value  # type: ignore[return-value]
 
 
+def _job_id(name: str, value: object) -> JobId:
+    _require_exact(name, value, JobId)
+    _require_exact(f"{name} value", value.value, str)  # type: ignore[attr-defined]
+    return value  # type: ignore[return-value]
+
+
+def _frame_interval(name: str, value: object) -> FrameInterval:
+    _require_exact(name, value, FrameInterval)
+    _require_int(f"{name} start", value.start_frame)  # type: ignore[attr-defined]
+    _require_int(f"{name} end", value.end_frame)  # type: ignore[attr-defined]
+    return value  # type: ignore[return-value]
+
+
+def _bounding_box(name: str, value: object) -> BoundingBox:
+    _require_exact(name, value, BoundingBox)
+    for coordinate in ("xmin", "ymin", "xmax", "ymax"):
+        _require_int(
+            f"{name} {coordinate}",
+            getattr(value, coordinate),
+        )
+    return value  # type: ignore[return-value]
+
+
 def _dimensions(frame_count: object, width: object, height: object) -> None:
     _require_int("Frame count", frame_count, minimum=1)
     _require_int("Media width", width, minimum=1)
@@ -84,13 +116,18 @@ def _base(
     height: object,
     dependency_path: object,
     dependency_digest: object,
+    expected_dependency_path: PurePosixPath,
 ) -> None:
     _require_schema(schema_version)
-    _require_exact("Pipeline job ID", job_id, JobId)
+    _job_id("Pipeline job ID", job_id)
     _digest("Media digest", media_digest)
     _dimensions(frame_count, width, height)
-    _artifact_path("Dependency path", dependency_path)
+    validated_path = _artifact_path("Dependency path", dependency_path)
     _digest("Dependency digest", dependency_digest)
+    if validated_path != expected_dependency_path:
+        raise DomainInvariantError(
+            f"Dependency path must be {expected_dependency_path.as_posix()}"
+        )
 
 
 def _cues(
@@ -108,6 +145,10 @@ def _cues(
     if indexes != tuple(sorted(set(indexes))):
         raise DomainInvariantError("Cue indexes must be ordered and unique")
     for cue in cues:
+        _require_int("Cue index", cue.cue_index)
+        _frame_interval("Cue interval", cue.interval)
+        _bounding_box("Cue box", cue.box)
+        _require_exact("Cue source text", cue.source_text, str)
         if cue.interval.end_frame > frame_count:
             raise DomainInvariantError("Cue interval must stay inside media frames")
         if cue.box.xmax > width or cue.box.ymax > height:
@@ -128,6 +169,9 @@ def _blur_regions(
         raise DomainInvariantError("Blur regions must be BlurRegion values")
     regions = value
     for region in regions:
+        _require_exact("Blur region kind", region.kind, RegionKind)
+        _frame_interval("Blur region interval", region.interval)
+        _bounding_box("Blur region box", region.box)
         if region.interval.end_frame > frame_count:
             raise DomainInvariantError("Blur interval must stay inside media frames")
         if region.box.xmax > width or region.box.ymax > height:
@@ -139,6 +183,14 @@ def _parts(value: object, *, frame_count: int) -> tuple[Part, ...]:
     if type(value) is not tuple or not value or any(type(item) is not Part for item in value):
         raise DomainInvariantError("Document parts must be a non-empty tuple of Part values")
     parts = value
+    for part in parts:
+        _require_int("Part index", part.part_index)
+        _require_int("Part count", part.part_count)
+        _frame_interval("Part interval", part.interval)
+        if type(part.chunk_indexes) is not tuple:
+            raise DomainInvariantError("Part chunk indexes must be a tuple")
+        for chunk_index in part.chunk_indexes:
+            _require_int("Part chunk index", chunk_index)
     expected_indexes = tuple(range(1, len(parts) + 1))
     if (
         tuple(item.part_index for item in parts) != expected_indexes
@@ -180,12 +232,13 @@ class MediaDocument:
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version)
-        _require_exact("Media job ID", self.job_id, JobId)
+        _job_id("Media job ID", self.job_id)
         _artifact_path("Media source path", self.source_path)
         _digest("Media source digest", self.source_digest)
         _require_exact("Media duration", self.duration_seconds, Fraction)
         _require_exact("Media source FPS", self.source_fps, Fraction)
         _require_exact("Media timeline", self.timeline, Timeline)
+        _require_int("Media timeline target FPS", self.timeline.target_fps)
         _dimensions(self.frame_count, self.width, self.height)
         _require_exact("Media audio flag", self.has_audio, bool)
         if self.duration_seconds != OFFLINE_DURATION_SECONDS:
@@ -218,6 +271,7 @@ class OcrDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            MEDIA_ARTIFACT_PATH,
         )
         _cues(
             self.cues,
@@ -251,6 +305,7 @@ class TrackDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            OCR_ARTIFACT_PATH,
         )
         _cues(
             self.cues,
@@ -289,6 +344,7 @@ class TranslationDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            TRACK_ARTIFACT_PATH,
         )
         _cues(
             self.cues,
@@ -323,6 +379,7 @@ class TtsDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            TRANSLATION_ARTIFACT_PATH,
         )
         _cues(
             self.cues,
@@ -362,6 +419,7 @@ class RenderPlanDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            TTS_ARTIFACT_PATH,
         )
         _cues(
             self.cues,
@@ -406,6 +464,7 @@ class PublicationDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            RENDER_PLAN_ARTIFACT_PATH,
         )
         parts = _parts(self.parts, frame_count=self.frame_count)
         paths = _artifact_paths("Published Part paths", self.part_paths)
@@ -440,6 +499,7 @@ class CheckpointDocument:
             self.height,
             self.dependency_path,
             self.dependency_digest,
+            PUBLICATION_ARTIFACT_PATH,
         )
         if (
             type(self.checkpoint_id) is not str
@@ -453,6 +513,20 @@ class CheckpointDocument:
         _digest("Checkpoint state snapshot digest", self.state_snapshot_digest)
         if self.manifest_path == self.state_snapshot_path:
             raise DomainInvariantError("Checkpoint artifact paths must be distinct")
+
+
+PIPELINE_ARTIFACT_PATHS = MappingProxyType(
+    {
+        MediaDocument: MEDIA_ARTIFACT_PATH,
+        OcrDocument: OCR_ARTIFACT_PATH,
+        TrackDocument: TRACK_ARTIFACT_PATH,
+        TranslationDocument: TRANSLATION_ARTIFACT_PATH,
+        TtsDocument: TTS_ARTIFACT_PATH,
+        RenderPlanDocument: RENDER_PLAN_ARTIFACT_PATH,
+        PublicationDocument: PUBLICATION_ARTIFACT_PATH,
+        CheckpointDocument: CHECKPOINT_ARTIFACT_PATH,
+    }
+)
 
 
 def _fraction_dict(value: Fraction) -> dict[str, int]:
@@ -590,14 +664,11 @@ def _document_dict(document: object) -> dict[str, object]:
 def canonical_document_bytes(document: object) -> bytes:
     payload = _document_dict(document)
     try:
-        return (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
         ).encode("utf-8")
     except UnicodeEncodeError as exc:
         raise DomainInvariantError("Pipeline document contains invalid Unicode") from exc
@@ -817,7 +888,12 @@ def _verify_upstream(
         upstream.width,  # type: ignore[attr-defined]
         upstream.height,  # type: ignore[attr-defined]
     )
-    if identity != upstream_identity or document.dependency_digest != expected_digest:  # type: ignore[attr-defined]
+    expected_path = PIPELINE_ARTIFACT_PATHS[expected_type]
+    if (
+        identity != upstream_identity
+        or document.dependency_path != expected_path  # type: ignore[attr-defined]
+        or document.dependency_digest != expected_digest  # type: ignore[attr-defined]
+    ):
         raise DomainInvariantError("Pipeline document dependency identity is inconsistent")
 
     if type(document) is TrackDocument and document.cues != upstream.cues:  # type: ignore[attr-defined]

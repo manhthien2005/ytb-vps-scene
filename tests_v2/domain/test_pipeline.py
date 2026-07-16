@@ -43,6 +43,33 @@ from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
+MEDIA_ARTIFACT_PATH = PurePosixPath("artifacts/ingest/media.json")
+OCR_ARTIFACT_PATH = PurePosixPath("artifacts/ocr/ocr.json")
+TRACK_ARTIFACT_PATH = PurePosixPath("artifacts/track/track.json")
+TRANSLATION_ARTIFACT_PATH = PurePosixPath("artifacts/translate/translation.json")
+TTS_ARTIFACT_PATH = PurePosixPath("artifacts/tts/tts.json")
+RENDER_PLAN_ARTIFACT_PATH = PurePosixPath("artifacts/render/render-plan.json")
+PUBLICATION_ARTIFACT_PATH = PurePosixPath("artifacts/publish/publication.json")
+
+
+class FrameIntervalSubclass(FrameInterval):
+    pass
+
+
+class BoundingBoxSubclass(BoundingBox):
+    pass
+
+
+class IntSubclass(int):
+    pass
+
+
+class TextSubclass(str):
+    pass
+
+
+class TupleSubclass(tuple):
+    pass
 
 
 def digest(sha256: str = SHA_A, size: int = 10) -> FileDigest:
@@ -76,7 +103,7 @@ def translated_cues() -> tuple[Cue, ...]:
     return tuple(replace(cue, target_text=f"vi:{cue.source_text}") for cue in source_cues())
 
 
-def common() -> tuple[object, ...]:
+def common(dependency_path: PurePosixPath) -> tuple[object, ...]:
     return (
         1,
         JobId("job-001"),
@@ -84,18 +111,18 @@ def common() -> tuple[object, ...]:
         900,
         320,
         180,
-        PurePosixPath("artifacts/upstream.json"),
+        dependency_path,
         digest(SHA_B),
     )
 
 
 def ocr() -> OcrDocument:
-    return OcrDocument(*common(), source_cues())  # type: ignore[arg-type]
+    return OcrDocument(*common(MEDIA_ARTIFACT_PATH), source_cues())  # type: ignore[arg-type]
 
 
 def track() -> TrackDocument:
     return TrackDocument(
-        *common(),  # type: ignore[arg-type]
+        *common(OCR_ARTIFACT_PATH),  # type: ignore[arg-type]
         source_cues(),
         (
             BlurRegion(
@@ -108,12 +135,14 @@ def track() -> TrackDocument:
 
 
 def translation() -> TranslationDocument:
-    return TranslationDocument(*common(), translated_cues())  # type: ignore[arg-type]
+    return TranslationDocument(  # type: ignore[arg-type]
+        *common(TRACK_ARTIFACT_PATH), translated_cues()
+    )
 
 
 def tts() -> TtsDocument:
     return TtsDocument(
-        *common(),  # type: ignore[arg-type]
+        *common(TRANSLATION_ARTIFACT_PATH),  # type: ignore[arg-type]
         translated_cues(),
         PurePosixPath("artifacts/tts.wav"),
         digest(),
@@ -122,7 +151,7 @@ def tts() -> TtsDocument:
 
 def render_plan() -> RenderPlanDocument:
     return RenderPlanDocument(
-        *common(),  # type: ignore[arg-type]
+        *common(TTS_ARTIFACT_PATH),  # type: ignore[arg-type]
         translated_cues(),
         track().blur_regions,
         PurePosixPath("artifacts/tts.wav"),
@@ -134,7 +163,7 @@ def render_plan() -> RenderPlanDocument:
 
 def publication() -> PublicationDocument:
     return PublicationDocument(
-        *common(),  # type: ignore[arg-type]
+        *common(RENDER_PLAN_ARTIFACT_PATH),  # type: ignore[arg-type]
         render_plan().parts,
         (PurePosixPath("published/part-001.mp4"),),
         (digest(),),
@@ -143,7 +172,7 @@ def publication() -> PublicationDocument:
 
 def checkpoint() -> CheckpointDocument:
     return CheckpointDocument(
-        *common(),  # type: ignore[arg-type]
+        *common(PUBLICATION_ARTIFACT_PATH),  # type: ignore[arg-type]
         "checkpoint-001",
         PurePosixPath("checkpoints/manifest-v1.json"),
         digest(),
@@ -158,7 +187,7 @@ def canonical_payload(payload: object) -> bytes:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode("utf-8") + b"\n"
+    ).encode("utf-8")
 
 
 def document_digest(document: object) -> FileDigest:
@@ -475,6 +504,84 @@ class PipelineValueTests(unittest.TestCase):
                 state_snapshot_path=checkpoint().manifest_path,
             )
 
+    def test_documents_reject_nested_subclasses_and_impostors(self) -> None:
+        cue = source_cues()[0]
+        blur = track().blur_regions[0]
+        part = render_plan().parts[0]
+
+        def forged_region_kind() -> TrackDocument:
+            region = replace(blur)
+            object.__setattr__(region, "kind", RegionKind.DYNAMIC.value)
+            return replace(track(), blur_regions=(region,))
+
+        invalid_factories = (
+            lambda: replace(media(), job_id=JobId(TextSubclass("job-001"))),
+            lambda: replace(media(), timeline=Timeline(IntSubclass(30))),
+            lambda: replace(
+                ocr(),
+                cues=(replace(cue, cue_index=IntSubclass(1)),),
+            ),
+            lambda: replace(
+                ocr(),
+                cues=(
+                    replace(cue, interval=FrameIntervalSubclass(30, 90)),
+                ),
+            ),
+            lambda: replace(
+                ocr(),
+                cues=(
+                    replace(cue, box=BoundingBoxSubclass(10, 20, 110, 60)),
+                ),
+            ),
+            lambda: replace(
+                ocr(),
+                cues=(
+                    replace(
+                        cue,
+                        box=BoundingBox(IntSubclass(10), 20, 110, 60),
+                    ),
+                ),
+            ),
+            lambda: replace(
+                ocr(),
+                cues=(replace(cue, source_text=TextSubclass("hello")),),
+            ),
+            forged_region_kind,
+            lambda: replace(
+                track(),
+                blur_regions=(
+                    replace(blur, interval=FrameIntervalSubclass(30, 90)),
+                ),
+            ),
+            lambda: replace(
+                track(),
+                blur_regions=(
+                    replace(blur, box=BoundingBoxSubclass(10, 20, 110, 60)),
+                ),
+            ),
+            lambda: replace(
+                render_plan(),
+                parts=(replace(part, part_index=IntSubclass(1)),),
+            ),
+            lambda: replace(
+                render_plan(),
+                parts=(replace(part, interval=FrameIntervalSubclass(0, 900)),),
+            ),
+            lambda: replace(
+                render_plan(),
+                parts=(replace(part, chunk_indexes=TupleSubclass((0,))),),
+            ),
+            lambda: replace(
+                render_plan(),
+                parts=(replace(part, chunk_indexes=(IntSubclass(0),)),),
+            ),
+        )
+
+        for factory in invalid_factories:
+            with self.subTest(factory=factory):
+                with self.assertRaises(DomainInvariantError):
+                    factory()
+
 
 class PipelineCanonicalSerializationTests(unittest.TestCase):
     def test_serializer_emits_canonical_utf8_and_exact_fraction_pairs(self) -> None:
@@ -486,8 +593,7 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
 
         self.assertIsInstance(raw, bytes)
         assert raw is not None
-        self.assertTrue(raw.endswith(b"\n"))
-        self.assertFalse(raw.endswith(b"\n\n"))
+        self.assertFalse(raw.endswith(b"\n"))
         self.assertEqual(
             raw,
             json.dumps(
@@ -495,8 +601,7 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
-            ).encode("utf-8")
-            + b"\n",
+            ).encode("utf-8"),
         )
         payload = json.loads(raw)
         self.assertEqual(payload["duration_seconds"], {"denominator": 1, "numerator": 30})
@@ -552,6 +657,31 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 if actual is not None:
                     self.assertIs(type(actual), type(expected))
+                    self.assertIs(type(actual.job_id), JobId)
+                    self.assertIs(type(actual.job_id.value), str)
+                    if type(actual) is MediaDocument:
+                        self.assertIs(type(actual.timeline), Timeline)
+                        self.assertIs(type(actual.timeline.target_fps), int)
+                    for cue in getattr(actual, "cues", ()):
+                        self.assertIs(type(cue), Cue)
+                        self.assertIs(type(cue.cue_index), int)
+                        self.assertIs(type(cue.interval), FrameInterval)
+                        self.assertIs(type(cue.box), BoundingBox)
+                        self.assertIs(type(cue.source_text), str)
+                    for region in getattr(actual, "blur_regions", ()):
+                        self.assertIs(type(region), BlurRegion)
+                        self.assertIs(type(region.kind), RegionKind)
+                        self.assertIs(type(region.interval), FrameInterval)
+                        self.assertIs(type(region.box), BoundingBox)
+                    for part in getattr(actual, "parts", ()):
+                        self.assertIs(type(part), Part)
+                        self.assertIs(type(part.part_index), int)
+                        self.assertIs(type(part.part_count), int)
+                        self.assertIs(type(part.interval), FrameInterval)
+                        self.assertIs(type(part.chunk_indexes), tuple)
+                        self.assertTrue(
+                            all(type(index) is int for index in part.chunk_indexes)
+                        )
                     self.assertEqual(canonical_document_bytes(actual), raw)
 
     def test_parsers_reject_non_bytes_noncanonical_and_wrong_document_types(self) -> None:
@@ -560,8 +690,8 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
         variants = (
             raw.decode("utf-8"),
             json.dumps(payload, indent=2).encode("utf-8"),
-            raw.rstrip(b"\n"),
             raw + b"\n",
+            raw + b" ",
             b"not-json\n",
             b"\xff\n",
         )
@@ -769,6 +899,29 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
         else:
             mismatch_error = None
         self.assertIsInstance(mismatch_error, DomainInvariantError)
+
+    def test_parser_rejects_wrong_immediate_upstream_path_with_correct_digest(self) -> None:
+        source = media()
+        ocr_value = replace(
+            ocr(),
+            job_id=source.job_id,
+            media_digest=source.source_digest,
+            frame_count=source.frame_count,
+            width=source.width,
+            height=source.height,
+            dependency_digest=document_digest(source),
+        )
+        payload = json.loads(canonical_document_bytes(ocr_value))
+        payload["dependency_path"] = str(OCR_ARTIFACT_PATH)
+
+        try:
+            parse_ocr_document_bytes(canonical_payload(payload), source)
+        except Exception as exc:
+            error = exc
+        else:
+            error = None
+
+        self.assertIsInstance(error, DomainInvariantError)
 
 
 if __name__ == "__main__":
