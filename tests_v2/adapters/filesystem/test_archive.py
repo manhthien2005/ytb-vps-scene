@@ -114,6 +114,28 @@ class VerifiedInputArchiverTests(unittest.TestCase):
         with self.assertRaises(BackupStoreError):
             self.archiver.archive(link, JobId("job"), "time")
 
+    def test_rejects_reparse_point_in_source_parent_components(self) -> None:
+        source_parent = self.base / "source-parent"
+        source_parent.mkdir()
+        source = source_parent / "video.mp4"
+        source.write_bytes(b"source")
+        path_type = type(source)
+        original = getattr(path_type, "is_junction", None)
+
+        def junction_only_for_source_parent(path: Path) -> bool:
+            if path == source_parent:
+                return True
+            return bool(original(path)) if original is not None else False
+
+        with mock.patch.object(
+            path_type,
+            "is_junction",
+            junction_only_for_source_parent,
+            create=original is None,
+        ):
+            with self.assertRaises(BackupStoreError):
+                self.archiver.archive(source, JobId("job"), "time")
+
     def test_sanitizes_untrusted_or_unsupported_suffix(self) -> None:
         source = self.base / "video.bad-suffix-too-long"
         source.write_bytes(b"video")

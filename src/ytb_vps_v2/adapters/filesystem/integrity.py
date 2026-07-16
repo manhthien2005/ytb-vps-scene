@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
@@ -63,6 +65,7 @@ def secure_root(root: Path) -> Path:
 def regular_file(path: Path) -> Path:
     value = _path("File", path)
     try:
+        _reject_reparse_components(value.parent)
         if _is_reparse(value):
             raise BackupStoreError("File must not be a symbolic link")
         status = value.stat()
@@ -209,7 +212,7 @@ def sync_directory(directory: Path) -> None:
             raise BackupStoreError("Storage directory could not be synchronized") from exc
 
 
-def _publication_identity(root: Path, destination: Path) -> tuple[int, int, str]:
+def _validated_publication_parent(root: Path, destination: Path) -> Path:
     resolved_root = secure_root(root)
     parent = destination.parent
     _reject_reparse_components(parent)
@@ -221,16 +224,117 @@ def _publication_identity(root: Path, destination: Path) -> tuple[int, int, str]
             resolved_root
         ):
             raise BackupStoreError("Publication parent escapes its storage root")
-        status = parent.stat(follow_symlinks=False)
-        return (
-            status.st_dev,
-            status.st_ino,
-            os.path.normcase(str(resolved_parent)),
-        )
+        return resolved_parent
     except BackupStoreError:
         raise
     except OSError as exc:
         raise BackupStoreError("Publication parent identity cannot be verified") from exc
+
+
+@contextmanager
+def _windows_publication_guard(parent: Path) -> Iterator[None]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _HandleInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (wintypes.HANDLE, ctypes.POINTER(_HandleInformation))
+    get_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        str(parent),
+        0x0080,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise BackupStoreError("Publication directory could not be locked")
+    try:
+        information = _HandleInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise BackupStoreError("Publication directory handle is invalid")
+        if information.dwFileAttributes & 0x00000400:
+            raise BackupStoreError("Publication directory is a reparse point")
+        yield
+    finally:
+        close_handle(handle)
+
+
+@contextmanager
+def _posix_publication_directory(root: Path, parent: Path) -> Iterator[int]:
+    if os.open not in os.supports_dir_fd or os.link not in os.supports_dir_fd:
+        raise BackupStoreError("Platform lacks directory-anchored publication")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, flags)
+    opened = [root_fd]
+    try:
+        relative = parent.relative_to(root)
+        current_fd = root_fd
+        for part in relative.parts:
+            next_fd = os.open(part, flags, dir_fd=current_fd)
+            opened.append(next_fd)
+            current_fd = next_fd
+        yield current_fd
+    except (OSError, ValueError) as exc:
+        raise BackupStoreError("Publication directory could not be anchored") from exc
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+def _publish_no_replace(
+    temporary: Path,
+    destination: Path,
+    root: Path,
+) -> None:
+    parent = _validated_publication_parent(root, destination)
+    if temporary.parent.resolve(strict=True) != parent:
+        raise BackupStoreError("Publication temporary file must share its final directory")
+    if os.name == "nt":
+        with _windows_publication_guard(parent):
+            _validated_publication_parent(root, destination)
+            os.rename(temporary, destination)
+        return
+    with _posix_publication_directory(secure_root(root), parent) as directory_fd:
+        os.link(
+            temporary.name,
+            destination.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
 
 
 def publish_additively(
@@ -240,21 +344,19 @@ def publish_additively(
     root: Path,
 ) -> None:
     created_by_call = False
-    before = _publication_identity(root, destination)
     try:
         try:
-            os.link(temporary, destination)
+            _publish_no_replace(temporary, destination, root)
             created_by_call = True
-        except FileExistsError:
+        except OSError as exc:
+            if not destination.exists():
+                raise BackupStoreError(
+                    "Durable object could not be published"
+                ) from exc
             if digest_file(destination) != expected:
                 raise BackupStoreError(
                     "Existing durable object conflicts with expected bytes"
                 )
-        except OSError as exc:
-            raise BackupStoreError("Durable object could not be published") from exc
-        after = _publication_identity(root, destination)
-        if after != before:
-            raise BackupStoreError("Publication parent changed during commit")
         sync_directory(destination.parent)
         if digest_file(destination) != expected:
             raise BackupStoreError("Published durable object failed verification")

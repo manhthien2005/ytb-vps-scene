@@ -67,12 +67,12 @@ class LocalAdditiveObjectStoreTests(unittest.TestCase):
         result = self.store.put(self.source, self.key, self.expected)
         self.assertEqual(result.digest, self.expected)
 
-    def test_parent_identity_change_during_publish_is_detected_and_cleaned(self) -> None:
+    def test_locked_publish_failure_leaves_no_final_object(self) -> None:
         destination = self.root.joinpath(*self.key.parts)
         with mock.patch.object(
             integrity_module,
-            "_publication_identity",
-            side_effect=((1, 1, "before"), (2, 2, "after")),
+            "_publish_no_replace",
+            side_effect=BackupStoreError("injected guarded publication failure"),
         ):
             with self.assertRaises(BackupStoreError):
                 self.store.put(self.source, self.key, self.expected)
