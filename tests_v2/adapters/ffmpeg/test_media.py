@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
+import sys
 import tempfile
 import unittest
 from io import BytesIO
@@ -37,80 +39,154 @@ def digest(raw: bytes) -> FileDigest:
     return FileDigest(len(raw), hashlib.sha256(raw).hexdigest())
 
 
-@unittest.skipIf(os.name == "nt", "POSIX fd publication regression")
-class PosixPinnedPublicationTests(unittest.TestCase):
+@unittest.skipIf(os.name == "nt", "POSIX anonymous publication regression")
+class PosixAnonymousPublicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.container = Path(self.temporary.name)
+        self.root = self.container / "render-parent"
+        self.root.mkdir()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def make_pinned(
+    def anonymous_type(self) -> type:
+        value = getattr(media_module, "_AnonymousPosixRender", None)
+        self.assertIsNotNone(value, "POSIX render target must use an anonymous inode")
+        return value
+
+    def make_anonymous(
         self,
         stem: str,
-    ) -> tuple[object, object, Path, bytes]:
+    ) -> tuple[object, Path, bytes]:
         destination = self.root / f"{stem}.mp4"
-        staging = media_module._OwnedRenderStaging.create(destination)
+        staging = self.anonymous_type().create(destination)
         raw = b"validated render bytes"
-        staging.output.write_bytes(raw)
-        staging.claim_output()
-        pinned = staging.pin(destination)
-        pinned.verify(digest(raw))
-        return staging, pinned, destination, raw
+        os.write(staging.render_fd, raw)
+        staging.verify(digest(raw))
+        return staging, destination, raw
+
+    def test_anonymous_failure_close_leaves_no_staging_entry_or_orphan(self) -> None:
+        staging, destination, _ = self.make_anonymous("failed")
+        descriptor_path = staging.fd_path
+        self.assertEqual(tuple(self.root.iterdir()), ())
+        self.assertTrue(descriptor_path.exists())
+
+        staging.close()
+
+        self.assertFalse(descriptor_path.exists())
+        self.assertFalse(destination.exists())
+        self.assertEqual(tuple(self.root.iterdir()), ())
 
     def test_post_commit_failure_never_attempts_pathname_rollback(self) -> None:
-        staging, pinned, destination, _ = self.make_pinned("rollback-race")
-        real_unlink = os.unlink
-        rollback_unlinks: list[str] = []
-
-        def replace_before_rollback_unlink(
-            path: str,
-            *args: object,
-            **kwargs: object,
-        ) -> None:
-            if path == destination.name and kwargs.get("dir_fd") == pinned.parent_fd:
-                rollback_unlinks.append(path)
-                os.rename(
-                    path,
-                    "published-owned.mp4",
-                    src_dir_fd=pinned.parent_fd,
-                    dst_dir_fd=pinned.parent_fd,
-                )
-                destination.write_bytes(b"racer")
-            real_unlink(path, *args, **kwargs)
-
+        staging, destination, _ = self.make_anonymous("post-commit")
         try:
             with mock.patch.object(
-                media_module._PosixPinnedRenderSource,
-                "verify",
+                self.anonymous_type(),
+                "_verify_published",
                 side_effect=FfmpegMediaError("post-commit verification failure"),
             ):
-                with mock.patch.object(
-                    media_module.os,
-                    "unlink",
-                    side_effect=replace_before_rollback_unlink,
-                ):
+                with mock.patch.object(media_module.os, "unlink") as unlink:
                     with self.assertRaisesRegex(FfmpegMediaError, "post-commit"):
-                        pinned.publish()
+                        staging.publish()
         finally:
-            pinned.close()
             staging.cleanup()
 
-        self.assertEqual(rollback_unlinks, [])
+        unlink.assert_not_called()
         self.assertTrue(destination.exists())
 
-    def test_staging_rename_is_cleaned_through_anchored_directory_fd(self) -> None:
-        staging, pinned, destination, _ = self.make_pinned("staging-rename")
-        renamed = self.root / "renamed-owned.render"
-        staging.directory.rename(renamed)
+    def test_parent_path_replacement_cannot_redirect_anonymous_publication(self) -> None:
+        staging, destination, raw = self.make_anonymous("parent-race")
+        moved_parent = self.container / "moved-owned-parent"
+        self.root.rename(moved_parent)
+        self.root.mkdir()
+        (self.root / "unowned.txt").write_bytes(b"racer")
 
-        pinned.close()
-        staging.cleanup()
+        try:
+            staging.publish()
+        finally:
+            staging.cleanup()
 
+        self.assertEqual((moved_parent / destination.name).read_bytes(), raw)
+        self.assertFalse((self.root / destination.name).exists())
+        self.assertEqual((self.root / "unowned.txt").read_bytes(), b"racer")
+
+    def test_destination_race_is_preserved_without_unowned_deletion(self) -> None:
+        staging, destination, _ = self.make_anonymous("destination-race")
+        destination.write_bytes(b"racer")
+
+        try:
+            with self.assertRaisesRegex(FfmpegMediaError, "already exists"):
+                staging.publish()
+        finally:
+            staging.cleanup()
+
+        self.assertEqual(destination.read_bytes(), b"racer")
+
+    def test_linkat_unavailable_fails_before_render_process_or_destination(self) -> None:
+        anonymous_type = self.anonymous_type()
+        destination = self.root / "unsupported.mp4"
+        source = self.root / "missing-source.mp4"
+        tts_wav = self.root / "tts.wav"
+        tts_wav.write_bytes(b"tts")
+        value = digest(b"tts")
+        plan = RenderPlanDocument(
+            1,
+            JobId("anonymous-test"),
+            value,
+            900,
+            320,
+            180,
+            TTS_ARTIFACT_PATH,
+            value,
+            (),
+            (),
+            PurePosixPath("artifacts/tts/audio.wav"),
+            value,
+            (Part(1, 1, FrameInterval(0, 900), (0,)),),
+            False,
+        )
+        adapter = FfmpegMediaAdapter()
+
+        with mock.patch.object(
+            anonymous_type,
+            "_preflight_linkat",
+            side_effect=FfmpegMediaError("anonymous publication unavailable"),
+        ), mock.patch.object(adapter, "_run") as run:
+            with self.assertRaisesRegex(FfmpegMediaError, "unavailable"):
+                adapter.render(source, tts_wav, plan, destination)
+
+        run.assert_not_called()
         self.assertFalse(destination.exists())
-        self.assertFalse((renamed / "output.mp4").exists())
-        self.assertFalse(renamed.exists())
+        self.assertEqual(tuple(path.name for path in self.root.iterdir()), ("tts.wav",))
+
+    def test_probe_inherits_anonymous_fd_and_hashes_exact_inode(self) -> None:
+        staging, destination, raw = self.make_anonymous("probe")
+        render_fd = staging.render_fd
+        payload = (
+            b'{"format":{"duration":"30.000000"},"streams":['
+            b'{"avg_frame_rate":"30/1","codec_type":"video",'
+            b'"height":180,"nb_read_frames":"900","width":320}]}'
+        )
+        adapter = FfmpegMediaAdapter()
+
+        try:
+            with mock.patch.object(adapter, "require_tools"), mock.patch.object(
+                adapter,
+                "_run",
+                return_value=payload,
+            ) as run:
+                media = adapter.probe(
+                    staging.fd_path,
+                    pass_fds=(render_fd,),
+                    logical_name=destination.name,
+                )
+        finally:
+            staging.cleanup()
+
+        self.assertEqual(media.source_digest, digest(raw))
+        self.assertEqual(media.source_path.name, destination.name)
+        self.assertEqual(run.call_args.kwargs["pass_fds"], (render_fd,))
 
 
 class FfmpegFixtureProbeTests(unittest.TestCase):
@@ -292,6 +368,49 @@ class FfmpegFailureTests(unittest.TestCase):
         self.assertEqual(process.wait_timeouts, [3.0])
         self.assertIn("status 7", str(raised.exception))
         self.assertIn("fatal diagnostic", str(raised.exception))
+
+    @unittest.skipIf(os.name == "nt", "pass_fds is POSIX-only")
+    def test_process_passes_only_explicit_anonymous_render_fd(self) -> None:
+        adapter = FfmpegMediaAdapter()
+        self.assertIn("pass_fds", inspect.signature(adapter._run).parameters)
+        process = _FakeProcess()
+
+        with mock.patch.object(
+            media_module.subprocess,
+            "Popen",
+            return_value=process,
+        ) as popen:
+            adapter._run(
+                ["ffmpeg", "-version"],
+                timeout=1.0,
+                stdout_limit=32,
+                pass_fds=(17,),
+            )
+
+        self.assertEqual(popen.call_args.kwargs["pass_fds"], (17,))
+
+    @unittest.skipIf(os.name == "nt", "pass_fds is POSIX-only")
+    def test_process_child_can_write_only_through_inherited_fd(self) -> None:
+        adapter = FfmpegMediaAdapter()
+        read_fd, write_fd = os.pipe()
+        try:
+            adapter._run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os; os.write({write_fd}, b'inherited')",
+                ],
+                timeout=2.0,
+                stdout_limit=32,
+                pass_fds=(write_fd,),
+            )
+            os.close(write_fd)
+            write_fd = -1
+            self.assertEqual(os.read(read_fd, 32), b"inherited")
+        finally:
+            if write_fd >= 0:
+                os.close(write_fd)
+            os.close(read_fd)
 
     def test_process_timeout_kills_child_and_uses_bounded_diagnostics(self) -> None:
         adapter = FfmpegMediaAdapter(diagnostic_limit=64)

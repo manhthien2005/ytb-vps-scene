@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -58,9 +59,6 @@ class _OwnedRenderStaging:
     directory_identity: tuple[int, int]
     output: Path
     output_identity: tuple[int, int] | None = None
-    parent_fd: int | None = None
-    directory_fd: int | None = None
-    quarantine_reason: str | None = None
 
     @classmethod
     def create(cls, destination: Path) -> _OwnedRenderStaging:
@@ -77,45 +75,11 @@ class _OwnedRenderStaging:
             raise FfmpegMediaError("Private render staging could not be created") from exc
         if not stat.S_ISDIR(status.st_mode):
             raise FfmpegMediaError("Private render staging is not a directory")
-        staging = cls(
+        return cls(
             directory,
             (status.st_dev, status.st_ino),
             directory / "output.mp4",
         )
-        if os.name != "nt":
-            staging._anchor_posix_parent(destination.parent)
-        return staging
-
-    def _anchor_posix_parent(self, parent: Path) -> None:
-        parent_fd = -1
-        directory_fd = -1
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
-        try:
-            parent_fd = os.open(parent, flags)
-            directory_fd = os.open(
-                self.directory.name,
-                flags,
-                dir_fd=parent_fd,
-            )
-            status = os.fstat(directory_fd)
-            if not stat.S_ISDIR(status.st_mode) or (
-                status.st_dev,
-                status.st_ino,
-            ) != self.directory_identity:
-                raise FfmpegMediaError("Private render staging identity changed")
-            self.parent_fd = parent_fd
-            self.directory_fd = directory_fd
-        except BaseException:
-            if directory_fd >= 0:
-                os.close(directory_fd)
-            if parent_fd >= 0:
-                os.close(parent_fd)
-            self.cleanup()
-            raise
 
     def _owns_directory(self) -> bool:
         try:
@@ -141,14 +105,11 @@ class _OwnedRenderStaging:
 
     def pin(self, destination: Path) -> _PinnedRenderSource:
         identity = self.output_identity or self.claim_output()
-        if os.name == "nt":
-            return _WindowsPinnedRenderSource.create(self, destination, identity)
-        return _PosixPinnedRenderSource.create(self, destination, identity)
+        if os.name != "nt":
+            raise FfmpegMediaError("Named render staging is Windows-only")
+        return _WindowsPinnedRenderSource.create(self, destination, identity)
 
     def cleanup(self) -> None:
-        if os.name != "nt" and self.parent_fd is not None:
-            self._cleanup_posix_anchored()
-            return
         if not self._owns_directory():
             return
         try:
@@ -172,152 +133,6 @@ class _OwnedRenderStaging:
             self.directory.rmdir()
         except OSError:
             pass
-
-    def _cleanup_posix_anchored(self) -> None:
-        parent_fd = self.parent_fd
-        directory_fd = self.directory_fd
-        self.parent_fd = None
-        self.directory_fd = None
-        if parent_fd is None or directory_fd is None:
-            self.quarantine_reason = "POSIX render cleanup anchors are incomplete"
-            return
-        try:
-            directory_status = os.fstat(directory_fd)
-            if not stat.S_ISDIR(directory_status.st_mode) or (
-                directory_status.st_dev,
-                directory_status.st_ino,
-            ) != self.directory_identity:
-                self.quarantine_reason = "Pinned render staging identity changed"
-                return
-            try:
-                os.fchmod(directory_fd, 0o700)
-            except OSError:
-                self.quarantine_reason = "Pinned render staging is not writable"
-                return
-            if not self._unlink_owned_output_at(directory_fd):
-                return
-            self._remove_owned_directory_entry(parent_fd, directory_fd)
-        finally:
-            os.close(directory_fd)
-            os.close(parent_fd)
-
-    def _unlink_owned_output_at(self, directory_fd: int) -> bool:
-        try:
-            status = os.stat(
-                self.output.name,
-                dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            return True
-        except OSError:
-            self.quarantine_reason = "Pinned render output could not be inspected"
-            return False
-        identity = (status.st_dev, status.st_ino)
-        if (
-            not stat.S_ISREG(status.st_mode)
-            or self.output_identity is not None
-            and identity != self.output_identity
-        ):
-            self.quarantine_reason = "Pinned render output identity changed"
-            return False
-        output_fd = -1
-        try:
-            output_fd = os.open(
-                self.output.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=directory_fd,
-            )
-            opened_status = os.fstat(output_fd)
-            current_status = os.stat(
-                self.output.name,
-                dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            if (
-                not stat.S_ISREG(opened_status.st_mode)
-                or (opened_status.st_dev, opened_status.st_ino) != identity
-                or (current_status.st_dev, current_status.st_ino) != identity
-            ):
-                self.quarantine_reason = "Pinned render output recheck failed"
-                return False
-            os.chmod(
-                self.output.name,
-                0o600,
-                dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            os.unlink(self.output.name, dir_fd=directory_fd)
-            return True
-        except OSError:
-            self.quarantine_reason = "Pinned render output cleanup failed"
-            return False
-        finally:
-            if output_fd >= 0:
-                os.close(output_fd)
-
-    def _remove_owned_directory_entry(
-        self,
-        parent_fd: int,
-        directory_fd: int,
-    ) -> None:
-        names = [self.directory.name]
-        try:
-            discovered = os.listdir(parent_fd)
-        except OSError:
-            self.quarantine_reason = "Render parent could not be rescanned"
-            return
-        if len(discovered) > 4096:
-            self.quarantine_reason = "Render parent rescan exceeded its bound"
-            return
-        names.extend(sorted(name for name in discovered if name not in names))
-        expected = self.directory_identity
-        for name in names:
-            candidate_fd = -1
-            try:
-                status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                if not stat.S_ISDIR(status.st_mode) or (
-                    status.st_dev,
-                    status.st_ino,
-                ) != expected:
-                    continue
-                candidate_fd = os.open(
-                    name,
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=parent_fd,
-                )
-                opened_status = os.fstat(candidate_fd)
-                pinned_status = os.fstat(directory_fd)
-                current_status = os.stat(
-                    name,
-                    dir_fd=parent_fd,
-                    follow_symlinks=False,
-                )
-                identities = {
-                    (opened_status.st_dev, opened_status.st_ino),
-                    (pinned_status.st_dev, pinned_status.st_ino),
-                    (current_status.st_dev, current_status.st_ino),
-                }
-                if identities != {expected} or os.listdir(candidate_fd):
-                    self.quarantine_reason = (
-                        "Owned render staging could not be removed safely"
-                    )
-                    return
-                os.rmdir(name, dir_fd=parent_fd)
-                self.quarantine_reason = None
-                return
-            except (FileNotFoundError, NotADirectoryError):
-                continue
-            except OSError:
-                self.quarantine_reason = "Owned render staging cleanup failed"
-                return
-            finally:
-                if candidate_fd >= 0:
-                    os.close(candidate_fd)
-        self.quarantine_reason = "Owned render staging entry was not found"
-
 
 class _PinnedRenderSource:
     def verify(self, expected: FileDigest) -> None:
@@ -345,138 +160,172 @@ def _digest_reader(reader: BinaryIO) -> FileDigest:
 
 
 @dataclass(slots=True)
-class _PosixPinnedRenderSource(_PinnedRenderSource):
-    staging: _OwnedRenderStaging
+class _AnonymousPosixRender:
     destination: Path
-    source_fd: int
     parent_fd: int
-    staging_fd: int
+    render_fd: int
     identity: tuple[int, int]
     expected_digest: FileDigest | None = None
+    published: bool = False
 
     @classmethod
     def create(
         cls,
-        staging: _OwnedRenderStaging,
         destination: Path,
-        identity: tuple[int, int],
-    ) -> _PosixPinnedRenderSource:
-        source_fd = -1
-        parent_fd = staging.parent_fd
-        staging_fd = staging.directory_fd
-        if parent_fd is None or staging_fd is None:
-            raise FfmpegMediaError("Private render staging is not anchored")
+    ) -> _AnonymousPosixRender:
+        if os.name == "nt":
+            raise FfmpegMediaError("Anonymous render staging requires POSIX")
+        temporary_flag = getattr(os, "O_TMPFILE", 0)
+        if not temporary_flag or not Path("/proc/self/fd").is_dir():
+            raise FfmpegMediaError("Anonymous render staging is unavailable")
+        parent_fd = -1
+        render_fd = -1
+        succeeded = False
         try:
-            os.chmod(
-                staging.output.name,
-                0o400,
-                dir_fd=staging_fd,
-                follow_symlinks=False,
+            parent_fd = os.open(
+                destination.parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
             )
-            os.fchmod(staging_fd, 0o500)
-            source_fd = os.open(
-                staging.output.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=staging_fd,
-            )
-            source_status = os.fstat(source_fd)
             parent_status = os.fstat(parent_fd)
-            staging_status = os.fstat(staging_fd)
-            if (
-                not stat.S_ISREG(source_status.st_mode)
-                or (source_status.st_dev, source_status.st_ino) != identity
-                or not stat.S_ISDIR(parent_status.st_mode)
-                or not stat.S_ISDIR(staging_status.st_mode)
-                or (staging_status.st_dev, staging_status.st_ino)
-                != staging.directory_identity
-            ):
-                raise FfmpegMediaError("Pinned render source identity changed")
-            return cls(
-                staging,
+            if not stat.S_ISDIR(parent_status.st_mode):
+                raise FfmpegMediaError("Render destination parent is unsafe")
+            render_fd = os.open(
+                ".",
+                temporary_flag
+                | os.O_RDWR
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            render_status = os.fstat(render_fd)
+            if not stat.S_ISREG(render_status.st_mode):
+                raise FfmpegMediaError("Anonymous render inode is not regular")
+            staging = cls(
                 destination,
-                source_fd,
                 parent_fd,
-                staging_fd,
-                identity,
+                render_fd,
+                (render_status.st_dev, render_status.st_ino),
             )
-        except BaseException:
-            if source_fd >= 0:
-                os.close(source_fd)
-            raise
+            proc_status = os.stat(staging.fd_path)
+            if (proc_status.st_dev, proc_status.st_ino) != staging.identity:
+                raise FfmpegMediaError("Anonymous render fd path identity changed")
+            staging._preflight_linkat()
+            succeeded = True
+            return staging
+        except OSError as exc:
+            raise FfmpegMediaError("Anonymous render staging is unavailable") from exc
+        finally:
+            if render_fd >= 0 and not succeeded:
+                os.close(render_fd)
+            if parent_fd >= 0 and not succeeded:
+                os.close(parent_fd)
 
-    def _path_still_names_source(self) -> bool:
+    @property
+    def fd_path(self) -> Path:
+        return Path(f"/proc/self/fd/{self.render_fd}")
+
+    def _call_linkat(self, name: str) -> int:
+        import ctypes
+
         try:
-            status = os.stat(
-                self.staging.output.name,
-                dir_fd=self.staging_fd,
-                follow_symlinks=False,
-            )
-        except OSError:
-            return False
-        return stat.S_ISREG(status.st_mode) and (
-            status.st_dev,
-            status.st_ino,
-        ) == self.identity
-
-    def verify(self, expected: FileDigest) -> None:
-        if not self._path_still_names_source():
-            raise FfmpegMediaError("Pinned render source path identity changed")
-        with os.fdopen(os.dup(self.source_fd), "rb") as reader:
-            actual = _digest_reader(reader)
-        if actual != expected:
-            raise FfmpegMediaError("Pinned render source bytes changed")
-        self.expected_digest = expected
-
-    def publish(self) -> None:
-        if self.expected_digest is None:
-            raise FfmpegMediaError("Pinned render source was not verified")
-        if not self._path_still_names_source():
-            raise FfmpegMediaError("Pinned render source path identity changed")
-        try:
-            import ctypes
-
             libc = ctypes.CDLL(None, use_errno=True)
             linkat = libc.linkat
-            linkat.argtypes = (
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.c_int,
-                ctypes.c_char_p,
-                ctypes.c_int,
-            )
-            linkat.restype = ctypes.c_int
-            result = linkat(
-                self.source_fd,
-                b"",
-                self.parent_fd,
-                os.fsencode(self.destination.name),
-                0x1000,
-            )
-            if result != 0:
-                error_number = ctypes.get_errno()
-                if error_number in (17,):
-                    raise FfmpegMediaError("Media destination already exists")
-                raise FfmpegMediaError(
-                    "Safe pinned render publication is unavailable"
-                )
         except AttributeError as exc:
-            raise FfmpegMediaError(
-                "Safe pinned render publication is unavailable"
-            ) from exc
-        status = os.stat(
-            self.destination.name,
-            dir_fd=self.parent_fd,
-            follow_symlinks=False,
+            raise FfmpegMediaError("Anonymous publication is unavailable") from exc
+        linkat.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
         )
+        linkat.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        result = linkat(
+            self.render_fd,
+            b"",
+            self.parent_fd,
+            os.fsencode(name),
+            0x1000,
+        )
+        return 0 if result == 0 else ctypes.get_errno()
+
+    def _preflight_linkat(self) -> None:
+        if self._call_linkat(".") != errno.EEXIST:
+            raise FfmpegMediaError("Anonymous publication is unavailable")
+
+    def verify(self, expected: FileDigest) -> None:
+        try:
+            os.fsync(self.render_fd)
+            status = os.fstat(self.render_fd)
+        except OSError as exc:
+            raise FfmpegMediaError("Anonymous render inode could not be synced") from exc
         if not stat.S_ISREG(status.st_mode) or (
             status.st_dev,
             status.st_ino,
         ) != self.identity:
-            raise FfmpegMediaError("Published render identity changed")
-        self.verify(self.expected_digest)
+            raise FfmpegMediaError("Anonymous render inode identity changed")
+        with os.fdopen(os.dup(self.render_fd), "rb") as reader:
+            actual = _digest_reader(reader)
+        if actual != expected:
+            raise FfmpegMediaError("Anonymous render inode bytes changed")
+        self.expected_digest = expected
+
+    def publish(self) -> None:
+        if self.expected_digest is None:
+            raise FfmpegMediaError("Anonymous render inode was not verified")
+        error_number = self._call_linkat(self.destination.name)
+        if error_number == errno.EEXIST:
+            raise FfmpegMediaError("Media destination already exists")
+        if error_number != 0:
+            raise FfmpegMediaError("Anonymous publication is unavailable")
+        self.published = True
+        try:
+            os.fsync(self.parent_fd)
+        except OSError as exc:
+            raise FfmpegMediaError("Published render parent could not be synced") from exc
+        self._verify_published()
+
+    def _verify_published(self) -> None:
+        if self.expected_digest is None:
+            raise FfmpegMediaError("Anonymous render inode was not verified")
+        published_fd = -1
+        try:
+            published_fd = os.open(
+                self.destination.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self.parent_fd,
+            )
+            status = os.fstat(published_fd)
+            if not stat.S_ISREG(status.st_mode) or (
+                status.st_dev,
+                status.st_ino,
+            ) != self.identity:
+                raise FfmpegMediaError("Published render identity changed")
+            with os.fdopen(os.dup(published_fd), "rb") as reader:
+                actual = _digest_reader(reader)
+            if actual != self.expected_digest:
+                raise FfmpegMediaError("Published render bytes changed")
+        except OSError as exc:
+            raise FfmpegMediaError("Published render could not be verified") from exc
+        finally:
+            if published_fd >= 0:
+                os.close(published_fd)
 
     def close(self) -> None:
-        os.close(self.source_fd)
+        render_fd = self.render_fd
+        parent_fd = self.parent_fd
+        self.render_fd = -1
+        self.parent_fd = -1
+        if render_fd >= 0:
+            os.close(render_fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+    def cleanup(self) -> None:
+        self.close()
 
 
 def _windows_handle_information(
@@ -752,16 +601,28 @@ class FfmpegMediaAdapter:
         *,
         timeout: float,
         stdout_limit: int,
+        pass_fds: tuple[int, ...] = (),
     ) -> bytes:
+        if (
+            type(pass_fds) is not tuple
+            or any(type(value) is not int or value < 0 for value in pass_fds)
+            or len(set(pass_fds)) != len(pass_fds)
+        ):
+            raise FfmpegMediaError("Inherited media descriptors are invalid")
         stdout_capture = _Capture(stdout_limit, bytearray())
         stderr_capture = _Capture(self.diagnostic_limit, bytearray())
+        popen_options: dict[str, object] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "shell": False,
+        }
+        if pass_fds:
+            popen_options["pass_fds"] = pass_fds
         try:
             process = subprocess.Popen(
                 arguments,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
+                **popen_options,
             )
         except (OSError, ValueError) as exc:
             raise FfmpegMediaError("Media executable could not be started") from exc
@@ -992,9 +853,45 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError(f"ffprobe {name} must be positive")
         return result
 
-    def probe(self, source: Path) -> MediaDocument:
+    def probe(
+        self,
+        source: Path,
+        *,
+        pass_fds: tuple[int, ...] = (),
+        logical_name: str | None = None,
+    ) -> MediaDocument:
         self.require_tools()
-        if not isinstance(source, Path) or not source.is_file() or source.is_symlink():
+        inherited_fd: int | None = None
+        if pass_fds:
+            if (
+                os.name == "nt"
+                or len(pass_fds) != 1
+                or type(pass_fds[0]) is not int
+                or pass_fds[0] < 0
+                or source != Path(f"/proc/self/fd/{pass_fds[0]}")
+                or type(logical_name) is not str
+                or not logical_name
+                or Path(logical_name).name != logical_name
+            ):
+                raise FfmpegMediaError("Inherited media descriptor is invalid")
+            inherited_fd = pass_fds[0]
+            try:
+                descriptor_status = os.fstat(inherited_fd)
+                proc_status = os.stat(source)
+            except OSError as exc:
+                raise FfmpegMediaError("Inherited media descriptor is invalid") from exc
+            if (
+                not stat.S_ISREG(descriptor_status.st_mode)
+                or (proc_status.st_dev, proc_status.st_ino)
+                != (descriptor_status.st_dev, descriptor_status.st_ino)
+            ):
+                raise FfmpegMediaError("Inherited media descriptor is invalid")
+        elif (
+            not isinstance(source, Path)
+            or not source.is_file()
+            or source.is_symlink()
+            or logical_name is not None
+        ):
             raise FfmpegMediaError("Media source must be a regular file")
         arguments = [
             self.ffprobe,
@@ -1014,6 +911,7 @@ class FfmpegMediaAdapter:
             arguments,
             timeout=self.probe_timeout_seconds,
             stdout_limit=self.probe_output_limit,
+            pass_fds=pass_fds,
         )
         try:
             payload = json.loads(raw)
@@ -1053,13 +951,19 @@ class FfmpegMediaAdapter:
                 raise FfmpegMediaError(
                     "ffprobe duration differs from frame evidence by more than one frame"
                 )
-        digest = self._digest(source)
+        if inherited_fd is None:
+            source_digest = self._digest(source)
+            source_name = source.name
+        else:
+            with os.fdopen(os.dup(inherited_fd), "rb") as reader:
+                source_digest = _digest_reader(reader)
+            source_name = logical_name
         try:
             return MediaDocument(
                 1,
                 JobId("offline-job"),
-                PurePosixPath("inputs") / source.name,
-                digest,
+                PurePosixPath("inputs") / source_name,
+                source_digest,
                 duration,
                 fps,
                 Timeline(30),
@@ -1089,127 +993,175 @@ class FfmpegMediaAdapter:
     ) -> MediaDocument:
         if type(plan) is not RenderPlanDocument:
             raise FfmpegMediaError("Render plan must be a RenderPlanDocument")
-        source_media = self.probe(source)
-        if not self._matches_plan(source_media, plan):
-            raise FfmpegMediaError("Render source does not match the typed render plan")
-        if not isinstance(tts_wav, Path) or not tts_wav.is_file() or tts_wav.is_symlink():
-            raise FfmpegMediaError("Render TTS input must be a regular file")
-        if self._digest(tts_wav) != plan.tts_audio_digest:
-            raise FfmpegMediaError("Render TTS input does not match the typed render plan")
-        final_output = self._destination(destination)
-        staging = _OwnedRenderStaging.create(final_output)
-        output = staging.output
-        arguments = [
-            self.ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-n",
-            "-i",
-            str(source),
-        ]
-        if plan.output_has_audio:
-            arguments.extend(["-i", str(tts_wav)])
-        arguments.extend(
-            [
-                "-map",
-                "0:v:0",
-                "-vf",
-                "fps=30,scale=320:180:flags=bicubic,format=yuv420p",
-                "-frames:v",
-                "900",
-                "-fps_mode",
-                "cfr",
-                "-r",
-                "30",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-threads:v",
-                "1",
-                "-g",
-                "60",
-                "-keyint_min",
-                "60",
-                "-sc_threshold",
-                "0",
-                "-x264-params",
-                "threads=1:lookahead_threads=1:sliced_threads=0",
+        anonymous: _AnonymousPosixRender | None = None
+        named: _OwnedRenderStaging | None = None
+        final_output: Path
+        if os.name != "nt":
+            final_output = self._destination(destination)
+            anonymous = _AnonymousPosixRender.create(final_output)
+        try:
+            source_media = self.probe(source)
+            if not self._matches_plan(source_media, plan):
+                raise FfmpegMediaError(
+                    "Render source does not match the typed render plan"
+                )
+            if (
+                not isinstance(tts_wav, Path)
+                or not tts_wav.is_file()
+                or tts_wav.is_symlink()
+            ):
+                raise FfmpegMediaError("Render TTS input must be a regular file")
+            if self._digest(tts_wav) != plan.tts_audio_digest:
+                raise FfmpegMediaError(
+                    "Render TTS input does not match the typed render plan"
+                )
+            if anonymous is None:
+                final_output = self._destination(destination)
+                named = _OwnedRenderStaging.create(final_output)
+                output = named.output
+                pass_fds: tuple[int, ...] = ()
+                overwrite_policy = "-n"
+            else:
+                output = anonymous.fd_path
+                pass_fds = (anonymous.render_fd,)
+                overwrite_policy = "-y"
+            arguments = [
+                self.ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                overwrite_policy,
+                "-i",
+                str(source),
             ]
-        )
-        if plan.output_has_audio:
+            if plan.output_has_audio:
+                arguments.extend(["-i", str(tts_wav)])
             arguments.extend(
                 [
                     "-map",
-                    "1:a:0",
-                    "-af",
-                    "apad=whole_dur=30",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "96k",
-                    "-ar",
-                    "48000",
-                    "-ac",
+                    "0:v:0",
+                    "-vf",
+                    "fps=30,scale=320:180:flags=bicubic,format=yuv420p",
+                    "-frames:v",
+                    "900",
+                    "-fps_mode",
+                    "cfr",
+                    "-r",
+                    "30",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-threads:v",
                     "1",
-                    "-threads:a",
-                    "1",
+                    "-g",
+                    "60",
+                    "-keyint_min",
+                    "60",
+                    "-sc_threshold",
+                    "0",
+                    "-x264-params",
+                    "threads=1:lookahead_threads=1:sliced_threads=0",
                 ]
             )
-        else:
-            arguments.append("-an")
-        arguments.extend(
-            [
-                "-map_metadata",
-                "-1",
-                "-map_chapters",
-                "-1",
-                "-metadata",
-                "creation_time=2000-01-01T00:00:00Z",
-                "-metadata",
-                "encoder=ytb-vps-v2",
-                "-t",
-                "30",
-                "-movflags",
-                "+faststart",
-                str(output),
-            ]
-        )
-        try:
+            if plan.output_has_audio:
+                arguments.extend(
+                    [
+                        "-map",
+                        "1:a:0",
+                        "-af",
+                        "apad=whole_dur=30",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "96k",
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "1",
+                        "-threads:a",
+                        "1",
+                    ]
+                )
+            else:
+                arguments.append("-an")
+            arguments.extend(
+                [
+                    "-map_metadata",
+                    "-1",
+                    "-map_chapters",
+                    "-1",
+                    "-metadata",
+                    "creation_time=2000-01-01T00:00:00Z",
+                    "-metadata",
+                    "encoder=ytb-vps-v2",
+                    "-t",
+                    "30",
+                    "-movflags",
+                    "+faststart",
+                ]
+            )
+            if anonymous is not None:
+                arguments.extend(["-f", "mp4"])
+            arguments.append(str(output))
             self._run(
                 arguments,
                 timeout=self.render_timeout_seconds,
                 stdout_limit=self.diagnostic_limit,
+                pass_fds=pass_fds,
             )
-            staging.claim_output()
-            pinned = staging.pin(final_output)
-            try:
-                validated = self.validate_render(output, plan)
-                pinned.verify(validated.source_digest)
-                pinned.publish()
-            finally:
-                pinned.close()
+            if anonymous is None:
+                if named is None:
+                    raise FfmpegMediaError("Windows render staging is unavailable")
+                named.claim_output()
+                pinned = named.pin(final_output)
+                try:
+                    validated = self.validate_render(output, plan)
+                    pinned.verify(validated.source_digest)
+                    pinned.publish()
+                finally:
+                    pinned.close()
+            else:
+                validated = self.validate_render(
+                    output,
+                    plan,
+                    pass_fds=pass_fds,
+                    logical_name=final_output.name,
+                )
+                anonymous.verify(validated.source_digest)
+                anonymous.publish()
             return replace(
                 validated,
                 source_path=PurePosixPath("inputs") / final_output.name,
             )
         finally:
-            staging.cleanup()
+            if anonymous is not None:
+                anonymous.cleanup()
+            elif named is not None:
+                named.cleanup()
 
     def validate_render(
         self,
         path: Path,
         expected: RenderPlanDocument,
+        *,
+        pass_fds: tuple[int, ...] = (),
+        logical_name: str | None = None,
     ) -> MediaDocument:
         if type(expected) is not RenderPlanDocument:
             raise FfmpegMediaError("Expected render identity must be a RenderPlanDocument")
-        if not isinstance(path, Path) or not path.is_file() or path.is_symlink():
+        if pass_fds:
+            if (
+                len(pass_fds) != 1
+                or path != Path(f"/proc/self/fd/{pass_fds[0]}")
+            ):
+                raise FfmpegMediaError("Rendered media descriptor is invalid")
+        elif not isinstance(path, Path) or not path.is_file() or path.is_symlink():
             raise FfmpegMediaError("Rendered media must be a regular file")
         decode_arguments = [
             self.ffmpeg,
@@ -1228,8 +1180,13 @@ class FfmpegMediaAdapter:
             decode_arguments,
             timeout=self.decode_timeout_seconds,
             stdout_limit=self.diagnostic_limit,
+            pass_fds=pass_fds,
         )
-        actual = self.probe(path)
+        actual = self.probe(
+            path,
+            pass_fds=pass_fds,
+            logical_name=logical_name,
+        )
         expected_duration = Fraction(expected.frame_count, 30)
         if actual.width != expected.width or actual.height != expected.height:
             raise FfmpegMediaError("Rendered media dimensions do not match the plan")
