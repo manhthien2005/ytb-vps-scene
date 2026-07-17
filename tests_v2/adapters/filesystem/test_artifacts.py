@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import types
 import unittest
@@ -374,6 +375,74 @@ class LocalArtifactWriterTests(unittest.TestCase):
 
         with self.assertRaises(ArtifactWriteError):
             self.writer.verify(self.key, entry.digest)
+
+    def test_verify_missing_artifact_fails_without_creating_parent_paths(self) -> None:
+        key = PurePosixPath("missing/deep/artifact.bin")
+        expected = FileDigest(0, hashlib.sha256(b"").hexdigest())
+
+        with self.assertRaises(ArtifactWriteError):
+            self.writer.verify(key, expected)
+
+        self.assertFalse((self.root / "missing").exists())
+
+    def test_verify_parent_swap_cannot_certify_outside_file(self) -> None:
+        entry = self.writer.write_bytes(self.key, b"trusted")
+        outside = self.base / "verify-outside"
+        outside.mkdir()
+        (outside / self.destination().name).write_bytes(b"trusted")
+        displaced = self.base / "verify-displaced-parent"
+        swapped: list[bool] = []
+        regular_calls = 0
+        real_regular_file = integrity_module.regular_file
+        real_validated_destination = artifacts_module._validated_destination
+
+        def swap_parent() -> None:
+            if swapped:
+                return
+            self.destination().parent.rename(displaced)
+            if artifacts_module.os.name == "nt":
+                import _winapi
+
+                _winapi.CreateJunction(str(outside), str(self.destination().parent))
+            else:
+                self.destination().parent.symlink_to(
+                    outside,
+                    target_is_directory=True,
+                )
+            swapped.append(True)
+
+        def regular_then_swap(path: Path) -> Path:
+            nonlocal regular_calls
+            result = real_regular_file(path)
+            if path == self.destination():
+                regular_calls += 1
+                if regular_calls == 2:
+                    swap_parent()
+            return result
+
+        def validate_then_swap(
+            root: Path,
+            key: PurePosixPath,
+            expected: FileDigest,
+        ) -> Path:
+            destination = real_validated_destination(root, key, expected)
+            swap_parent()
+            return destination
+
+        with mock.patch.object(
+            integrity_module,
+            "regular_file",
+            regular_then_swap,
+        ), mock.patch.object(
+            artifacts_module,
+            "_validated_destination",
+            validate_then_swap,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.verify(self.key, entry.digest)
+
+        self.assertEqual(swapped, [True])
+        self.assertEqual((outside / self.destination().name).read_bytes(), b"trusted")
 
 
 if __name__ == "__main__":

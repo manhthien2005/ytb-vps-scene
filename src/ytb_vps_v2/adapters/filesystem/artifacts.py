@@ -14,7 +14,6 @@ from ytb_vps_v2.adapters.filesystem.integrity import (
     digest_file,
     regular_file,
     secure_root,
-    verified_existing_file,
 )
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -89,10 +88,17 @@ class _OwnedTemporary:
 
 
 class _AnchoredArtifactParent:
-    def __init__(self, root: Path, destination: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        destination: Path,
+        *,
+        create_parents: bool = True,
+    ) -> None:
         self.root = root
         self.destination = destination
         self.parent = destination.parent
+        self.create_parents = create_parents
         self._posix_fds: list[int] = []
         self._windows_handles: list[object] = []
         self._windows_identities: list[tuple[int, int]] = []
@@ -146,6 +152,8 @@ class _AnchoredArtifactParent:
                 try:
                     next_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=current_fd)
                 except FileNotFoundError:
+                    if not self.create_parents:
+                        raise
                     os.mkdir(part, mode=0o700, dir_fd=current_fd)
                     try:
                         os.fsync(current_fd)
@@ -172,6 +180,8 @@ class _AnchoredArtifactParent:
                 try:
                     self._pin_windows_directory(current)
                 except BackupStoreError as open_error:
+                    if not self.create_parents:
+                        raise
                     try:
                         current.mkdir()
                     except FileExistsError:
@@ -543,8 +553,14 @@ class _AnchoredArtifactParent:
 def _anchored_artifact_parent(
     root: Path,
     destination: Path,
+    *,
+    create_parents: bool = True,
 ) -> Iterator[_AnchoredArtifactParent]:
-    with _AnchoredArtifactParent(root, destination) as anchored:
+    with _AnchoredArtifactParent(
+        root,
+        destination,
+        create_parents=create_parents,
+    ) as anchored:
         yield anchored
 
 
@@ -662,8 +678,17 @@ class LocalArtifactWriter:
         if type(expected) is not FileDigest:
             raise ArtifactWriteError("Expected artifact digest must be FileDigest")
         try:
-            verified_existing_file(self.root, key, expected)
-            return ManifestEntry(key, expected)
+            destination = _validated_destination(self.root, key, expected)
+            with _anchored_artifact_parent(
+                self.root,
+                destination,
+                create_parents=False,
+            ) as anchored:
+                if anchored.digest_destination() != expected:
+                    raise BackupStoreError(
+                        "Workspace artifact does not match expected digest"
+                    )
+                return ManifestEntry(key, expected)
         except (BackupStoreError, DomainInvariantError, OSError) as exc:
             raise ArtifactWriteError("Workspace artifact failed verification") from exc
 
