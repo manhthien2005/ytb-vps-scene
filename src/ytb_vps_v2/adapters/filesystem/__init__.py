@@ -6,6 +6,7 @@ from ytb_vps_v2.adapters.filesystem.artifacts import (
 )
 from ytb_vps_v2.adapters.filesystem.cleanup import LocalDeletionTargetPolicy
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_file
+from ytb_vps_v2.adapters.filesystem.publish import LocalPartPublisher
 
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "DurableArtifactWriter",
     "LocalArtifactWriter",
     "LocalFileIntegrity",
+    "LocalPartPublisher",
     "LocalDeletionTargetPolicy",
     "VerifiedInputArchiver",
     "digest_file",

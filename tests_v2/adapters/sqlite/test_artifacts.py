@@ -241,6 +241,113 @@ class SqliteArtifactTests(unittest.TestCase):
             ),
         )
 
+    def test_invalidated_canonical_artifact_can_be_recommitted_atomically(self) -> None:
+        self._running("ocr:canonical", StageName.OCR)
+        original = self._artifact(
+            "ocr-canonical",
+            StageName.OCR,
+            "artifacts/ocr/ocr.json",
+        )
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:canonical",
+            original,
+            "committed-original",
+        )
+        invalidation = plan_invalidation(
+            stage_config_fingerprints(self.config),
+            stage_config_fingerprints(self.config),
+            changed_artifact_owners=(StageName.OCR,),
+        )
+        self.store.apply_invalidation(self.job_id, invalidation, "invalidated")
+        self.store.start_work_unit(self.job_id, "ocr:canonical", "restarted")
+        replacement = replace(
+            original,
+            size_bytes=84,
+            sha256="b" * 64,
+            dependencies=("media-canonical",),
+        )
+
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:canonical",
+            replacement,
+            "committed-replacement",
+        )
+
+        self.assertEqual(
+            self.store.get_work_unit(self.job_id, "ocr:canonical").status,
+            WorkStatus.SUCCEEDED,
+        )
+        self.assertEqual(self.store.valid_artifacts(self.job_id), (replacement,))
+        row_count = self.store.connection.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE job_id=?",
+            (self.job_id.value,),
+        ).fetchone()[0]
+        self.assertEqual(row_count, 1)
+
+    def test_invalidated_recommit_rejects_name_or_path_identity_changes(self) -> None:
+        self._running("ocr:canonical", StageName.OCR)
+        original = self._artifact(
+            "ocr-canonical",
+            StageName.OCR,
+            "artifacts/ocr/ocr.json",
+        )
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:canonical",
+            original,
+            "committed-original",
+        )
+        invalidation = plan_invalidation(
+            stage_config_fingerprints(self.config),
+            stage_config_fingerprints(self.config),
+            changed_artifact_owners=(StageName.OCR,),
+        )
+        self.store.apply_invalidation(self.job_id, invalidation, "invalidated")
+        self.store.start_work_unit(self.job_id, "ocr:canonical", "restarted")
+
+        for conflicting in (
+            replace(original, relative_path=PurePosixPath("artifacts/ocr/other.json")),
+            replace(original, name="ocr-other"),
+            replace(
+                original,
+                name="ocr-other",
+                relative_path=PurePosixPath("artifacts/ocr/other.json"),
+            ),
+        ):
+            with self.subTest(conflicting=conflicting):
+                with self.assertRaises(StateStoreError):
+                    self.store.commit_artifact(
+                        self.job_id,
+                        "ocr:canonical",
+                        conflicting,
+                        "conflicting-recommit",
+                    )
+                self.assertIs(
+                    self.store.get_work_unit(
+                        self.job_id, "ocr:canonical"
+                    ).status,
+                    WorkStatus.RUNNING,
+                )
+                self.assertEqual(self.store.valid_artifacts(self.job_id), ())
+                stored = self.store.connection.execute(
+                    "SELECT name,relative_path,size_bytes,sha256,owner_stage,is_valid "
+                    "FROM artifacts WHERE job_id=?",
+                    (self.job_id.value,),
+                ).fetchone()
+                self.assertEqual(
+                    tuple(stored),
+                    (
+                        original.name,
+                        str(original.relative_path),
+                        original.size_bytes,
+                        original.sha256,
+                        original.owner.value,
+                        0,
+                    ),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -556,22 +556,54 @@ class SqliteStateStore:
                 raise StateTransitionError(
                     f"Artifact owner does not match work unit stage: {key}"
                 )
-            connection.execute(
-                "INSERT INTO artifacts("
-                "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
-                "dependencies_json, is_valid, committed_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            invalid_identities = connection.execute(
+                "SELECT name, relative_path FROM artifacts "
+                "WHERE job_id=? AND owner_stage=? AND is_valid=0 "
+                "ORDER BY name",
+                (job.value, artifact.owner.value),
+            ).fetchall()
+            if invalid_identities and (
+                len(invalid_identities) != 1
+                or invalid_identities[0]["name"] != artifact.name
+                or invalid_identities[0]["relative_path"]
+                != str(artifact.relative_path)
+            ):
+                raise StateStoreError(
+                    "Invalidated artifact identity is ambiguous or changed"
+                )
+            recommitted = connection.execute(
+                "UPDATE artifacts SET size_bytes=?, sha256=?, "
+                "dependencies_json=?, is_valid=1, committed_at=? "
+                "WHERE job_id=? AND name=? AND relative_path=? "
+                "AND owner_stage=? AND is_valid=0",
                 (
+                    artifact.size_bytes,
+                    artifact.sha256,
+                    dependencies_json,
+                    timestamp,
                     job.value,
                     artifact.name,
                     str(artifact.relative_path),
-                    artifact.size_bytes,
-                    artifact.sha256,
                     artifact.owner.value,
-                    dependencies_json,
-                    timestamp,
                 ),
             )
+            if recommitted.rowcount == 0:
+                connection.execute(
+                    "INSERT INTO artifacts("
+                    "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
+                    "dependencies_json, is_valid, committed_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    (
+                        job.value,
+                        artifact.name,
+                        str(artifact.relative_path),
+                        artifact.size_bytes,
+                        artifact.sha256,
+                        artifact.owner.value,
+                        dependencies_json,
+                        timestamp,
+                    ),
+                )
             cursor = connection.execute(
                 "UPDATE work_units SET status=?, error_kind=NULL, "
                 "error_message=NULL, updated_at=? "

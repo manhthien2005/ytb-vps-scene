@@ -17,7 +17,7 @@ from typing import BinaryIO
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import JobId
-from ytb_vps_v2.domain.pipeline import MediaDocument, RenderPlanDocument
+from ytb_vps_v2.domain.pipeline import MediaDocument, RenderRequest
 from ytb_vps_v2.domain.timeline import Timeline
 
 
@@ -976,7 +976,7 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Media is not the canonical offline format") from exc
 
     @staticmethod
-    def _matches_plan(media: MediaDocument, plan: RenderPlanDocument) -> bool:
+    def _matches_plan(media: MediaDocument, plan: RenderRequest) -> bool:
         return (
             media.source_digest == plan.media_digest
             and media.frame_count == plan.frame_count
@@ -988,11 +988,11 @@ class FfmpegMediaAdapter:
         self,
         source: Path,
         tts_wav: Path,
-        plan: RenderPlanDocument,
+        plan: RenderRequest,
         destination: Path,
     ) -> MediaDocument:
-        if type(plan) is not RenderPlanDocument:
-            raise FfmpegMediaError("Render plan must be a RenderPlanDocument")
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
         anonymous: _AnonymousPosixRender | None = None
         named: _OwnedRenderStaging | None = None
         final_output: Path
@@ -1148,13 +1148,13 @@ class FfmpegMediaAdapter:
     def validate_render(
         self,
         path: Path,
-        expected: RenderPlanDocument,
+        expected: RenderRequest,
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
     ) -> MediaDocument:
-        if type(expected) is not RenderPlanDocument:
-            raise FfmpegMediaError("Expected render identity must be a RenderPlanDocument")
+        if type(expected) is not RenderRequest:
+            raise FfmpegMediaError("Expected render identity must be a RenderRequest")
         if pass_fds:
             if (
                 len(pass_fds) != 1

@@ -158,6 +158,8 @@ def render_plan() -> RenderPlanDocument:
         digest(),
         (Part(1, 1, FrameInterval(0, 900), (0,)),),
         True,
+        PurePosixPath("artifacts/render/rendered.mp4"),
+        digest(SHA_B, 20),
     )
 
 
@@ -332,6 +334,8 @@ class PipelineModuleContractTests(unittest.TestCase):
                 "tts_audio_digest",
                 "parts",
                 "output_has_audio",
+                "rendered_path",
+                "rendered_digest",
             ),
             "PublicationDocument": (
                 "schema_version",
@@ -369,6 +373,23 @@ class PipelineModuleContractTests(unittest.TestCase):
                 self.assertTrue(is_dataclass(document_type))
                 self.assertEqual(tuple(item.name for item in fields(document_type)), names)
                 self.assertIn("__slots__", document_type.__dict__)
+
+    def test_render_plan_persists_the_rendered_side_asset_reference(self) -> None:
+        self.assertEqual(
+            tuple(item.name for item in fields(RenderPlanDocument))[-2:],
+            ("rendered_path", "rendered_digest"),
+        )
+
+    def test_render_request_is_a_separate_typed_pre_render_contract(self) -> None:
+        module = importlib.import_module("ytb_vps_v2.domain.pipeline")
+        self.assertTrue(hasattr(module, "RenderRequest"))
+        request_type = module.RenderRequest
+        self.assertTrue(is_dataclass(request_type))
+        self.assertEqual(
+            tuple(item.name for item in fields(request_type)),
+            tuple(item.name for item in fields(RenderPlanDocument))[:-2],
+        )
+        self.assertIn("__slots__", request_type.__dict__)
 
 
 class PipelineValueTests(unittest.TestCase):
@@ -477,9 +498,13 @@ class PipelineValueTests(unittest.TestCase):
                     replace(ocr(), dependency_path=path)
                 with self.assertRaises(DomainInvariantError):
                     replace(tts(), audio_path=path)
+                with self.assertRaises(DomainInvariantError):
+                    replace(render_plan(), rendered_path=path)
 
         with self.assertRaises(DomainInvariantError):
             replace(ocr(), dependency_digest=SHA_A)
+        with self.assertRaises(DomainInvariantError):
+            replace(render_plan(), rendered_digest=SHA_A)
 
     def test_publication_parts_paths_and_digests_are_aligned_and_unique(self) -> None:
         with self.assertRaises(DomainInvariantError):

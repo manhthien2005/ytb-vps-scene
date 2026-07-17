@@ -393,7 +393,7 @@ class TtsDocument:
 
 
 @dataclass(frozen=True, slots=True)
-class RenderPlanDocument:
+class RenderRequest:
     schema_version: int
     job_id: JobId
     media_digest: FileDigest
@@ -434,10 +434,62 @@ class RenderPlanDocument:
             width=self.width,
             height=self.height,
         )
+        _artifact_path("Render-request TTS audio path", self.tts_audio_path)
+        _digest("Render-request TTS audio digest", self.tts_audio_digest)
+        _parts(self.parts, frame_count=self.frame_count)
+        _require_exact("Render output audio flag", self.output_has_audio, bool)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderPlanDocument:
+    schema_version: int
+    job_id: JobId
+    media_digest: FileDigest
+    frame_count: int
+    width: int
+    height: int
+    dependency_path: PurePosixPath
+    dependency_digest: FileDigest
+    cues: tuple[Cue, ...]
+    blur_regions: tuple[BlurRegion, ...]
+    tts_audio_path: PurePosixPath
+    tts_audio_digest: FileDigest
+    parts: tuple[Part, ...]
+    output_has_audio: bool
+    rendered_path: PurePosixPath
+    rendered_digest: FileDigest
+
+    def __post_init__(self) -> None:
+        _base(
+            self.schema_version,
+            self.job_id,
+            self.media_digest,
+            self.frame_count,
+            self.width,
+            self.height,
+            self.dependency_path,
+            self.dependency_digest,
+            TTS_ARTIFACT_PATH,
+        )
+        _cues(
+            self.cues,
+            frame_count=self.frame_count,
+            width=self.width,
+            height=self.height,
+            target_required=True,
+        )
+        _blur_regions(
+            self.blur_regions,
+            frame_count=self.frame_count,
+            width=self.width,
+            height=self.height,
+        )
         _artifact_path("Render-plan TTS audio path", self.tts_audio_path)
         _digest("Render-plan TTS audio digest", self.tts_audio_digest)
         _parts(self.parts, frame_count=self.frame_count)
         _require_exact("Render output audio flag", self.output_has_audio, bool)
+        _artifact_path("Rendered media path", self.rendered_path)
+        _digest("Rendered media digest", self.rendered_digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,6 +689,8 @@ def _document_dict(document: object) -> dict[str, object]:
             cues=[_cue_dict(item) for item in document.cues],
             output_has_audio=document.output_has_audio,
             parts=[_part_dict(item) for item in document.parts],
+            rendered_digest=_digest_dict(document.rendered_digest),
+            rendered_path=str(document.rendered_path),
             tts_audio_digest=_digest_dict(document.tts_audio_digest),
             tts_audio_path=str(document.tts_audio_path),
         )
@@ -1016,6 +1070,8 @@ def parse_render_plan_document_bytes(
         "cues",
         "output_has_audio",
         "parts",
+        "rendered_digest",
+        "rendered_path",
         "tts_audio_digest",
         "tts_audio_path",
     }
@@ -1031,6 +1087,8 @@ def parse_render_plan_document_bytes(
         _digest_from("Render-plan TTS audio digest", root["tts_audio_digest"]),
         tuple(_part_from(item) for item in _array("Parts", root["parts"])),
         root["output_has_audio"],  # type: ignore[arg-type]
+        _text_path("Rendered media path", root["rendered_path"]),
+        _digest_from("Rendered media digest", root["rendered_digest"]),
     )
     result = _finish(encoded, document)
     _verify_upstream(result, upstream, TtsDocument)

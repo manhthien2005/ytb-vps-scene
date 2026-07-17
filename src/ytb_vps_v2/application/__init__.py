@@ -1,6 +1,15 @@
 from ytb_vps_v2.application.checkpoints import CheckpointError, CheckpointPublisher
 from ytb_vps_v2.application.cleanup import CleanupGuard, CleanupGuardError
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
+from ytb_vps_v2.application.offline_slice import (
+    FreshWorkspaceRequired,
+    InterruptionPoint,
+    OfflineSliceError,
+    OfflineSliceInterrupted,
+    OfflineSliceRequest,
+    OfflineSliceResult,
+    OfflineSliceRunner,
+)
 
 
 __all__ = [
@@ -10,4 +19,11 @@ __all__ = [
     "CleanupGuard",
     "CleanupGuardError",
     "RestoreError",
+    "InterruptionPoint",
+    "FreshWorkspaceRequired",
+    "OfflineSliceError",
+    "OfflineSliceInterrupted",
+    "OfflineSliceRequest",
+    "OfflineSliceResult",
+    "OfflineSliceRunner",
 ]

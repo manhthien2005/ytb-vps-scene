@@ -28,7 +28,7 @@ from ytb_vps_v2.domain.pipeline import (
     OCR_ARTIFACT_PATH,
     TTS_ARTIFACT_PATH,
     MediaDocument,
-    RenderPlanDocument,
+    RenderRequest,
     TrackDocument,
     canonical_document_bytes,
 )
@@ -130,7 +130,7 @@ class PosixAnonymousPublicationTests(unittest.TestCase):
         tts_wav = self.root / "tts.wav"
         tts_wav.write_bytes(b"tts")
         value = digest(b"tts")
-        plan = RenderPlanDocument(
+        plan = RenderRequest(
             1,
             JobId("anonymous-test"),
             value,
@@ -333,6 +333,16 @@ class FfmpegFailureTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_render_consumes_pre_render_request_not_persisted_plan(self) -> None:
+        self.assertEqual(
+            FfmpegMediaAdapter.render.__annotations__["plan"],
+            "RenderRequest",
+        )
+        self.assertEqual(
+            FfmpegMediaAdapter.validate_render.__annotations__["expected"],
+            "RenderRequest",
+        )
 
     def test_require_tools_reports_all_missing_executables(self) -> None:
         adapter = FfmpegMediaAdapter(
@@ -663,7 +673,7 @@ class FfmpegRenderValidationTests(unittest.TestCase):
         *,
         output_has_audio: bool,
         stem: str,
-    ) -> tuple[Path, RenderPlanDocument]:
+    ) -> tuple[Path, RenderRequest]:
         ocr = DeterministicOcrProvider().detect(media)
         track = TrackDocument(
             ocr.schema_version,
@@ -681,7 +691,7 @@ class FfmpegRenderValidationTests(unittest.TestCase):
         synthesis = DeterministicWaveTtsProvider().synthesize(translation)
         tts_wav = self.root / f"{stem}.wav"
         tts_wav.write_bytes(synthesis.audio_bytes)
-        plan = RenderPlanDocument(
+        plan = RenderRequest(
             synthesis.document.schema_version,
             synthesis.document.job_id,
             synthesis.document.media_digest,
@@ -941,7 +951,7 @@ class FfmpegRenderValidationTests(unittest.TestCase):
         )
         destination = self.root / "validation-race.mp4"
 
-        def race_then_fail(path: Path, expected: RenderPlanDocument) -> MediaDocument:
+        def race_then_fail(path: Path, expected: RenderRequest) -> MediaDocument:
             destination.write_bytes(b"racing caller bytes")
             raise FfmpegMediaError("injected validation failure after race")
 
@@ -967,7 +977,7 @@ class FfmpegRenderValidationTests(unittest.TestCase):
 
         def race_after_validation(
             path: Path,
-            expected: RenderPlanDocument,
+            expected: RenderRequest,
         ) -> MediaDocument:
             validated = real_validate(path, expected)
             destination.write_bytes(b"published by racer")
@@ -995,7 +1005,7 @@ class FfmpegRenderValidationTests(unittest.TestCase):
 
         def replace_after_validation(
             path: Path,
-            expected: RenderPlanDocument,
+            expected: RenderRequest,
         ) -> MediaDocument:
             validated = real_validate(path, expected)
             displaced = path.with_name("validated-owned.mp4")
