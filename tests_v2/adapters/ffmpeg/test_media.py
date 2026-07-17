@@ -164,6 +164,15 @@ class _RecordingThread:
         return False
 
 
+class _StuckUntilPipeClosedThread(_RecordingThread):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.pipe = kwargs["args"][0]  # type: ignore[index]
+
+    def is_alive(self) -> bool:
+        return not self.pipe.closed
+
+
 class FfmpegFailureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -290,6 +299,42 @@ class FfmpegFailureTests(unittest.TestCase):
         self.assertTrue(
             all(thread.join_timeouts == [1.0] for thread in _RecordingThread.instances)
         )
+
+    def test_live_readers_force_pipe_close_and_receive_a_second_bounded_join(self) -> None:
+        adapter = FfmpegMediaAdapter()
+        process = _FakeProcess()
+        _StuckUntilPipeClosedThread.instances.clear()
+
+        with mock.patch.object(
+            media_module.subprocess,
+            "Popen",
+            return_value=process,
+        ), mock.patch.object(
+            media_module.threading,
+            "Thread",
+            _StuckUntilPipeClosedThread,
+        ):
+            with self.assertRaisesRegex(FfmpegMediaError, "pipes"):
+                adapter._run(
+                    ["ffprobe", "input.mp4"],
+                    timeout=8.0,
+                    stdout_limit=32,
+                )
+
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertEqual(len(_StuckUntilPipeClosedThread.instances), 2)
+        self.assertTrue(
+            all(
+                thread.join_timeouts == [1.0, 1.0]
+                and not thread.is_alive()
+                for thread in _StuckUntilPipeClosedThread.instances
+            )
+        )
+
+    def test_probe_rejects_oversized_integer_without_leaking_value_error(self) -> None:
+        with self.assertRaisesRegex(FfmpegMediaError, "frame count"):
+            FfmpegMediaAdapter._positive_int("9" * 5_000, "frame count")
 
     def test_probe_wraps_invalid_ffprobe_json(self) -> None:
         source = self.root / "source.mp4"
@@ -664,6 +709,82 @@ class FfmpegRenderValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(FfmpegMediaError, "injected validation"):
                 self.adapter.render(self.silent_source, tts_wav, plan, failed)
         self.assertFalse(failed.exists())
+
+    def test_nonzero_encode_cleans_owned_partial_private_output(self) -> None:
+        tts_wav, plan = self.make_plan(
+            self.silent_media,
+            output_has_audio=False,
+            stem="partial-encode-tts",
+        )
+        destination = self.root / "partial-encode.mp4"
+
+        def leave_partial(arguments: list[str], **kwargs: object) -> bytes:
+            Path(arguments[-1]).write_bytes(b"partial ffmpeg output")
+            raise FfmpegMediaError("injected nonzero encode")
+
+        with mock.patch.object(
+            self.adapter,
+            "probe",
+            return_value=self.silent_media,
+        ), mock.patch.object(
+            self.adapter,
+            "_run",
+            side_effect=leave_partial,
+        ):
+            with self.assertRaisesRegex(FfmpegMediaError, "nonzero encode"):
+                self.adapter.render(self.silent_source, tts_wav, plan, destination)
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(tuple(self.root.glob(f".{destination.name}.*.render")), ())
+
+    def test_validation_failure_never_deletes_racing_destination(self) -> None:
+        tts_wav, plan = self.make_plan(
+            self.silent_media,
+            output_has_audio=False,
+            stem="validation-race-tts",
+        )
+        destination = self.root / "validation-race.mp4"
+
+        def race_then_fail(path: Path, expected: RenderPlanDocument) -> MediaDocument:
+            destination.write_bytes(b"racing caller bytes")
+            raise FfmpegMediaError("injected validation failure after race")
+
+        with mock.patch.object(
+            self.adapter,
+            "validate_render",
+            side_effect=race_then_fail,
+        ):
+            with self.assertRaisesRegex(FfmpegMediaError, "after race"):
+                self.adapter.render(self.silent_source, tts_wav, plan, destination)
+
+        self.assertEqual(destination.read_bytes(), b"racing caller bytes")
+        self.assertEqual(tuple(self.root.glob(f".{destination.name}.*.render")), ())
+
+    def test_publish_race_fails_no_replace_and_preserves_conflict(self) -> None:
+        tts_wav, plan = self.make_plan(
+            self.silent_media,
+            output_has_audio=False,
+            stem="publish-race-tts",
+        )
+        destination = self.root / "publish-race.mp4"
+
+        def race_after_validation(
+            path: Path,
+            expected: RenderPlanDocument,
+        ) -> MediaDocument:
+            destination.write_bytes(b"published by racer")
+            return self.silent_media
+
+        with mock.patch.object(
+            self.adapter,
+            "validate_render",
+            side_effect=race_after_validation,
+        ):
+            with self.assertRaisesRegex(FfmpegMediaError, "already exists"):
+                self.adapter.render(self.silent_source, tts_wav, plan, destination)
+
+        self.assertEqual(destination.read_bytes(), b"published by racer")
+        self.assertEqual(tuple(self.root.glob(f".{destination.name}.*.render")), ())
 
 
 if __name__ == "__main__":

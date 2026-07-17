@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import subprocess
+import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 
@@ -27,15 +30,18 @@ class _Capture:
     truncated: bool = False
 
     def consume(self, pipe: object) -> None:
-        while True:
-            chunk = pipe.read(8192)  # type: ignore[attr-defined]
-            if not chunk:
-                return
-            available = self.limit - len(self.raw)
-            if available > 0:
-                self.raw.extend(chunk[:available])
-            if len(chunk) > available:
-                self.truncated = True
+        try:
+            while True:
+                chunk = pipe.read(8192)  # type: ignore[attr-defined]
+                if not chunk:
+                    return
+                available = self.limit - len(self.raw)
+                if available > 0:
+                    self.raw.extend(chunk[:available])
+                if len(chunk) > available:
+                    self.truncated = True
+        except (OSError, ValueError):
+            return
 
     def text(self) -> str:
         value = bytes(self.raw).decode("utf-8", errors="replace").strip()
@@ -43,6 +49,99 @@ class _Capture:
             suffix = "[output truncated]"
             return f"{value}\n{suffix}" if value else suffix
         return value
+
+
+@dataclass(slots=True)
+class _OwnedRenderStaging:
+    directory: Path
+    directory_identity: tuple[int, int]
+    output: Path
+    output_identity: tuple[int, int] | None = None
+
+    @classmethod
+    def create(cls, destination: Path) -> _OwnedRenderStaging:
+        try:
+            directory = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}.",
+                    suffix=".render",
+                    dir=destination.parent,
+                )
+            )
+            status = os.stat(directory, follow_symlinks=False)
+        except OSError as exc:
+            raise FfmpegMediaError("Private render staging could not be created") from exc
+        if not stat.S_ISDIR(status.st_mode):
+            raise FfmpegMediaError("Private render staging is not a directory")
+        return cls(
+            directory,
+            (status.st_dev, status.st_ino),
+            directory / "output.mp4",
+        )
+
+    def _owns_directory(self) -> bool:
+        try:
+            status = os.stat(self.directory, follow_symlinks=False)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(status.st_mode)
+            and (status.st_dev, status.st_ino) == self.directory_identity
+        )
+
+    def claim_output(self) -> tuple[int, int]:
+        if not self._owns_directory():
+            raise FfmpegMediaError("Private render staging identity changed")
+        try:
+            status = os.stat(self.output, follow_symlinks=False)
+        except OSError as exc:
+            raise FfmpegMediaError("FFmpeg did not create a render output") from exc
+        if not stat.S_ISREG(status.st_mode):
+            raise FfmpegMediaError("FFmpeg render output is not a regular file")
+        self.output_identity = (status.st_dev, status.st_ino)
+        return self.output_identity
+
+    def publish(self, destination: Path) -> None:
+        identity = self.output_identity or self.claim_output()
+        try:
+            os.link(self.output, destination, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise FfmpegMediaError("Media destination already exists") from exc
+        except OSError as exc:
+            if destination.exists() or destination.is_symlink():
+                raise FfmpegMediaError("Media destination already exists") from exc
+            raise FfmpegMediaError("Validated render could not be published") from exc
+        try:
+            status = os.stat(destination, follow_symlinks=False)
+        except OSError as exc:
+            raise FfmpegMediaError("Published render could not be verified") from exc
+        if not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) != identity:
+            raise FfmpegMediaError("Published render identity changed")
+
+    def cleanup(self) -> None:
+        if not self._owns_directory():
+            return
+        try:
+            status = os.stat(self.output, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return
+        else:
+            identity = (status.st_dev, status.st_ino)
+            if stat.S_ISREG(status.st_mode) and (
+                self.output_identity is None or identity == self.output_identity
+            ):
+                try:
+                    self.output.unlink()
+                except OSError:
+                    return
+            else:
+                return
+        try:
+            self.directory.rmdir()
+        except OSError:
+            pass
 
 
 class FfmpegMediaAdapter:
@@ -100,6 +199,10 @@ class FfmpegMediaAdapter:
         if process.stdout is None or process.stderr is None:
             process.kill()
             process.wait(timeout=timeout)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
             raise FfmpegMediaError("Media executable pipes were unavailable")
         readers = (
             threading.Thread(
@@ -123,18 +226,24 @@ class FfmpegMediaAdapter:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 pass
-            if self._join_readers(readers, timeout):
-                process.stdout.close()
-                process.stderr.close()
+            self._finish_readers(
+                readers,
+                process.stdout,
+                process.stderr,
+                timeout,
+            )
             detail = stderr_capture.text()
             message = "Media executable timed out"
             if detail:
                 message = f"{message}: {detail}"
             raise FfmpegMediaError(message) from exc
-        if not self._join_readers(readers, timeout):
+        if not self._finish_readers(
+            readers,
+            process.stdout,
+            process.stderr,
+            timeout,
+        ):
             raise FfmpegMediaError("Media executable output pipes timed out")
-        process.stdout.close()
-        process.stderr.close()
         if return_code != 0:
             detail = stderr_capture.text()
             message = f"Media executable exited with status {return_code}"
@@ -154,6 +263,24 @@ class FfmpegMediaAdapter:
         for reader in readers:
             reader.join(timeout=join_timeout)
         return not any(reader.is_alive() for reader in readers)
+
+    @classmethod
+    def _finish_readers(
+        cls,
+        readers: tuple[threading.Thread, threading.Thread],
+        stdout: object,
+        stderr: object,
+        timeout: float,
+    ) -> bool:
+        completed_without_force = cls._join_readers(readers, timeout)
+        for pipe in (stdout, stderr):
+            try:
+                pipe.close()  # type: ignore[attr-defined]
+            except (OSError, ValueError):
+                pass
+        if not completed_without_force:
+            cls._join_readers(readers, timeout)
+        return completed_without_force
 
     @staticmethod
     def _destination(destination: Path) -> Path:
@@ -281,9 +408,17 @@ class FfmpegMediaAdapter:
 
     @staticmethod
     def _positive_int(value: object, name: str) -> int:
-        if type(value) is not str or not value.isascii() or not value.isdigit():
+        if (
+            type(value) is not str
+            or len(value) > 20
+            or not value.isascii()
+            or not value.isdigit()
+        ):
             raise FfmpegMediaError(f"ffprobe {name} is invalid")
-        result = int(value)
+        try:
+            result = int(value)
+        except ValueError as exc:
+            raise FfmpegMediaError(f"ffprobe {name} is invalid") from exc
         if result <= 0:
             raise FfmpegMediaError(f"ffprobe {name} must be positive")
         return result
@@ -392,7 +527,9 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render TTS input must be a regular file")
         if self._digest(tts_wav) != plan.tts_audio_digest:
             raise FfmpegMediaError("Render TTS input does not match the typed render plan")
-        output = self._destination(destination)
+        final_output = self._destination(destination)
+        staging = _OwnedRenderStaging.create(final_output)
+        output = staging.output
         arguments = [
             self.ffmpeg,
             "-hide_banner",
@@ -475,22 +612,21 @@ class FfmpegMediaAdapter:
                 str(output),
             ]
         )
-        encoded = False
         try:
             self._run(
                 arguments,
                 timeout=self.render_timeout_seconds,
                 stdout_limit=self.diagnostic_limit,
             )
-            encoded = True
-            return self.validate_render(output, plan)
-        except BaseException:
-            if encoded:
-                try:
-                    output.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
+            staging.claim_output()
+            validated = self.validate_render(output, plan)
+            staging.publish(final_output)
+            return replace(
+                validated,
+                source_path=PurePosixPath("inputs") / final_output.name,
+            )
+        finally:
+            staging.cleanup()
 
     def validate_render(
         self,
