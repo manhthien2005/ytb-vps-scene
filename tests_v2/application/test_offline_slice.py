@@ -35,6 +35,7 @@ from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
 from ytb_vps_v2.domain.models import Part
 from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.pipeline import (
+    CHECKPOINT_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
     MediaDocument,
     RenderPlanDocument,
@@ -156,6 +157,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             snapshot_dir=self.snapshot_root,
             output_has_audio=output_has_audio,
             at="2026-07-17T09:00:01+07:00",
+            verification_observed_at=100,
             proof_checkpoint_id="offline-proof-v1",
             final_checkpoint_id="offline-final-v1",
         )
@@ -398,6 +400,38 @@ class _InterruptOnce:
             raise OfflineSliceInterrupted(f"interrupt {stage.value} {point.value}")
 
 
+class _CorruptProofStateOnFirstVerification:
+    def __init__(self, root: Path) -> None:
+        self.delegate = LocalAdditiveObjectStore(root)
+        self.root = root
+        self.armed = True
+        self.proof_prefix = None
+        self.observations = []
+
+    def put(self, source, key, expected):
+        if self.proof_prefix is None and key.name == "job-v2.sqlite":
+            self.proof_prefix = key.parent.parent
+        return self.delegate.put(source, key, expected)
+
+    def read_bytes(self, key, max_bytes):
+        return self.delegate.read_bytes(key, max_bytes)
+
+    def verify(self, key, expected, observed_at, method):
+        self.observations.append((observed_at, method))
+        if (
+            self.armed
+            and self.proof_prefix is not None
+            and key == self.proof_prefix / "manifest-v1.json"
+        ):
+            state_key = key.parent / "state" / "job-v2.sqlite"
+            self.root.joinpath(*state_key.parts).write_bytes(b"corrupt proof state")
+            self.armed = False
+        return self.delegate.verify(key, expected, observed_at, method)
+
+    def materialize(self, key, destination, expected):
+        return self.delegate.materialize(key, destination, expected)
+
+
 class OfflineSliceInterruptionTests(unittest.TestCase):
     def _runner(
         self,
@@ -460,6 +494,7 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                             snapshots,
                             True,
                             "matrix-time",
+                            100,
                             "matrix-proof",
                             "matrix-final",
                         )
@@ -579,6 +614,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             snapshots,
             True,
             "resume-time",
+            100,
             "resume-proof",
             "resume-final",
         )
@@ -858,7 +894,71 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         self.assertEqual(resumed.work_units[-1].attempts, 2)
 
-    def test_corrupt_final_state_is_rejected_on_clean_rerun(self) -> None:
+    def test_first_proof_remote_corruption_fails_backup_then_rotates_additively(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        workspace, archive_root, remote, state, _, request = self._environment(root)
+        self.addCleanup(state.close)
+        faulty_store = _CorruptProofStateOnFirstVerification(remote)
+        faulty_runner = OfflineSliceRunner(
+            state,
+            CheckpointPublisher(
+                state,
+                faulty_store,
+                archive_root,
+                LocalFileIntegrity(),
+            ),
+            _LightweightMedia(),
+            DeterministicOcrProvider(),
+            DeterministicTranslationProvider(),
+            DeterministicWaveTtsProvider(),
+        )
+
+        with self.assertRaisesRegex(OfflineSliceError, "BACKUP"):
+            faulty_runner.run(request)
+
+        failed_record = state.completed_checkpoints(request.job_id)[0]
+        self.assertIs(
+            state.get_work_unit(request.job_id, "backup").status,
+            WorkStatus.FAILED,
+        )
+        self.assertEqual(len(state.retry_events(request.job_id, "backup")), 1)
+        self.assertEqual(
+            faulty_store.observations,
+            [(100, "sha256-readback"), (100, "sha256-readback")],
+        )
+        self.assertFalse(
+            workspace.joinpath(*CHECKPOINT_ARTIFACT_PATH.parts).exists()
+        )
+        self.assertFalse(
+            any(
+                artifact.owner is StageName.BACKUP
+                for artifact in state.valid_artifacts(request.job_id)
+            )
+        )
+
+        resumed = OfflineSliceRunner(
+            state,
+            CheckpointPublisher(
+                state,
+                LocalAdditiveObjectStore(remote),
+                archive_root,
+                LocalFileIntegrity(),
+            ),
+            _LightweightMedia(),
+            DeterministicOcrProvider(),
+            DeterministicTranslationProvider(),
+            DeterministicWaveTtsProvider(),
+        ).run(request)
+        self.assertNotEqual(
+            resumed.proof_manifest.checkpoint_id,
+            failed_record.checkpoint_id,
+        )
+        self.assertTrue(resumed.proof_manifest.checkpoint_id.endswith("-repair-1"))
+        self.assertEqual(resumed.work_units[-1].attempts, 2)
+
+    def test_corrupt_final_state_rotates_once_and_reuses_valid_repair(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -869,8 +969,78 @@ class OfflineSliceResumeTests(unittest.TestCase):
             b"corrupt final state"
         )
 
-        with self.assertRaises(OfflineSliceError):
-            runner.run(request)
+        repaired = runner.run(request)
+        repaired_manifest_path = remote.joinpath(*repaired.final_checkpoint.manifest.key.parts)
+        repaired_state_path = remote.joinpath(
+            *repaired.final_checkpoint.state_snapshot.key.parts
+        )
+        repaired_manifest_bytes = repaired_manifest_path.read_bytes()
+        repaired_state_bytes = repaired_state_path.read_bytes()
+        self.assertNotEqual(
+            repaired.final_manifest.checkpoint_id,
+            first.final_manifest.checkpoint_id,
+        )
+        self.assertTrue(repaired.final_manifest.checkpoint_id.endswith("-repair-1"))
+
+        clean = runner.run(request)
+        self.assertEqual(
+            clean.final_manifest.checkpoint_id,
+            repaired.final_manifest.checkpoint_id,
+        )
+        self.assertEqual(repaired_manifest_path.read_bytes(), repaired_manifest_bytes)
+        self.assertEqual(repaired_state_path.read_bytes(), repaired_state_bytes)
+        self.assertEqual(len(state.completed_checkpoints(request.job_id)), 3)
+        self.assertEqual(len(repaired.final_manifest.artifacts), 8)
+        inspection_root = root / "repaired-final-inspection"
+        inspection_root.mkdir()
+        inspection_path = inspection_root / "job-v2.sqlite"
+        inspection_path.write_bytes(repaired_state_bytes)
+        inspection = SqliteStateStore(inspection_path)
+        try:
+            self.assertEqual(len(inspection.valid_artifacts(request.job_id)), 8)
+            self.assertTrue(
+                all(
+                    inspection.get_work_unit(
+                        request.job_id,
+                        stage.value.lower(),
+                    ).status
+                    is WorkStatus.SUCCEEDED
+                    for stage in StageName
+                )
+            )
+        finally:
+            inspection.close()
+
+    def test_missing_or_corrupt_final_manifest_rotates_to_valid_repair(self) -> None:
+        for damage in ("missing", "corrupt"):
+            with self.subTest(damage=damage):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    _, _, remote, state, runner, request = self._environment(root)
+                    try:
+                        first = runner.run(request)
+                        manifest_path = remote.joinpath(
+                            *first.final_checkpoint.manifest.key.parts
+                        )
+                        if damage == "missing":
+                            manifest_path.unlink()
+                        else:
+                            manifest_path.write_bytes(b"corrupt final manifest")
+
+                        repaired = runner.run(request)
+                        self.assertTrue(
+                            repaired.final_manifest.checkpoint_id.endswith("-repair-1")
+                        )
+                        self.assertNotEqual(
+                            repaired.final_manifest.checkpoint_id,
+                            first.final_manifest.checkpoint_id,
+                        )
+                        self.assertEqual(
+                            runner.run(request).final_manifest.checkpoint_id,
+                            repaired.final_manifest.checkpoint_id,
+                        )
+                    finally:
+                        state.close()
 
 
 if __name__ == "__main__":

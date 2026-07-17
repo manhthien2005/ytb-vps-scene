@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tempfile
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -56,9 +57,11 @@ from ytb_vps_v2.domain.pipeline import (
     parse_translation_document_bytes,
     parse_tts_document_bytes,
 )
+from ytb_vps_v2.domain.restore import RemoteObjectEvidence
+from ytb_vps_v2.domain.timeline import FrameInterval
+from ytb_vps_v2.ports.backup import BackupStoreError
 from ytb_vps_v2.ports.pipeline import OcrProvider, TranslationProvider, TtsProvider
 from ytb_vps_v2.ports.state import StateRepository
-from ytb_vps_v2.domain.timeline import FrameInterval
 
 
 class OfflineSliceError(RuntimeError):
@@ -99,6 +102,7 @@ _NAMES = tuple(f"{stage.value.lower()}-document" for stage in STAGE_ORDER)
 _UNIT_KEYS = tuple(stage.value.lower() for stage in STAGE_ORDER)
 _RENDERED_PATH = PurePosixPath("artifacts/render/rendered.mp4")
 _PART = Part(1, 1, FrameInterval(0, 900), (0,))
+_VERIFY_METHOD = "sha256-readback"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,7 @@ class OfflineSliceRequest:
     snapshot_dir: Path
     output_has_audio: bool
     at: str
+    verification_observed_at: int
     proof_checkpoint_id: str = "offline-proof-v1"
     final_checkpoint_id: str = "offline-final-v1"
     fresh_workspace_root: Path | None = None
@@ -233,7 +238,7 @@ class OfflineSliceRunner:
 
             checkpoint_document = documents[StageName.BACKUP]
             proof_id = checkpoint_document.checkpoint_id  # type: ignore[attr-defined]
-            final_id = self._effective_checkpoint_id(
+            final_base = self._effective_checkpoint_id(
                 request,
                 request.final_checkpoint_id,
                 STAGE_ORDER,
@@ -245,6 +250,16 @@ class OfflineSliceRunner:
                 request.snapshot_dir,
                 request.at,
             )
+            proof_record = self._checkpoint_record(request.job_id, proof_id)
+            self._verify_checkpoint_record(
+                proof_record,
+                request.verification_observed_at,
+            )
+            final_id = self._checkpoint_id_for_publication(
+                request.job_id,
+                final_base,
+                request.verification_observed_at,
+            )
             final = self.checkpoints.publish(
                 request.job_id,
                 final_id,
@@ -252,24 +267,10 @@ class OfflineSliceRunner:
                 request.snapshot_dir,
                 request.at,
             )
-            final_records = tuple(
-                item
-                for item in self.state.completed_checkpoints(request.job_id)
-                if item.checkpoint_id == final_id
-            )
-            if len(final_records) != 1:
-                raise OfflineSliceError("Final checkpoint evidence is ambiguous")
-            self.checkpoints.object_store.verify(
-                final_records[0].manifest.key,
-                final_records[0].manifest.digest,
-                0,
-                "sha256",
-            )
-            self.checkpoints.object_store.verify(
-                final_records[0].state_snapshot.key,
-                final_records[0].state_snapshot.digest,
-                0,
-                "sha256",
+            final_record = self._checkpoint_record(request.job_id, final_id)
+            self._verify_checkpoint_record(
+                final_record,
+                request.verification_observed_at,
             )
             artifacts_by_owner = {
                 artifact.owner: artifact
@@ -287,7 +288,7 @@ class OfflineSliceRunner:
                 documents[StageName.BACKUP],  # type: ignore[arg-type]
                 proof,
                 final,
-                final_records[0],
+                final_record,
             )
         except (OfflineSliceError, OfflineSliceInterrupted):
             raise
@@ -317,6 +318,11 @@ class OfflineSliceRunner:
                 raise OfflineSliceError("Offline workspace paths must be existing absolute directories")
         if type(request.output_has_audio) is not bool:
             raise OfflineSliceError("Output audio policy must be boolean")
+        if (
+            type(request.verification_observed_at) is not int
+            or request.verification_observed_at < 0
+        ):
+            raise OfflineSliceError("Checkpoint observation must be non-negative")
         for value in (request.at, request.proof_checkpoint_id, request.final_checkpoint_id):
             if (
                 type(value) is not str
@@ -360,6 +366,68 @@ class OfflineSliceRunner:
         )
         payload = f"{base}|{request.job_id.value}|{attempts}".encode("utf-8")
         return f"{base}-{hashlib.sha256(payload).hexdigest()[:20]}"
+
+    def _checkpoint_record(
+        self,
+        job_id: JobId,
+        checkpoint_id: str,
+    ) -> CheckpointRecord:
+        records = tuple(
+            item
+            for item in self.state.completed_checkpoints(job_id)
+            if item.checkpoint_id == checkpoint_id
+        )
+        if len(records) != 1:
+            raise OfflineSliceError("Checkpoint completion evidence is ambiguous")
+        return records[0]
+
+    def _verify_checkpoint_record(
+        self,
+        record: CheckpointRecord,
+        observed_at: int,
+    ) -> None:
+        for entry in (record.manifest, record.state_snapshot):
+            evidence = self.checkpoints.object_store.verify(
+                entry.key,
+                entry.digest,
+                observed_at,
+                _VERIFY_METHOD,
+            )
+            if (
+                type(evidence) is not RemoteObjectEvidence
+                or evidence.entry != entry
+                or evidence.observed_at != observed_at
+                or evidence.method != _VERIFY_METHOD
+            ):
+                raise OfflineSliceError(
+                    "Checkpoint remote verification evidence is invalid"
+                )
+
+    def _checkpoint_id_for_publication(
+        self,
+        job_id: JobId,
+        base: str,
+        observed_at: int,
+    ) -> str:
+        pattern = re.compile(rf"{re.escape(base)}(?:-repair-([1-9][0-9]*))?")
+        candidates: list[tuple[int, CheckpointRecord]] = []
+        for record in self.state.completed_checkpoints(job_id):
+            match = pattern.fullmatch(record.checkpoint_id)
+            if match is None:
+                continue
+            generation = 0 if match.group(1) is None else int(match.group(1))
+            candidates.append((generation, record))
+        if not candidates:
+            return base
+        candidates.sort(key=lambda item: item[0])
+        if len({generation for generation, _ in candidates}) != len(candidates):
+            raise OfflineSliceError("Checkpoint repair evidence is ambiguous")
+        generation, newest = candidates[-1]
+        try:
+            self._verify_checkpoint_record(newest, observed_at)
+        except (BackupStoreError, OfflineSliceError):
+            return f"{base}-repair-{generation + 1}"
+        return newest.checkpoint_id
 
     @staticmethod
     def _discard_prepared(stage: StageName, prepared: object | None) -> None:
@@ -444,7 +512,14 @@ class OfflineSliceRunner:
                 writer.verify(artifact.relative_path, expected)
                 raw = request.workspace_root.joinpath(*artifact.relative_path.parts).read_bytes()
                 document = parsers[index](raw) if index == 0 else parsers[index](raw, upstream)
-                self._verify_side(stage, document, documents, writer, request.workspace_root)
+                self._verify_side(
+                    stage,
+                    document,
+                    documents,
+                    writer,
+                    request.workspace_root,
+                    request.verification_observed_at,
+                )
             except (DomainInvariantError, OSError, RuntimeError):
                 damaged = stage
                 break
@@ -526,6 +601,7 @@ class OfflineSliceRunner:
         documents: dict[StageName, object],
         writer: LocalArtifactWriter,
         workspace: Path,
+        observed_at: int,
     ) -> None:
         if stage is StageName.TTS:
             value = document
@@ -560,18 +636,7 @@ class OfflineSliceRunner:
                 or records[0].state_snapshot.digest != value.state_snapshot_digest  # type: ignore[attr-defined]
             ):
                 raise OfflineSliceError("Proof checkpoint evidence is invalid")
-            self.checkpoints.object_store.verify(
-                records[0].manifest.key,
-                records[0].manifest.digest,
-                0,
-                "sha256",
-            )
-            self.checkpoints.object_store.verify(
-                records[0].state_snapshot.key,
-                records[0].state_snapshot.digest,
-                0,
-                "sha256",
-            )
+            self._verify_checkpoint_record(records[0], observed_at)
 
     def _prepare(
         self,
@@ -676,26 +741,23 @@ class OfflineSliceRunner:
                     raise OfflineSliceError(
                         "Uncommitted BACKUP document has invalid proof evidence"
                     )
-                self.checkpoints.object_store.verify(
-                    records[0].manifest.key,
-                    records[0].manifest.digest,
-                    0,
-                    "sha256",
-                )
-                self.checkpoints.object_store.verify(
-                    records[0].state_snapshot.key,
-                    records[0].state_snapshot.digest,
-                    0,
-                    "sha256",
+                self._verify_checkpoint_record(
+                    records[0],
+                    request.verification_observed_at,
                 )
                 return publication, None, records[0]
-            proof_id = self._effective_checkpoint_id(
+            proof_base = self._effective_checkpoint_id(
                 request,
                 request.proof_checkpoint_id,
                 STAGE_ORDER[:-1],
             )
             if self._proof_repair_token is not None:
-                proof_id = f"{proof_id}-repair-{self._proof_repair_token}"
+                proof_base = f"{proof_base}-repair-{self._proof_repair_token}"
+            proof_id = self._checkpoint_id_for_publication(
+                request.job_id,
+                proof_base,
+                request.verification_observed_at,
+            )
             proof = self.checkpoints.publish(
                 request.job_id,
                 proof_id,
@@ -703,14 +765,12 @@ class OfflineSliceRunner:
                 request.snapshot_dir,
                 request.at,
             )
-            records = tuple(
-                item
-                for item in self.state.completed_checkpoints(request.job_id)
-                if item.checkpoint_id == proof_id
+            record = self._checkpoint_record(request.job_id, proof_id)
+            self._verify_checkpoint_record(
+                record,
+                request.verification_observed_at,
             )
-            if len(records) != 1:
-                raise OfflineSliceError("Proof checkpoint evidence is ambiguous")
-            return publication, proof, records[0]
+            return publication, proof, record
         raise OfflineSliceError("Unsupported offline stage")
 
     def _publish_prepared(
