@@ -11,6 +11,7 @@ import threading
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -101,26 +102,20 @@ class _OwnedRenderStaging:
         self.output_identity = (status.st_dev, status.st_ino)
         return self.output_identity
 
-    def publish(self, destination: Path) -> None:
+    def pin(self, destination: Path) -> _PinnedRenderSource:
         identity = self.output_identity or self.claim_output()
-        try:
-            os.link(self.output, destination, follow_symlinks=False)
-        except FileExistsError as exc:
-            raise FfmpegMediaError("Media destination already exists") from exc
-        except OSError as exc:
-            if destination.exists() or destination.is_symlink():
-                raise FfmpegMediaError("Media destination already exists") from exc
-            raise FfmpegMediaError("Validated render could not be published") from exc
-        try:
-            status = os.stat(destination, follow_symlinks=False)
-        except OSError as exc:
-            raise FfmpegMediaError("Published render could not be verified") from exc
-        if not stat.S_ISREG(status.st_mode) or (status.st_dev, status.st_ino) != identity:
-            raise FfmpegMediaError("Published render identity changed")
+        if os.name == "nt":
+            return _WindowsPinnedRenderSource.create(self, destination, identity)
+        return _PosixPinnedRenderSource.create(self, destination, identity)
 
     def cleanup(self) -> None:
         if not self._owns_directory():
             return
+        if os.name != "nt":
+            try:
+                os.chmod(self.directory, 0o700, follow_symlinks=False)
+            except OSError:
+                return
         try:
             status = os.stat(self.output, follow_symlinks=False)
         except FileNotFoundError:
@@ -133,6 +128,8 @@ class _OwnedRenderStaging:
                 self.output_identity is None or identity == self.output_identity
             ):
                 try:
+                    if os.name != "nt":
+                        os.chmod(self.output, 0o600, follow_symlinks=False)
                     self.output.unlink()
                 except OSError:
                     return
@@ -142,6 +139,412 @@ class _OwnedRenderStaging:
             self.directory.rmdir()
         except OSError:
             pass
+
+
+class _PinnedRenderSource:
+    def verify(self, expected: FileDigest) -> None:
+        raise NotImplementedError
+
+    def publish(self) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+def _digest_reader(reader: BinaryIO) -> FileDigest:
+    hasher = hashlib.sha256()
+    size = 0
+    reader.seek(0)
+    while True:
+        chunk = reader.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        hasher.update(chunk)
+    reader.seek(0)
+    return FileDigest(size, hasher.hexdigest())
+
+
+@dataclass(slots=True)
+class _PosixPinnedRenderSource(_PinnedRenderSource):
+    staging: _OwnedRenderStaging
+    destination: Path
+    source_fd: int
+    parent_fd: int
+    identity: tuple[int, int]
+    expected_digest: FileDigest | None = None
+
+    @classmethod
+    def create(
+        cls,
+        staging: _OwnedRenderStaging,
+        destination: Path,
+        identity: tuple[int, int],
+    ) -> _PosixPinnedRenderSource:
+        source_fd = -1
+        parent_fd = -1
+        try:
+            os.chmod(staging.output, 0o400, follow_symlinks=False)
+            os.chmod(staging.directory, 0o500, follow_symlinks=False)
+            source_fd = os.open(
+                staging.output,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            parent_fd = os.open(
+                destination.parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            source_status = os.fstat(source_fd)
+            parent_status = os.fstat(parent_fd)
+            if (
+                not stat.S_ISREG(source_status.st_mode)
+                or (source_status.st_dev, source_status.st_ino) != identity
+                or not stat.S_ISDIR(parent_status.st_mode)
+            ):
+                raise FfmpegMediaError("Pinned render source identity changed")
+            return cls(
+                staging,
+                destination,
+                source_fd,
+                parent_fd,
+                identity,
+            )
+        except BaseException:
+            if source_fd >= 0:
+                os.close(source_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+            raise
+
+    def _path_still_names_source(self) -> bool:
+        try:
+            status = os.stat(self.staging.output, follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISREG(status.st_mode) and (
+            status.st_dev,
+            status.st_ino,
+        ) == self.identity
+
+    def verify(self, expected: FileDigest) -> None:
+        if not self._path_still_names_source():
+            raise FfmpegMediaError("Pinned render source path identity changed")
+        with os.fdopen(os.dup(self.source_fd), "rb") as reader:
+            actual = _digest_reader(reader)
+        if actual != expected:
+            raise FfmpegMediaError("Pinned render source bytes changed")
+        self.expected_digest = expected
+
+    def publish(self) -> None:
+        if self.expected_digest is None:
+            raise FfmpegMediaError("Pinned render source was not verified")
+        if not self._path_still_names_source():
+            raise FfmpegMediaError("Pinned render source path identity changed")
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            linkat = libc.linkat
+            linkat.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+            )
+            linkat.restype = ctypes.c_int
+            result = linkat(
+                self.source_fd,
+                b"",
+                self.parent_fd,
+                os.fsencode(self.destination.name),
+                0x1000,
+            )
+            if result != 0:
+                error_number = ctypes.get_errno()
+                if error_number in (17,):
+                    raise FfmpegMediaError("Media destination already exists")
+                raise FfmpegMediaError(
+                    "Safe pinned render publication is unavailable"
+                )
+        except AttributeError as exc:
+            raise FfmpegMediaError(
+                "Safe pinned render publication is unavailable"
+            ) from exc
+        try:
+            status = os.stat(
+                self.destination.name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(status.st_mode) or (
+                status.st_dev,
+                status.st_ino,
+            ) != self.identity:
+                raise FfmpegMediaError("Published render identity changed")
+            self.verify(self.expected_digest)
+        except BaseException:
+            self._rollback_owned_destination()
+            raise
+
+    def _rollback_owned_destination(self) -> None:
+        try:
+            status = os.stat(
+                self.destination.name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            return
+        if stat.S_ISREG(status.st_mode) and (
+            status.st_dev,
+            status.st_ino,
+        ) == self.identity:
+            try:
+                os.unlink(self.destination.name, dir_fd=self.parent_fd)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        os.close(self.source_fd)
+        os.close(self.parent_fd)
+
+
+def _windows_handle_information(
+    path: Path,
+    *,
+    desired_access: int,
+    share_mode: int,
+    flags: int,
+) -> tuple[object, tuple[int, int], int, object]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _HandleInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        desired_access,
+        share_mode,
+        None,
+        3,
+        flags,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        error_number = ctypes.get_last_error()
+        raise OSError(error_number, ctypes.FormatError(error_number))
+    information = _HandleInformation()
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_HandleInformation),
+    )
+    get_information.restype = wintypes.BOOL
+    if not get_information(handle, ctypes.byref(information)):
+        error_number = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise OSError(error_number, ctypes.FormatError(error_number))
+    identity = (
+        information.dwVolumeSerialNumber,
+        (information.nFileIndexHigh << 32) | information.nFileIndexLow,
+    )
+    return handle, identity, information.dwFileAttributes, kernel32
+
+
+@dataclass(slots=True)
+class _WindowsPinnedRenderSource(_PinnedRenderSource):
+    staging: _OwnedRenderStaging
+    destination: Path
+    reader: BinaryIO
+    staging_handle: object
+    parent_handle: object
+    kernel32: object
+    identity: tuple[int, int]
+    expected_digest: FileDigest | None = None
+
+    @classmethod
+    def create(
+        cls,
+        staging: _OwnedRenderStaging,
+        destination: Path,
+        identity: tuple[int, int],
+    ) -> _WindowsPinnedRenderSource:
+        import msvcrt
+
+        source_handle: object | None = None
+        staging_handle: object | None = None
+        parent_handle: object | None = None
+        reader: BinaryIO | None = None
+        kernel32: object | None = None
+        succeeded = False
+        try:
+            source_handle, source_identity, attributes, kernel32 = (
+                _windows_handle_information(
+                    staging.output,
+                    desired_access=0x80000000 | 0x00000080,
+                    share_mode=0x00000001,
+                    flags=0x00200000,
+                )
+            )
+            if (
+                attributes & (0x00000010 | 0x00000400)
+                or source_identity[1] != identity[1]
+            ):
+                raise FfmpegMediaError("Pinned render source identity changed")
+            staging_handle, staging_identity, staging_attributes, _ = (
+                _windows_handle_information(
+                    staging.directory,
+                    desired_access=0x00000080,
+                    share_mode=0x00000001 | 0x00000002,
+                    flags=0x02000000 | 0x00200000,
+                )
+            )
+            if (
+                not staging_attributes & 0x00000010
+                or staging_attributes & 0x00000400
+                or staging_identity[1] != staging.directory_identity[1]
+                or not staging._owns_directory()
+            ):
+                raise FfmpegMediaError("Private render staging identity changed")
+            parent_handle, _, parent_attributes, parent_kernel = (
+                _windows_handle_information(
+                    destination.parent,
+                    desired_access=0x00000080,
+                    share_mode=0x00000001 | 0x00000002,
+                    flags=0x02000000 | 0x00200000,
+                )
+            )
+            if (
+                not parent_attributes & 0x00000010
+                or parent_attributes & 0x00000400
+            ):
+                raise FfmpegMediaError("Render destination parent is unsafe")
+            file_descriptor = msvcrt.open_osfhandle(
+                int(source_handle),
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            source_handle = None
+            reader = os.fdopen(file_descriptor, "rb")
+            status = os.fstat(reader.fileno())
+            if (status.st_dev, status.st_ino) != identity:
+                raise FfmpegMediaError("Pinned render source identity changed")
+            pinned = cls(
+                staging,
+                destination,
+                reader,
+                staging_handle,
+                parent_handle,
+                parent_kernel,
+                identity,
+            )
+            succeeded = True
+            return pinned
+        except OSError as exc:
+            raise FfmpegMediaError("Pinned render source could not be opened") from exc
+        finally:
+            if not succeeded:
+                if reader is not None:
+                    reader.close()
+                elif source_handle is not None and kernel32 is not None:
+                    kernel32.CloseHandle(source_handle)  # type: ignore[attr-defined]
+                if staging_handle is not None and kernel32 is not None:
+                    kernel32.CloseHandle(staging_handle)  # type: ignore[attr-defined]
+                if parent_handle is not None:
+                    parent_kernel.CloseHandle(parent_handle)  # type: ignore[attr-defined]
+
+    def _path_still_names_source(self) -> bool:
+        try:
+            status = os.stat(self.staging.output, follow_symlinks=False)
+        except OSError:
+            return False
+        return stat.S_ISREG(status.st_mode) and (
+            status.st_dev,
+            status.st_ino,
+        ) == self.identity
+
+    def verify(self, expected: FileDigest) -> None:
+        if not self._path_still_names_source():
+            raise FfmpegMediaError("Pinned render source path identity changed")
+        actual = _digest_reader(self.reader)
+        if actual != expected:
+            raise FfmpegMediaError("Pinned render source bytes changed")
+        self.expected_digest = expected
+
+    def publish(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        if self.expected_digest is None:
+            raise FfmpegMediaError("Pinned render source was not verified")
+        if not self._path_still_names_source():
+            raise FfmpegMediaError("Pinned render source path identity changed")
+        create_link = self.kernel32.CreateHardLinkW  # type: ignore[attr-defined]
+        create_link.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPVOID,
+        )
+        create_link.restype = wintypes.BOOL
+        if not create_link(
+            str(self.destination),
+            str(self.staging.output),
+            None,
+        ):
+            error_number = ctypes.get_last_error()
+            if error_number in (80, 183):
+                raise FfmpegMediaError("Media destination already exists")
+            raise FfmpegMediaError(
+                f"Safe pinned render publication failed ({error_number})"
+            )
+        status = os.stat(self.destination, follow_symlinks=False)
+        if not stat.S_ISREG(status.st_mode) or (
+            status.st_dev,
+            status.st_ino,
+        ) != self.identity:
+            raise FfmpegMediaError("Published render identity changed")
+        self.verify(self.expected_digest)
+
+    def close(self) -> None:
+        try:
+            self.reader.close()
+        finally:
+            try:
+                self.kernel32.CloseHandle(  # type: ignore[attr-defined]
+                    self.staging_handle
+                )
+            finally:
+                self.kernel32.CloseHandle(  # type: ignore[attr-defined]
+                    self.parent_handle
+                )
 
 
 class FfmpegMediaAdapter:
@@ -619,8 +1022,13 @@ class FfmpegMediaAdapter:
                 stdout_limit=self.diagnostic_limit,
             )
             staging.claim_output()
-            validated = self.validate_render(output, plan)
-            staging.publish(final_output)
+            pinned = staging.pin(final_output)
+            try:
+                validated = self.validate_render(output, plan)
+                pinned.verify(validated.source_digest)
+                pinned.publish()
+            finally:
+                pinned.close()
             return replace(
                 validated,
                 source_path=PurePosixPath("inputs") / final_output.name,

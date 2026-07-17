@@ -767,13 +767,15 @@ class FfmpegRenderValidationTests(unittest.TestCase):
             stem="publish-race-tts",
         )
         destination = self.root / "publish-race.mp4"
+        real_validate = self.adapter.validate_render
 
         def race_after_validation(
             path: Path,
             expected: RenderPlanDocument,
         ) -> MediaDocument:
+            validated = real_validate(path, expected)
             destination.write_bytes(b"published by racer")
-            return self.silent_media
+            return validated
 
         with mock.patch.object(
             self.adapter,
@@ -784,6 +786,39 @@ class FfmpegRenderValidationTests(unittest.TestCase):
                 self.adapter.render(self.silent_source, tts_wav, plan, destination)
 
         self.assertEqual(destination.read_bytes(), b"published by racer")
+        self.assertEqual(tuple(self.root.glob(f".{destination.name}.*.render")), ())
+
+    def test_private_source_replacement_cannot_publish_unvalidated_inode(self) -> None:
+        tts_wav, plan = self.make_plan(
+            self.silent_media,
+            output_has_audio=False,
+            stem="private-source-race-tts",
+        )
+        destination = self.root / "private-source-race.mp4"
+        real_validate = self.adapter.validate_render
+
+        def replace_after_validation(
+            path: Path,
+            expected: RenderPlanDocument,
+        ) -> MediaDocument:
+            validated = real_validate(path, expected)
+            displaced = path.with_name("validated-owned.mp4")
+            try:
+                path.replace(displaced)
+                path.write_bytes(b"racer")
+            except OSError as exc:
+                raise FfmpegMediaError("private source replacement blocked") from exc
+            return validated
+
+        with mock.patch.object(
+            self.adapter,
+            "validate_render",
+            side_effect=replace_after_validation,
+        ):
+            with self.assertRaises(FfmpegMediaError):
+                self.adapter.render(self.silent_source, tts_wav, plan, destination)
+
+        self.assertFalse(destination.exists())
         self.assertEqual(tuple(self.root.glob(f".{destination.name}.*.render")), ())
 
 
