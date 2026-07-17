@@ -58,6 +58,9 @@ class _OwnedRenderStaging:
     directory_identity: tuple[int, int]
     output: Path
     output_identity: tuple[int, int] | None = None
+    parent_fd: int | None = None
+    directory_fd: int | None = None
+    quarantine_reason: str | None = None
 
     @classmethod
     def create(cls, destination: Path) -> _OwnedRenderStaging:
@@ -74,11 +77,45 @@ class _OwnedRenderStaging:
             raise FfmpegMediaError("Private render staging could not be created") from exc
         if not stat.S_ISDIR(status.st_mode):
             raise FfmpegMediaError("Private render staging is not a directory")
-        return cls(
+        staging = cls(
             directory,
             (status.st_dev, status.st_ino),
             directory / "output.mp4",
         )
+        if os.name != "nt":
+            staging._anchor_posix_parent(destination.parent)
+        return staging
+
+    def _anchor_posix_parent(self, parent: Path) -> None:
+        parent_fd = -1
+        directory_fd = -1
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            parent_fd = os.open(parent, flags)
+            directory_fd = os.open(
+                self.directory.name,
+                flags,
+                dir_fd=parent_fd,
+            )
+            status = os.fstat(directory_fd)
+            if not stat.S_ISDIR(status.st_mode) or (
+                status.st_dev,
+                status.st_ino,
+            ) != self.directory_identity:
+                raise FfmpegMediaError("Private render staging identity changed")
+            self.parent_fd = parent_fd
+            self.directory_fd = directory_fd
+        except BaseException:
+            if directory_fd >= 0:
+                os.close(directory_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+            self.cleanup()
+            raise
 
     def _owns_directory(self) -> bool:
         try:
@@ -109,13 +146,11 @@ class _OwnedRenderStaging:
         return _PosixPinnedRenderSource.create(self, destination, identity)
 
     def cleanup(self) -> None:
+        if os.name != "nt" and self.parent_fd is not None:
+            self._cleanup_posix_anchored()
+            return
         if not self._owns_directory():
             return
-        if os.name != "nt":
-            try:
-                os.chmod(self.directory, 0o700, follow_symlinks=False)
-            except OSError:
-                return
         try:
             status = os.stat(self.output, follow_symlinks=False)
         except FileNotFoundError:
@@ -128,8 +163,6 @@ class _OwnedRenderStaging:
                 self.output_identity is None or identity == self.output_identity
             ):
                 try:
-                    if os.name != "nt":
-                        os.chmod(self.output, 0o600, follow_symlinks=False)
                     self.output.unlink()
                 except OSError:
                     return
@@ -139,6 +172,151 @@ class _OwnedRenderStaging:
             self.directory.rmdir()
         except OSError:
             pass
+
+    def _cleanup_posix_anchored(self) -> None:
+        parent_fd = self.parent_fd
+        directory_fd = self.directory_fd
+        self.parent_fd = None
+        self.directory_fd = None
+        if parent_fd is None or directory_fd is None:
+            self.quarantine_reason = "POSIX render cleanup anchors are incomplete"
+            return
+        try:
+            directory_status = os.fstat(directory_fd)
+            if not stat.S_ISDIR(directory_status.st_mode) or (
+                directory_status.st_dev,
+                directory_status.st_ino,
+            ) != self.directory_identity:
+                self.quarantine_reason = "Pinned render staging identity changed"
+                return
+            try:
+                os.fchmod(directory_fd, 0o700)
+            except OSError:
+                self.quarantine_reason = "Pinned render staging is not writable"
+                return
+            if not self._unlink_owned_output_at(directory_fd):
+                return
+            self._remove_owned_directory_entry(parent_fd, directory_fd)
+        finally:
+            os.close(directory_fd)
+            os.close(parent_fd)
+
+    def _unlink_owned_output_at(self, directory_fd: int) -> bool:
+        try:
+            status = os.stat(
+                self.output.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return True
+        except OSError:
+            self.quarantine_reason = "Pinned render output could not be inspected"
+            return False
+        identity = (status.st_dev, status.st_ino)
+        if (
+            not stat.S_ISREG(status.st_mode)
+            or self.output_identity is not None
+            and identity != self.output_identity
+        ):
+            self.quarantine_reason = "Pinned render output identity changed"
+            return False
+        output_fd = -1
+        try:
+            output_fd = os.open(
+                self.output.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            opened_status = os.fstat(output_fd)
+            current_status = os.stat(
+                self.output.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(opened_status.st_mode)
+                or (opened_status.st_dev, opened_status.st_ino) != identity
+                or (current_status.st_dev, current_status.st_ino) != identity
+            ):
+                self.quarantine_reason = "Pinned render output recheck failed"
+                return False
+            os.chmod(
+                self.output.name,
+                0o600,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            os.unlink(self.output.name, dir_fd=directory_fd)
+            return True
+        except OSError:
+            self.quarantine_reason = "Pinned render output cleanup failed"
+            return False
+        finally:
+            if output_fd >= 0:
+                os.close(output_fd)
+
+    def _remove_owned_directory_entry(
+        self,
+        parent_fd: int,
+        directory_fd: int,
+    ) -> None:
+        names = [self.directory.name]
+        try:
+            discovered = os.listdir(parent_fd)
+        except OSError:
+            self.quarantine_reason = "Render parent could not be rescanned"
+            return
+        if len(discovered) > 4096:
+            self.quarantine_reason = "Render parent rescan exceeded its bound"
+            return
+        names.extend(sorted(name for name in discovered if name not in names))
+        expected = self.directory_identity
+        for name in names:
+            candidate_fd = -1
+            try:
+                status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if not stat.S_ISDIR(status.st_mode) or (
+                    status.st_dev,
+                    status.st_ino,
+                ) != expected:
+                    continue
+                candidate_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                opened_status = os.fstat(candidate_fd)
+                pinned_status = os.fstat(directory_fd)
+                current_status = os.stat(
+                    name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                identities = {
+                    (opened_status.st_dev, opened_status.st_ino),
+                    (pinned_status.st_dev, pinned_status.st_ino),
+                    (current_status.st_dev, current_status.st_ino),
+                }
+                if identities != {expected} or os.listdir(candidate_fd):
+                    self.quarantine_reason = (
+                        "Owned render staging could not be removed safely"
+                    )
+                    return
+                os.rmdir(name, dir_fd=parent_fd)
+                self.quarantine_reason = None
+                return
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                self.quarantine_reason = "Owned render staging cleanup failed"
+                return
+            finally:
+                if candidate_fd >= 0:
+                    os.close(candidate_fd)
+        self.quarantine_reason = "Owned render staging entry was not found"
 
 
 class _PinnedRenderSource:
@@ -172,6 +350,7 @@ class _PosixPinnedRenderSource(_PinnedRenderSource):
     destination: Path
     source_fd: int
     parent_fd: int
+    staging_fd: int
     identity: tuple[int, int]
     expected_digest: FileDigest | None = None
 
@@ -183,26 +362,33 @@ class _PosixPinnedRenderSource(_PinnedRenderSource):
         identity: tuple[int, int],
     ) -> _PosixPinnedRenderSource:
         source_fd = -1
-        parent_fd = -1
+        parent_fd = staging.parent_fd
+        staging_fd = staging.directory_fd
+        if parent_fd is None or staging_fd is None:
+            raise FfmpegMediaError("Private render staging is not anchored")
         try:
-            os.chmod(staging.output, 0o400, follow_symlinks=False)
-            os.chmod(staging.directory, 0o500, follow_symlinks=False)
-            source_fd = os.open(
-                staging.output,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.chmod(
+                staging.output.name,
+                0o400,
+                dir_fd=staging_fd,
+                follow_symlinks=False,
             )
-            parent_fd = os.open(
-                destination.parent,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+            os.fchmod(staging_fd, 0o500)
+            source_fd = os.open(
+                staging.output.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=staging_fd,
             )
             source_status = os.fstat(source_fd)
             parent_status = os.fstat(parent_fd)
+            staging_status = os.fstat(staging_fd)
             if (
                 not stat.S_ISREG(source_status.st_mode)
                 or (source_status.st_dev, source_status.st_ino) != identity
                 or not stat.S_ISDIR(parent_status.st_mode)
+                or not stat.S_ISDIR(staging_status.st_mode)
+                or (staging_status.st_dev, staging_status.st_ino)
+                != staging.directory_identity
             ):
                 raise FfmpegMediaError("Pinned render source identity changed")
             return cls(
@@ -210,18 +396,21 @@ class _PosixPinnedRenderSource(_PinnedRenderSource):
                 destination,
                 source_fd,
                 parent_fd,
+                staging_fd,
                 identity,
             )
         except BaseException:
             if source_fd >= 0:
                 os.close(source_fd)
-            if parent_fd >= 0:
-                os.close(parent_fd)
             raise
 
     def _path_still_names_source(self) -> bool:
         try:
-            status = os.stat(self.staging.output, follow_symlinks=False)
+            status = os.stat(
+                self.staging.output.name,
+                dir_fd=self.staging_fd,
+                follow_symlinks=False,
+            )
         except OSError:
             return False
         return stat.S_ISREG(status.st_mode) and (
@@ -274,43 +463,20 @@ class _PosixPinnedRenderSource(_PinnedRenderSource):
             raise FfmpegMediaError(
                 "Safe pinned render publication is unavailable"
             ) from exc
-        try:
-            status = os.stat(
-                self.destination.name,
-                dir_fd=self.parent_fd,
-                follow_symlinks=False,
-            )
-            if not stat.S_ISREG(status.st_mode) or (
-                status.st_dev,
-                status.st_ino,
-            ) != self.identity:
-                raise FfmpegMediaError("Published render identity changed")
-            self.verify(self.expected_digest)
-        except BaseException:
-            self._rollback_owned_destination()
-            raise
-
-    def _rollback_owned_destination(self) -> None:
-        try:
-            status = os.stat(
-                self.destination.name,
-                dir_fd=self.parent_fd,
-                follow_symlinks=False,
-            )
-        except OSError:
-            return
-        if stat.S_ISREG(status.st_mode) and (
+        status = os.stat(
+            self.destination.name,
+            dir_fd=self.parent_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(status.st_mode) or (
             status.st_dev,
             status.st_ino,
-        ) == self.identity:
-            try:
-                os.unlink(self.destination.name, dir_fd=self.parent_fd)
-            except OSError:
-                pass
+        ) != self.identity:
+            raise FfmpegMediaError("Published render identity changed")
+        self.verify(self.expected_digest)
 
     def close(self) -> None:
         os.close(self.source_fd)
-        os.close(self.parent_fd)
 
 
 def _windows_handle_information(

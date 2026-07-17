@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import unittest
 from io import BytesIO
@@ -34,6 +35,82 @@ from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
 
 def digest(raw: bytes) -> FileDigest:
     return FileDigest(len(raw), hashlib.sha256(raw).hexdigest())
+
+
+@unittest.skipIf(os.name == "nt", "POSIX fd publication regression")
+class PosixPinnedPublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def make_pinned(
+        self,
+        stem: str,
+    ) -> tuple[object, object, Path, bytes]:
+        destination = self.root / f"{stem}.mp4"
+        staging = media_module._OwnedRenderStaging.create(destination)
+        raw = b"validated render bytes"
+        staging.output.write_bytes(raw)
+        staging.claim_output()
+        pinned = staging.pin(destination)
+        pinned.verify(digest(raw))
+        return staging, pinned, destination, raw
+
+    def test_post_commit_failure_never_attempts_pathname_rollback(self) -> None:
+        staging, pinned, destination, _ = self.make_pinned("rollback-race")
+        real_unlink = os.unlink
+        rollback_unlinks: list[str] = []
+
+        def replace_before_rollback_unlink(
+            path: str,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            if path == destination.name and kwargs.get("dir_fd") == pinned.parent_fd:
+                rollback_unlinks.append(path)
+                os.rename(
+                    path,
+                    "published-owned.mp4",
+                    src_dir_fd=pinned.parent_fd,
+                    dst_dir_fd=pinned.parent_fd,
+                )
+                destination.write_bytes(b"racer")
+            real_unlink(path, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                media_module._PosixPinnedRenderSource,
+                "verify",
+                side_effect=FfmpegMediaError("post-commit verification failure"),
+            ):
+                with mock.patch.object(
+                    media_module.os,
+                    "unlink",
+                    side_effect=replace_before_rollback_unlink,
+                ):
+                    with self.assertRaisesRegex(FfmpegMediaError, "post-commit"):
+                        pinned.publish()
+        finally:
+            pinned.close()
+            staging.cleanup()
+
+        self.assertEqual(rollback_unlinks, [])
+        self.assertTrue(destination.exists())
+
+    def test_staging_rename_is_cleaned_through_anchored_directory_fd(self) -> None:
+        staging, pinned, destination, _ = self.make_pinned("staging-rename")
+        renamed = self.root / "renamed-owned.render"
+        staging.directory.rename(renamed)
+
+        pinned.close()
+        staging.cleanup()
+
+        self.assertFalse(destination.exists())
+        self.assertFalse((renamed / "output.mp4").exists())
+        self.assertFalse(renamed.exists())
 
 
 class FfmpegFixtureProbeTests(unittest.TestCase):
