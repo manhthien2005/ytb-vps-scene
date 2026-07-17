@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phases 0–6 complete; Phase 7 offline 30-second vertical slice is next
+Status: Phases 0–7 complete; Phase 8 OCR providers is next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -84,11 +84,12 @@ deny cleanup without destroying local data.
 
 ### Phase 7 — Offline 30-second vertical slice
 
-Connect fake OCR, fake translation, fake TTS, FFmpeg rendering, local publishing,
-state snapshots, and resume.
+Completed: connected fake OCR, fake translation, fake TTS, FFmpeg rendering,
+local publishing, state snapshots, and resume without changing the public CLI.
 
-Gate: complete offline flow plus interruption after every stage and within every
-work-unit type.
+Gate passed: fresh audio and no-audio offline flows completed all eight stages;
+restart passed at all 40 stage/interruption-point combinations, and corruption
+repair preserved verified proof and final checkpoints.
 
 ### Phase 8 — OCR providers
 

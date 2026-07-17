@@ -342,3 +342,126 @@ historical evidence.
   is not connected to any public entry point.
 - Next step: create and execute the Phase 7 deterministic offline 30-second
   vertical-slice, stage interruption, resume, audio, and no-audio plan.
+
+## 2026-07-17T22:07:40+07:00 — Phase 7 deterministic offline vertical slice
+
+- Objective: connect the fixed `INGEST -> OCR -> TRACK -> TRANSLATE -> TTS ->
+  RENDER -> PUBLISH -> BACKUP` graph through deterministic fake providers, real
+  Windows FFmpeg rendering, local additive Part publication, SQLite state, and
+  proof/final checkpoints, while preserving restart safety and the legacy CLI.
+- Contract/invariant: each stage owns exactly one canonical primary artifact;
+  succeeded work is skipped only after exact filesystem read-back; corruption
+  invalidates the owning stage and its descendants and requires an explicitly
+  fresh workspace; local publication is additive and no-replace; BACKUP success
+  requires fresh `sha256-readback` evidence for both proof manifest and proof
+  state, and result return requires the same evidence for the final manifest and
+  final state. Cleanup remains disabled and is not wired to this runner or any
+  public entry point.
+- Changed files: the Phase 7 plan; canonical pipeline documents and ports;
+  deterministic offline providers; anchored workspace artifact and local Part
+  adapters; the FFmpeg media adapter; the restartable offline application
+  service; exact-identity SQLite artifact recommit support; and their domain,
+  SQLite, filesystem, provider, FFmpeg, and application tests. No binary fixture,
+  media, or database is tracked, and the public CLI/config compatibility files
+  are unchanged from the parent of the Phase 7 plan commit.
+- Exact Phase 7 commits, in order:
+  `1a66d2fdcfc8ff243eff34c27f728beeb7e669ea`,
+  `26c9d7ae7757d38a7f9989db4cd93073956cf8b9`,
+  `59b054601676ca3b859d49db15c2f915a5670178`,
+  `6e5f877fe4112e509dbeb77fbbcec297d66751e5`,
+  `3c5ec8dbbc3c0ba3f1010f3c0b8f35c1daea0395`,
+  `c17b98fede2738ef7b03aab708b11ce937f6f18c`,
+  `47c888efed8d9c2c6061bce07a4dbe9c631d3f90`,
+  `bba5970dea3fdc79f2d6c09ef64afd70891bd56c`,
+  `6e2d12d4cac32ba67a727923e22750173e1d9d47`,
+  `c17699504ae197bda0d5b001b2696fb6f657fd7d`,
+  `3d2191a740b0f4dc581c972eef0d0c0e5ce440d8`,
+  `7bd6848a104914e780e71b8de59a7eb6f29ec6df`,
+  `98b229e08a10f86711f2ff47385312119dda4a82`, and
+  `63b7e681fd74e2fb9e2d1d796150e89b1b0944bb`.
+- Fresh Windows gates on Python 3.12.10: full v2 discovery ran 266 tests in
+  77.002 seconds and returned `OK (skipped=11)`, exit 0. The six-module focused
+  domain/SQLite/artifact/offline-provider/FFmpeg/application slice ran 107 tests
+  in 74.422 seconds and returned `OK (skipped=9)`, exit 0. `compileall` returned
+  exit 0 in 0.081 seconds. The 11 full-suite skips are platform/capability tests,
+  including POSIX-only anonymous-inode cases and Windows symlink privilege cases;
+  they are not counted as executed passes.
+- Fresh real-media evidence: the installed Windows tools were FFmpeg and
+  FFprobe `N-124716-g054dffd133-20260531`. The audio and no-audio end-to-end
+  cases both passed in 9.979 seconds. Each generated and probed a 30-second,
+  30-FPS, 320x180 fixture with exactly 900 frames; validation fully decoded all
+  output streams, enforced the requested audio policy, and read back the exact
+  published Part 1/1 digest. Each final SQLite snapshot contained eight
+  SUCCEEDED units and exactly eight valid primary artifacts. Proof and final
+  manifests and state snapshots carried fresh remote read-back evidence. Closing and
+  reopening the store for a clean rerun preserved byte-identical canonical
+  primary metadata/artifacts and selected the identical valid final checkpoint.
+- Fresh restart/corruption evidence: the interruption test passed all 40 cases
+  in 31.985 seconds: eight stages crossed with `before_provider`,
+  `after_provider`, `before_filesystem_publication`,
+  `after_filesystem_publication`, and `after_sqlite_commit`. Each case reopened
+  SQLite with a new runner, recovered stale work, completed with eight unique
+  primary artifacts, and retained exactly one proof plus one final checkpoint.
+  The separate eight-test corruption/repair class passed in 9.206 seconds and
+  covered primary corruption, missing side assets, ambiguous/dependency-invalid
+  state, bounded provider retry, corrupt/missing proof evidence, corrupt final
+  state, and missing/corrupt final manifests with deterministic additive repair
+  and clean repair reuse.
+- Fresh POSIX primitive evidence: Ubuntu WSL2 ran Python 3.14.4. The eight
+  codec-independent anonymous-fd lifecycle/race/inheritance tests passed in
+  0.020 seconds and WSL `compileall` returned exit 0. Native `/tmp` successfully
+  created a regular `O_TMPFILE` inode and the `linkat(AT_EMPTY_PATH)` preflight
+  returned the required `EEXIST`; DrvFS `/mnt/d` returned errno 95 (`ENOTSUP`)
+  and therefore fails closed. This WSL installation has no `ffmpeg` or
+  `ffprobe`; no POSIX real-FFmpeg result is claimed.
+- Fresh architecture, security, and compatibility gates: forbidden legacy
+  imports, domain-to-adapter imports, shell invocation, unbounded `wait()`,
+  suspicious secret filenames, high-risk secret content signatures, committed
+  binary media/databases, cleanup runtime wiring, network/provider imports, and
+  offline credential/environment reads each produced zero matches. A child
+  process with provider-credential variables absent and network connection
+  creation denied imported five package/config/offline modules and passed all
+  15 package/CLI/config setup tests in 0.074 seconds, without disconnecting or
+  changing external network state. The Phase 7 CLI/config diff gate returned
+  exit 0 and `python -m ytb_vps_v2 version` still returned
+  `ytb-vps-v2 0.1.0.dev0`.
+- Fresh legacy comparison: the established `PYTHONPATH=app python -m unittest
+  discover -s tests -t . -q` command ran 62 tests in 3.789 seconds and returned
+  exit 1 with exactly 8 failures and 9 errors. This exactly matches the audited
+  historical baseline; no legacy failure was changed or repaired.
+- Architecture decisions: `RenderRequest` is the typed pre-render input, while
+  the final canonical `RenderPlanDocument` additionally binds the verified
+  rendered path and digest. SQLite recommits an invalid artifact row only when
+  its job/name/path/owner identity is exact and unique; identity drift or
+  ambiguity fails closed. BACKUP publishes and verifies a proof checkpoint
+  before its primary artifact, then an epilogue publishes and verifies the final
+  all-eight-stage checkpoint; damaged proof or final objects rotate through a
+  deterministic additive repair generation. POSIX rendering uses an anonymous
+  `O_TMPFILE`, explicit inherited fd, procfd validation, and no-replace
+  `linkat(AT_EMPTY_PATH)` publication, with no named temporary fallback.
+- Review evidence: independent review waves covered the complete plan-to-HEAD
+  implementation. Findings drove canonical dependency enforcement; anchored
+  artifact write/verify lifecycle; full-stream decode and pinned Windows/POSIX
+  publication; anonymous POSIX staging; exact SQLite invalid-row identity; and
+  proof/final remote-state verification. The latest-diff re-review reported no
+  remaining Critical or Important finding. The documentation diff was then
+  reviewed separately against the fresh commands above.
+- Result: G3 passed. Both deterministic offline fixtures completed the eight-
+  stage graph with exact local Part and remote checkpoint evidence; restart,
+  corruption repair, compilation, security, compatibility, and legacy-baseline
+  gates matched their contracts. No network provider, credential, push, merge,
+  PR, cleanup execution, production provider, or public CLI behavior change was
+  introduced.
+- Remaining risk: Python 3.10 is not installed locally, so this entry does not
+  claim a Python 3.10 run. WSL lacks FFmpeg/FFprobe, so only POSIX primitives,
+  not a real POSIX render, were executed. POSIX render destinations must support
+  `O_TMPFILE`, procfd, and `linkat(AT_EMPTY_PATH)`; DrvFS does not. The additive
+  store is a deterministic local contract adapter, not a production remote
+  provider. OCR, translation, and TTS are fakes; tracking, blur, subtitle, audio
+  mixing, and render-quality behavior are deliberately minimal. MP4 byte
+  identity across FFmpeg versions is not claimed; semantic identity and exact
+  same-run digest read-back are enforced. Cleanup remains globally disabled and
+  unwired.
+- Next step: Phase 8 OCR preprocessing and production-provider contracts,
+  including the ONNX adapter and optional Docker legacy adapter against one
+  shared coordinate/output contract.
