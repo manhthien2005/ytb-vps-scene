@@ -11,6 +11,7 @@ from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.filesystem.artifacts import LocalArtifactWriter
 from ytb_vps_v2.adapters.filesystem.integrity import digest_file
 from ytb_vps_v2.domain.backup import FileDigest
+from ytb_vps_v2.ports.backup import BackupStoreError
 from ytb_vps_v2.ports.pipeline import ArtifactWriteError
 
 
@@ -41,12 +42,15 @@ class LocalArtifactWriterTests(unittest.TestCase):
         self.assert_no_parts()
 
     def test_write_uses_exclusive_same_directory_part_and_syncs(self) -> None:
-        observed: list[Path] = []
+        observed: list[tuple[Path, str]] = []
         real_write = artifacts_module._write_bytes_to_temp
 
-        def observe(path: Path, raw: bytes) -> FileDigest:
-            observed.append(path)
-            return real_write(path, raw)
+        def observe(
+            temporary: artifacts_module._OwnedTemporary,
+            raw: bytes,
+        ) -> FileDigest:
+            observed.append((temporary.parent.parent, temporary.name))
+            return real_write(temporary, raw)
 
         with mock.patch.object(
             artifacts_module,
@@ -54,19 +58,15 @@ class LocalArtifactWriterTests(unittest.TestCase):
             observe,
         ), mock.patch.object(
             artifacts_module.os, "fsync", wraps=artifacts_module.os.fsync
-        ) as fsync, mock.patch.object(
-            integrity_module,
-            "sync_directory",
-            wraps=integrity_module.sync_directory,
-        ) as sync_parent:
+        ) as fsync:
             self.writer.write_bytes(self.key, b"payload")
 
         self.assertEqual(len(observed), 1)
-        self.assertEqual(observed[0].parent, self.destination().parent)
-        self.assertTrue(observed[0].name.startswith(f".{self.destination().name}."))
-        self.assertTrue(observed[0].name.endswith(".part"))
+        parent, name = observed[0]
+        self.assertEqual(parent, self.destination().parent)
+        self.assertTrue(name.startswith(f".{self.destination().name}."))
+        self.assertTrue(name.endswith(".part"))
         self.assertGreaterEqual(fsync.call_count, 1)
-        sync_parent.assert_called_once_with(self.destination().parent)
         self.assert_no_parts()
 
     def test_write_file_streams_exact_bytes_and_rejects_source_mutation(self) -> None:
@@ -108,6 +108,32 @@ class LocalArtifactWriterTests(unittest.TestCase):
         self.assertEqual(self.destination().read_bytes(), b"conflict")
         self.assert_no_parts()
 
+    def test_matching_write_file_rechecks_source_after_destination_verification(self) -> None:
+        source = self.base / "source.bin"
+        source.write_bytes(b"stable")
+        self.writer.write_bytes(self.key, b"stable")
+        real_digest_destination = (
+            artifacts_module._AnchoredArtifactParent.digest_destination
+        )
+
+        def verify_then_mutate(
+            anchored: artifacts_module._AnchoredArtifactParent,
+        ) -> FileDigest | None:
+            result = real_digest_destination(anchored)
+            source.write_bytes(b"changed")
+            return result
+
+        with mock.patch.object(
+            artifacts_module._AnchoredArtifactParent,
+            "digest_destination",
+            verify_then_mutate,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_file(self.key, source)
+
+        self.assertEqual(self.destination().read_bytes(), b"stable")
+        self.assert_no_parts()
+
     def test_rejects_unsafe_keys_roots_and_reparse_components(self) -> None:
         with self.assertRaises(ArtifactWriteError):
             self.writer.write_bytes(PurePosixPath("../escape.json"), b"escape")
@@ -137,10 +163,66 @@ class LocalArtifactWriterTests(unittest.TestCase):
             self.writer.write_bytes(self.key, b"blocked")
         self.assertEqual(tuple(outside.rglob("*")), ())
 
+    def test_parent_swap_after_validation_never_touches_outside_workspace(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        displaced = self.base / "displaced-parent"
+        opened_outside: list[Path] = []
+        unlinked_outside: list[Path] = []
+        real_validated_destination = artifacts_module._validated_destination
+        real_open = Path.open
+        real_unlink = Path.unlink
+
+        def redirect(directory: Path) -> None:
+            if artifacts_module.os.name == "nt":
+                import _winapi
+
+                _winapi.CreateJunction(str(outside), str(directory))
+            else:
+                directory.symlink_to(outside, target_is_directory=True)
+
+        def destination_then_swap(
+            root: Path,
+            key: PurePosixPath,
+            expected: FileDigest,
+        ) -> Path:
+            destination = real_validated_destination(root, key, expected)
+            destination.parent.mkdir(parents=True)
+            destination.parent.rename(displaced)
+            redirect(destination.parent)
+            return destination
+
+        def observe_open(path: Path, *args: object, **kwargs: object):
+            resolved = path.resolve(strict=False)
+            if outside in (resolved, *resolved.parents):
+                opened_outside.append(resolved)
+            return real_open(path, *args, **kwargs)
+
+        def observe_unlink(path: Path, *args: object, **kwargs: object):
+            resolved = path.resolve(strict=False)
+            if outside in (resolved, *resolved.parents):
+                unlinked_outside.append(resolved)
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(
+            artifacts_module,
+            "_validated_destination",
+            destination_then_swap,
+        ), mock.patch.object(Path, "open", observe_open), mock.patch.object(
+            Path,
+            "unlink",
+            observe_unlink,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"blocked")
+
+        self.assertEqual(opened_outside, [])
+        self.assertEqual(unlinked_outside, [])
+        self.assertEqual(tuple(outside.iterdir()), ())
+
     def test_faults_never_leave_temporary_or_false_final_files(self) -> None:
         failures = (
             ("_write_bytes_to_temp", OSError("injected write failure")),
-            ("publish_additively", ArtifactWriteError("injected rename failure")),
         )
         for patched, failure in failures:
             with self.subTest(patched=patched):
@@ -149,6 +231,16 @@ class LocalArtifactWriterTests(unittest.TestCase):
                         self.writer.write_bytes(self.key, b"payload")
                 self.assertFalse(self.destination().exists())
                 self.assert_no_parts()
+
+        with mock.patch.object(
+            artifacts_module._AnchoredArtifactParent,
+            "publish",
+            side_effect=ArtifactWriteError("injected rename failure"),
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"payload")
+        self.assertFalse(self.destination().exists())
+        self.assert_no_parts()
 
     def test_exclusive_temp_collision_never_deletes_unowned_file(self) -> None:
         destination = self.destination()
@@ -168,15 +260,113 @@ class LocalArtifactWriterTests(unittest.TestCase):
         self.assertEqual(collision.read_bytes(), b"unowned")
         self.assertFalse(destination.exists())
 
+    def test_temp_cleanup_only_removes_the_identity_owned_by_the_call(self) -> None:
+        real_write = artifacts_module._write_bytes_to_temp
+        replacement: list[Path] = []
+        rename_blocked: list[bool] = []
+
+        def replace_after_write(
+            temporary: artifacts_module._OwnedTemporary,
+            raw: bytes,
+        ) -> FileDigest:
+            result = real_write(temporary, raw)
+            path = temporary.parent.parent / temporary.name
+            displaced = path.with_name(f"{path.name}.displaced")
+            try:
+                path.rename(displaced)
+            except OSError:
+                rename_blocked.append(True)
+            else:
+                path.write_bytes(b"not-owned")
+                replacement.append(path)
+            raise OSError("injected failure after temp replacement attempt")
+
+        with mock.patch.object(
+            artifacts_module,
+            "_write_bytes_to_temp",
+            replace_after_write,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"payload")
+
+        if artifacts_module.os.name == "nt":
+            self.assertEqual(rename_blocked, [True])
+            self.assertEqual(replacement, [])
+            self.assert_no_parts()
+        else:
+            self.assertEqual(rename_blocked, [])
+            self.assertEqual(len(replacement), 1)
+            self.assertEqual(replacement[0].read_bytes(), b"not-owned")
+            replacement[0].unlink()
+            replacement[0].with_name(
+                f"{replacement[0].name}.displaced"
+            ).unlink()
+
+    @unittest.skipUnless(
+        artifacts_module.os.name == "nt",
+        "Windows pinned-handle flush coverage",
+    )
+    def test_windows_flushes_intermediate_and_publication_parent_handles(self) -> None:
+        real_flush = artifacts_module._flush_windows_directory_handle
+        with mock.patch.object(
+            artifacts_module,
+            "_flush_windows_directory_handle",
+            wraps=real_flush,
+        ) as flush:
+            self.writer.write_bytes(self.key, b"payload")
+
+        self.assertGreaterEqual(flush.call_count, 3)
+
     def test_sync_and_readback_failures_roll_back_new_publication(self) -> None:
-        for patched in ("sync_directory", "digest_file"):
-            with self.subTest(patched=patched):
-                failure = ArtifactWriteError(f"injected {patched} failure")
-                with mock.patch.object(integrity_module, patched, side_effect=failure):
-                    with self.assertRaises(ArtifactWriteError):
-                        self.writer.write_bytes(self.key, b"payload")
-                self.assertFalse(self.destination().exists())
-                self.assert_no_parts()
+        with mock.patch.object(
+            artifacts_module._AnchoredArtifactParent,
+            "sync_parent",
+            side_effect=BackupStoreError("injected sync failure"),
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"payload")
+        self.assertFalse(self.destination().exists())
+        self.assert_no_parts()
+
+        calls = 0
+        real_digest = artifacts_module._AnchoredArtifactParent.digest_destination
+
+        def fail_readback(
+            anchored: artifacts_module._AnchoredArtifactParent,
+            *,
+            share_delete: bool = False,
+        ) -> FileDigest | None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_digest(anchored, share_delete=share_delete)
+            raise BackupStoreError("injected read-back failure")
+
+        with mock.patch.object(
+            artifacts_module._AnchoredArtifactParent,
+            "digest_destination",
+            fail_readback,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"payload")
+        self.assertFalse(self.destination().exists())
+        self.assert_no_parts()
+
+    @unittest.skipUnless(
+        artifacts_module.os.name == "nt",
+        "Windows strict directory-flush regression",
+    )
+    def test_windows_directory_flush_failure_never_reports_success(self) -> None:
+        with mock.patch.object(
+            artifacts_module,
+            "_flush_windows_directory_handle",
+            side_effect=BackupStoreError("injected Windows directory flush failure"),
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.write_bytes(self.key, b"payload")
+
+        self.assertFalse(self.destination().exists())
+        self.assert_no_parts()
 
     def test_verify_independently_rereads_and_rejects_corruption(self) -> None:
         entry = self.writer.write_bytes(self.key, b"original")
