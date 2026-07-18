@@ -503,7 +503,7 @@ historical evidence.
   `tests_v2/adapters/ocr/test_smoke.py`.
 - Tests: 8 focused smoke tests passed; full v2 discovery and compile gates
   are the next verification step for this commit.
-- Commit: pending in this smoke-adapter slice.
+- Commit: `7e05066` (`feat(v2): add lazy OCR smoke adapters`).
 - Remaining risk: adapters only prove startup/report contracts; frame streaming,
   model inference, JSONL artifact persistence, change detection, and real
   Docker/ONNX environments are not yet exercised.
