@@ -392,7 +392,8 @@ historical evidence.
   30-FPS, 320x180 fixture with exactly 900 frames; validation fully decoded all
   output streams, enforced the requested audio policy, and read back the exact
   published Part 1/1 digest. Each final SQLite snapshot contained eight
-  SUCCEEDED units and exactly eight valid primary artifacts. Proof and final
+  SUCCEEDED units and exactly eight valid primary artifacts plus three known
+  verified side artifacts (11 total). Proof and final
   manifests and state snapshots carried fresh remote read-back evidence. Closing and
   reopening the store for a clean rerun preserved byte-identical canonical
   primary metadata/artifacts and selected the identical valid final checkpoint.
@@ -465,3 +466,45 @@ historical evidence.
 - Next step: Phase 8 OCR preprocessing and production-provider contracts,
   including the ONNX adapter and optional Docker legacy adapter against one
   shared coordinate/output contract.
+
+## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
+
+- Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`
+  (`fix(v2): make offline checkpoints fully restorable`). The implementation
+  now treats the persisted graph as exactly eight canonical primary documents
+  plus three known verified side rows: TTS WAV, rendered MP4, and published
+  Part 1/1. Same-stage primary/side rows commit atomically; duplicate,
+  wrong-owner, dependency-mismatched, and unknown-extra identities fail closed.
+  The final checkpoint manifest and SQLite snapshot, staged restore, and cold
+  runner all carry and verify all 11 rows; the proof checkpoint remains the
+  intentionally pre-BACKUP durability proof.
+- The four Important review concerns were resolved with tests and code: side
+  assets are persisted/restored; application modules import no adapters and the
+  runner receives typed media/publisher/writer/digest ports; prepared-stage and
+  TTS contracts are typed without object dispatch; and every primary parse plus
+  durable BACKUP reuse uses bounded `read_verified_bytes` on one anchored read
+  handle with Windows and POSIX replacement regressions. Proof-repair token
+  state is run-local and is not retained on a runner instance.
+- Fresh Windows verification after the fix: focused integration ran 222 tests
+  in 116.182s (`OK`, 11 skips); full v2 discovery ran 279 tests in 138.297s
+  (`OK`, 12 skips); compileall and diff checks returned exit 0. The dedicated
+  interruption matrix covered all 40 stage/point cases in 36.705s; real
+  audio, no-audio, and final-restore E2E covered 3 tests in 21.412s.
+- Cold-restore evidence: a real final checkpoint was restored into an empty
+  target; each of the three side objects was tested missing and corrupt (six
+  fail-closed restore attempts, no target publication), then the restored
+  SQLite/archive/workspace was opened by a new OfflineSliceRunner against the
+  same additive store. It returned exactly eight `SUCCEEDED` units with no
+  attempt increments/recompute, 8 primary + 3 side rows, byte-identical WAV,
+  rendered MP4, and Part 1/1, with semantic render validation passing.
+- Fresh POSIX evidence under WSL Python 3.14.4: anonymous lifecycle/race/
+  pass-fd plus anchored-read regression ran 8 tests in 0.008s (`OK`), and
+  compileall returned exit 0. WSL has no FFmpeg/FFprobe, so no POSIX real
+  render claim is made. Legacy baseline remains unchanged: 62 tests in
+  5.042s with exactly 8 failures and 9 errors (expected historical result).
+- Independent broad re-review of `cc22331` through the dirty fix diff found
+  no Critical, Important, or Minor findings and returned `Ready: yes`. The
+  remaining low-level FFI Minor risk is platform-sensitive ctypes/handle ABI
+  behavior, mitigated by the Windows pinned-handle and WSL POSIX race suites;
+  Python 3.10 and POSIX FFmpeg remain unexecuted risks. No public CLI, network,
+  credential, cleanup, push, merge, PR, or binary fixture changes were made.
