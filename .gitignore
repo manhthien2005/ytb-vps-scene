@@ -10,3 +10,4 @@ secrets/
 capcut-devices/
 *.part
 *.part.*
+.worktrees/
