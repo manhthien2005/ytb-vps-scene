@@ -31,3 +31,10 @@ cat frame.bgr | docker run --rm -i --gpus all ytb-vps-v2-ocr:cuda124 \
   --width 640 --height 360 --start-frame 0 --expected-frames 1 \
   --no-change-detection
 ```
+
+## Community GPU hosts
+
+Community hosts that block Docker namespaces use the native profile instead.
+It keeps the host CUDA 12.4 runtime, installs only pinned cuDNN in a private
+venv, and supplies a checksum-pinned FFmpeg binary. See
+[`ops/native-v2/README.md`](../../ops/native-v2/README.md).
