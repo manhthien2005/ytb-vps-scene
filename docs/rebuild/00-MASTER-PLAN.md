@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phase 8 OCR contract, smoke adapters, and frame/JSONL boundary complete; worker inference integration next
+Status: Phase 8 OCR contract, smoke adapters, frame/JSONL boundary, and change detection complete; worker inference integration next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -97,9 +97,9 @@ Start with a pure-stdlib OCR detection, canonical-coordinate, and provider
 smoke contract. Production ONNX and optional Docker legacy adapters use this
 contract; heavy vendor runtimes remain lazy and CPU fallback is forbidden.
 
-The contract, lazy smoke adapters, bounded frame stream, and canonical JSONL
-normalization are complete. Change detection and actual ONNX/Docker OCR
-execution remain the next Phase 8 slice.
+The contract, lazy smoke adapters, bounded frame stream, canonical JSONL
+normalization, and change detection/re-emission boundary are complete. Actual
+ONNX/Docker OCR execution remains the next Phase 8 slice.
 
 Gate: contract suite, provider smoke, deterministic fake, and explicit failure
 without silent CPU fallback.

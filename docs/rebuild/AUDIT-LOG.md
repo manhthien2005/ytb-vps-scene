@@ -532,6 +532,27 @@ historical evidence.
 - Next step: wire worker `read_exact`/JSONL output through this boundary and
   add change-detection with re-emission semantics.
 
+## 2026-07-18T21:00:00+07:00 — Phase 8 change detection and re-emission
+
+- Objective: reduce duplicate OCR calls while preserving one detection result
+  slot per sampled frame and the existing progress-count semantics.
+- Contract/invariants: the first frame in every chunk is OCRed; disabled mode
+  OCRs every frame; enabled mode compares bounded frame bytes against the prior
+  frame and OCRs only when the mean absolute difference exceeds the configured
+  Fraction threshold. Unchanged frames re-emit the last detections with the
+  current frame index; empty prior detections remain empty. Invalid thresholds,
+  frame lengths, detector outputs, and non-RawFrame inputs fail closed.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/change_detection.py`, adapter
+  exports, and `tests_v2/adapters/ocr/test_change_detection.py`.
+- Tests: 4 focused change-detection tests and full v2 discovery (304 tests,
+  12 skips) passed; compile and diff checks passed.
+- Commit: pending in this change-detection slice.
+- Remaining risk: worker scripts are not yet wired to this helper; actual
+  ONNX/Paddle inference, JSONL emission integration, and 30-second/10-minute
+  performance fixtures remain.
+- Next step: connect the worker loops to the bounded stream/change-detection
+  helpers and add an integration fixture comparing enabled/disabled output.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`
