@@ -32,7 +32,10 @@ class WorkerImageContractTests(unittest.TestCase):
         dockerfile = (ROOT / "containers" / "ocr-v2" / "Dockerfile").read_text(
             encoding="utf-8"
         )
-        self.assertIn("FROM python:3.10-slim-bookworm", dockerfile)
+        self.assertIn(
+            "FROM python:3.10-slim-bookworm@sha256:9643927a6fc74bd81b0f1bbb5cce3cb4a491f46b4c5dbee770f28e575f180015",
+            dockerfile,
+        )
         self.assertIn("apt-get install", dockerfile)
         self.assertIn("ffmpeg", dockerfile)
         self.assertIn("libgl1", dockerfile)

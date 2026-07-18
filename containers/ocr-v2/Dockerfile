@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bookworm
+FROM python:3.10-slim-bookworm@sha256:9643927a6fc74bd81b0f1bbb5cce3cb4a491f46b4c5dbee770f28e575f180015
 
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
