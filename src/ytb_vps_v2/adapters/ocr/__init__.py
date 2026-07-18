@@ -2,5 +2,18 @@
 
 from ytb_vps_v2.adapters.ocr.docker import DockerOcrSmokeAdapter
 from ytb_vps_v2.adapters.ocr.onnx import OnnxOcrSmokeAdapter
+from ytb_vps_v2.adapters.ocr.stream import (
+    RawFrame,
+    iter_raw_frames,
+    parse_worker_jsonl,
+    write_canonical_jsonl,
+)
 
-__all__ = ["DockerOcrSmokeAdapter", "OnnxOcrSmokeAdapter"]
+__all__ = [
+    "DockerOcrSmokeAdapter",
+    "OnnxOcrSmokeAdapter",
+    "RawFrame",
+    "iter_raw_frames",
+    "parse_worker_jsonl",
+    "write_canonical_jsonl",
+]

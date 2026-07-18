@@ -510,6 +510,28 @@ historical evidence.
 - Next step: implement bounded frame streaming and canonical JSONL detection
   conversion against the shared `OcrDetection` contract.
 
+## 2026-07-18T20:00:00+07:00 — Phase 8 bounded frame and JSONL boundary
+
+- Objective: convert worker raw frames and JSONL detections at a bounded,
+  provider-neutral boundary before actual model inference.
+- Contract/invariants: raw frames are read exactly one `width*height*3` frame at
+  a time, indexed from `start_frame` with `frame_step`, and truncated/overlong
+  streams fail closed with explicit frame-tolerance handling. Worker JSONL
+  accepts only the four expected fields, rejects non-finite/unsafe values,
+  maps crop boxes through `CoordinateTransform`, and stores exact Fraction
+  confidence. Canonical JSONL replacement is atomic and leaves an existing
+  target untouched on failure.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/stream.py`, OCR adapter exports,
+  and `tests_v2/adapters/ocr/test_stream.py`.
+- Tests: 7 focused stream tests and full v2 discovery (300 tests, 12 skips)
+  passed; compile and diff checks passed.
+- Commit: pending in this stream-boundary slice.
+- Remaining risk: worker scripts still own heavy runtime initialization and
+  have not yet been refactored to consume this boundary; change detection,
+  actual ONNX/Paddle inference, and production fixtures remain.
+- Next step: wire worker `read_exact`/JSONL output through this boundary and
+  add change-detection with re-emission semantics.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`
