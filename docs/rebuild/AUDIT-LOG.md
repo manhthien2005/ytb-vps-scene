@@ -553,6 +553,28 @@ historical evidence.
 - Next step: connect the worker loops to the bounded stream/change-detection
   helpers and add an integration fixture comparing enabled/disabled output.
 
+## 2026-07-18T22:00:00+07:00 — Phase 8 v2 OCR worker loop
+
+- Objective: prove the v2 worker orchestration contract with an injected fake
+  detector while keeping the audited legacy container scripts unchanged.
+- Contract/invariants: the loop consumes raw frames incrementally, delegates
+  change detection/re-emission, preserves `OCR_PROGRESS frames expected
+  detections` and `OCR_DONE frames detections`, maps source frame indexes, and
+  publishes canonical JSONL atomically. Truncated input leaves the existing
+  target untouched and never emits `OCR_DONE`.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/worker_loop.py`, streaming
+  change-detection export, adapter exports, and
+  `tests_v2/adapters/ocr/test_worker_loop.py`.
+- Tests: 6 focused worker/change-detection tests and full v2 discovery
+  (306 tests, 12 skips) passed; compile and diff checks passed.
+- Commit: pending in this worker-loop slice.
+- Remaining risk: emitted detections are still accumulated before the atomic
+  canonical sort/write; production ONNX/Paddle wrappers and a real model/GPU
+  fixture remain unimplemented. Legacy container scripts remain intentionally
+  unchanged until the dedicated cutover path.
+- Next step: implement a v2 ONNX detector wrapper that converts RapidOCR output
+  into `OcrDetection` and injects it into this worker loop.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`

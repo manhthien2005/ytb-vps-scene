@@ -47,9 +47,16 @@ def process_frames(
     detect: Callable[[RawFrame], Iterable[OcrDetection]],
     policy: ChangeDetectionPolicy = ChangeDetectionPolicy(),
 ) -> tuple[FrameDetections, ...]:
+    return tuple(iter_processed_frames(frames, detect, policy))
+
+
+def iter_processed_frames(
+    frames: Iterable[RawFrame],
+    detect: Callable[[RawFrame], Iterable[OcrDetection]],
+    policy: ChangeDetectionPolicy = ChangeDetectionPolicy(),
+) -> Iterable[FrameDetections]:
     if not callable(detect):
         raise ValueError("OCR detector must be callable")
-    output: list[FrameDetections] = []
     previous: RawFrame | None = None
     previous_detections: tuple[OcrDetection, ...] = ()
     for frame in frames:
@@ -70,6 +77,5 @@ def process_frames(
                 replace(item, frame_index=frame.frame_index)
                 for item in previous_detections
             )
-        output.append(FrameDetections(frame.frame_index, previous_detections))
+        yield FrameDetections(frame.frame_index, previous_detections)
         previous = frame
-    return tuple(output)

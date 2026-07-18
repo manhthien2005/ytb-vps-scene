@@ -4,6 +4,7 @@ from ytb_vps_v2.adapters.ocr.docker import DockerOcrSmokeAdapter
 from ytb_vps_v2.adapters.ocr.change_detection import (
     ChangeDetectionPolicy,
     FrameDetections,
+    iter_processed_frames,
     process_frames,
 )
 from ytb_vps_v2.adapters.ocr.onnx import OnnxOcrSmokeAdapter
@@ -18,6 +19,7 @@ __all__ = [
     "DockerOcrSmokeAdapter",
     "ChangeDetectionPolicy",
     "FrameDetections",
+    "iter_processed_frames",
     "OnnxOcrSmokeAdapter",
     "RawFrame",
     "iter_raw_frames",
