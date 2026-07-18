@@ -613,7 +613,7 @@ historical evidence.
   exports, and `tests_v2/adapters/ocr/test_docker_detector.py`.
 - Tests: 3 focused Docker parity tests and full v2 discovery (313 tests, 12
   skips) passed; compile and diff checks passed.
-- Commit: pending in this Docker parity slice.
+- Commit: `3c579c4` (`feat(v2): add Docker OCR chunk detector`).
 - Remaining risk: existing legacy container workers still expect file output,
   while this adapter's next v2 worker image must support stdout JSONL; no real
   Docker/ONNX runtime or target GPU smoke has run here.
