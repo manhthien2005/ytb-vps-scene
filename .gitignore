@@ -11,3 +11,4 @@ capcut-devices/
 *.part
 *.part.*
 .worktrees/
+.superpowers/
