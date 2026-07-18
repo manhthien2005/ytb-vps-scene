@@ -16,6 +16,7 @@ from ytb_vps_v2.domain.backup import (
     FileDigest,
     ManifestEntry,
     VerifiedInputArchive,
+    parse_manifest_bytes,
 )
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
@@ -313,6 +314,8 @@ class OfflineSliceRunner:
                 workspace,
                 request.snapshot_dir,
                 request.at,
+                verification_observed_at=request.verification_observed_at,
+                verification_method=_VERIFY_METHOD,
             )
             proof_record = self._checkpoint_record(request.job_id, proof_id)
             self._verify_checkpoint_record(
@@ -330,6 +333,8 @@ class OfflineSliceRunner:
                 workspace,
                 request.snapshot_dir,
                 request.at,
+                verification_observed_at=request.verification_observed_at,
+                verification_method=_VERIFY_METHOD,
             )
             final_record = self._checkpoint_record(request.job_id, final_id)
             self._verify_checkpoint_record(
@@ -466,7 +471,7 @@ class OfflineSliceRunner:
         record: CheckpointRecord,
         observed_at: int,
     ) -> None:
-        for entry in (record.manifest, record.state_snapshot):
+        def verify_entry(entry: ManifestEntry) -> None:
             evidence = self.checkpoints.object_store.verify(
                 entry.key,
                 entry.digest,
@@ -482,6 +487,38 @@ class OfflineSliceRunner:
                 raise OfflineSliceError(
                     "Checkpoint remote verification evidence is invalid"
                 )
+
+        verify_entry(record.manifest)
+        raw = self.checkpoints.object_store.read_bytes(
+            record.manifest.key,
+            _MAX_DOCUMENT_BYTES,
+        )
+        if self._digest(raw) != record.manifest.digest:
+            raise OfflineSliceError("Checkpoint manifest digest is invalid")
+        try:
+            manifest = parse_manifest_bytes(raw)
+        except DomainInvariantError as exc:
+            raise OfflineSliceError("Checkpoint manifest is invalid") from exc
+        if (
+            manifest.job_id != record.job_id
+            or manifest.checkpoint_id != record.checkpoint_id
+            or manifest.state_snapshot != record.state_snapshot
+        ):
+            raise OfflineSliceError("Checkpoint manifest identity is invalid")
+
+        entries = (
+            record.state_snapshot,
+            manifest.input_archive,
+            manifest.state_snapshot,
+            *manifest.artifacts,
+        )
+        seen: set[str] = set()
+        for entry in entries:
+            key = str(entry.key)
+            if key in seen:
+                continue
+            seen.add(key)
+            verify_entry(entry)
 
     def _checkpoint_id_for_publication(
         self,
@@ -955,6 +992,8 @@ class OfflineSliceRunner:
                 workspace,
                 request.snapshot_dir,
                 request.at,
+                verification_observed_at=request.verification_observed_at,
+                verification_method=_VERIFY_METHOD,
             )
             record = self._checkpoint_record(request.job_id, proof_id)
             self._verify_checkpoint_record(

@@ -15,6 +15,7 @@ from ytb_vps_v2.domain.backup import (
 )
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import Artifact, JobId
+from ytb_vps_v2.domain.restore import RemoteObjectEvidence
 from ytb_vps_v2.ports.backup import (
     AdditiveObjectStore,
     BackupStoreError,
@@ -24,6 +25,7 @@ from ytb_vps_v2.ports.state import StateRepository
 
 
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+_VERIFY_METHOD = "sha256-readback"
 
 
 class CheckpointError(RuntimeError):
@@ -72,7 +74,12 @@ class CheckpointPublisher:
             raise CheckpointError("Input archive root is invalid") from exc
 
     def _completed(
-        self, job_id: JobId, checkpoint_id: str
+        self,
+        job_id: JobId,
+        checkpoint_id: str,
+        *,
+        observed_at: int | None = None,
+        method: str = _VERIFY_METHOD,
     ) -> CheckpointManifest | None:
         records = tuple(
             item
@@ -96,6 +103,49 @@ class CheckpointPublisher:
             or manifest.state_snapshot != record.state_snapshot
         ):
             raise CheckpointError("Completed checkpoint manifest identity is invalid")
+        if observed_at is not None and (
+            type(observed_at) is not int or observed_at < 0
+        ):
+            raise CheckpointError("Checkpoint verification time is invalid")
+        if (
+            type(method) is not str
+            or not method
+            or method != method.strip()
+            or len(method) > 128
+        ):
+            raise CheckpointError("Checkpoint verification method is invalid")
+        verifier = getattr(self.object_store, "verify", None)
+        if observed_at is not None and not callable(verifier):
+            raise CheckpointError("Checkpoint store lacks remote verification")
+        if observed_at is not None and callable(verifier):
+            entries = (
+                record.manifest,
+                record.state_snapshot,
+                manifest.input_archive,
+                manifest.state_snapshot,
+                *manifest.artifacts,
+            )
+            seen: set[str] = set()
+            for entry in entries:
+                key = str(entry.key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence = verifier(
+                    entry.key,
+                    entry.digest,
+                    observed_at,
+                    method,
+                )
+                if (
+                    type(evidence) is not RemoteObjectEvidence
+                    or evidence.entry != entry
+                    or evidence.observed_at != observed_at
+                    or evidence.method != method
+                ):
+                    raise CheckpointError(
+                        "Completed checkpoint object verification is invalid"
+                    )
         return manifest
 
     def _put_exact(self, source: Path, entry: ManifestEntry) -> None:
@@ -110,13 +160,21 @@ class CheckpointPublisher:
         workspace_root: Path,
         snapshot_dir: Path,
         at: str,
+        *,
+        verification_observed_at: int | None = None,
+        verification_method: str = _VERIFY_METHOD,
     ) -> CheckpointManifest:
         if type(job_id) is not JobId:
             raise CheckpointError("Checkpoint job ID must be JobId")
         identifier = _text("Checkpoint ID", checkpoint_id)
         timestamp = _text("Checkpoint time", at)
         try:
-            completed = self._completed(job_id, identifier)
+            completed = self._completed(
+                job_id,
+                identifier,
+                observed_at=verification_observed_at,
+                method=verification_method,
+            )
             if completed is not None:
                 return completed
 

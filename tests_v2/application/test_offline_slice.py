@@ -345,6 +345,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         self.assertEqual(len(final_records), 1)
         self.assertEqual(result.final_checkpoint.manifest, final_records[0].manifest)
         self.assertEqual(len(result.final_manifest.artifacts), 11)
+        self.assertEqual(len(result.proof_manifest.artifacts), 10)
         snapshot_path = self.remote_root.joinpath(
             *result.final_manifest.state_snapshot.key.parts
         )
@@ -1296,6 +1297,41 @@ class OfflineSliceResumeTests(unittest.TestCase):
             )
         finally:
             inspection.close()
+
+    def test_corrupt_final_side_artifact_rotates_to_additive_repair(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _, _, remote, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        first = runner.run(request)
+        side_entry = next(
+            entry
+            for entry in first.final_manifest.artifacts
+            if str(entry.key).endswith("artifacts/tts/voice.wav")
+        )
+        side_path = remote.joinpath(*side_entry.key.parts)
+        original = side_path.read_bytes()
+        side_path.write_bytes(b"corrupt final side artifact")
+
+        repaired = runner.run(request)
+
+        self.assertNotEqual(
+            repaired.final_manifest.checkpoint_id,
+            first.final_manifest.checkpoint_id,
+        )
+        self.assertTrue(repaired.final_manifest.checkpoint_id.endswith("-repair-1"))
+        repaired_side_entry = next(
+            entry
+            for entry in repaired.final_manifest.artifacts
+            if str(entry.key).endswith("artifacts/tts/voice.wav")
+        )
+        self.assertEqual(
+            remote.joinpath(*repaired_side_entry.key.parts).read_bytes(),
+            original,
+        )
+        self.assertEqual(side_path.read_bytes(), b"corrupt final side artifact")
+        self.assertEqual(len(repaired.final_manifest.artifacts), 11)
 
     def test_missing_or_corrupt_final_manifest_rotates_to_valid_repair(self) -> None:
         for damage in ("missing", "corrupt"):

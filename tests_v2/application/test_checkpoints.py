@@ -40,6 +40,9 @@ class RecordingStore:
     def read_bytes(self, key: PurePosixPath, max_bytes: int) -> bytes:
         return self.delegate.read_bytes(key, max_bytes)
 
+    def verify(self, key, expected, observed_at, method):
+        return self.delegate.verify(key, expected, observed_at, method)
+
 
 class CheckpointPublisherTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -105,13 +108,18 @@ class CheckpointPublisherTests(unittest.TestCase):
             self.files,
         )
 
-    def _publish(self, checkpoint_id: str = "checkpoint/unsafe"):
+    def _publish(
+        self,
+        checkpoint_id: str = "checkpoint/unsafe",
+        verification_observed_at: int | None = None,
+    ):
         return self.publisher.publish(
             self.job_id,
             checkpoint_id,
             self.workspace,
             self.snapshot_root,
             "2026-07-16T22:00:00+07:00",
+            verification_observed_at=verification_observed_at,
         )
 
     def test_publishes_verified_data_then_canonical_manifest_and_records_completion(self) -> None:
@@ -146,6 +154,16 @@ class CheckpointPublisherTests(unittest.TestCase):
         manifest_path.write_bytes(b"corrupt")
         with self.assertRaises(CheckpointError):
             self._publish("cp-idempotent")
+
+    def test_completed_publish_rejects_corrupt_artifact_instead_of_reusing(self) -> None:
+        first = self._publish("cp-corrupt-artifact", verification_observed_at=100)
+        artifact_path = self.remote_root.joinpath(
+            *first.artifacts[0].key.parts
+        )
+        artifact_path.write_bytes(b"corrupt artifact")
+
+        with self.assertRaises(CheckpointError):
+            self._publish("cp-corrupt-artifact", verification_observed_at=100)
 
     def test_missing_or_mutated_artifact_publishes_no_manifest_or_record(self) -> None:
         artifact_path = self.workspace.joinpath(*self.artifact.relative_path.parts)

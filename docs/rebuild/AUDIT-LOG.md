@@ -476,8 +476,11 @@ historical evidence.
   Part 1/1. Same-stage primary/side rows commit atomically; duplicate,
   wrong-owner, dependency-mismatched, and unknown-extra identities fail closed.
   The final checkpoint manifest and SQLite snapshot, staged restore, and cold
-  runner all carry and verify all 11 rows; the proof checkpoint remains the
-  intentionally pre-BACKUP durability proof.
+  runner all carry and verify all 11 rows; the proof checkpoint is intentionally
+  pre-BACKUP and therefore contains exactly 10 manifest artifacts (seven
+  primary documents plus three side assets). The BACKUP primary is absent from
+  that proof to avoid a circular dependency on the proof record itself; the
+  subsequent final checkpoint contains all 11 artifacts.
 - The four Important review concerns were resolved with tests and code: side
   assets are persisted/restored; application modules import no adapters and the
   runner receives typed media/publisher/writer/digest ports; prepared-stage and
