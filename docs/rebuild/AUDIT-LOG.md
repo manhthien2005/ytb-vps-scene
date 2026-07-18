@@ -592,7 +592,7 @@ historical evidence.
   exports, and `tests_v2/adapters/ocr/test_onnx_detector.py`.
 - Tests: 4 focused detector tests, 2 worker-loop regression tests, and full v2
   discovery (310 tests, 12 skips) passed; compile and diff checks passed.
-- Commit: pending in this ONNX detector slice.
+- Commit: `df0a4c7` (`feat(v2): add lazy RapidOCR ONNX detector`).
 - Remaining risk: no ONNX Runtime/RapidOCR/model is installed on this host, so
   real CUDA session creation and inference are not claimed. Docker detector
   parity and a pinned production model fixture remain.
