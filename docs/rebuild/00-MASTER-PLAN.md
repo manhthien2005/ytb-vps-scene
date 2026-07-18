@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phase 8 ONNX and Docker detector adapters complete against fake runtimes; target smoke next
+Status: Phase 8 v2 worker image/stdout contract complete; target GPU/Docker smoke next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -101,6 +101,11 @@ The contract, lazy smoke adapters, bounded frame stream, canonical JSONL
 normalization, change detection/re-emission boundary, v2 worker loop, and lazy
 RapidOCR ONNX detector wrapper are complete. A real model/GPU smoke and Docker
 chunk worker smoke remain the next Phase 8 slices.
+
+The v2 worker image and stdout-JSONL entrypoint are now defined separately
+from the audited legacy images. It emits detections only on stdout, sends
+progress to stderr, and fails explicitly when optional GPU runtime packages
+are absent.
 
 Gate: contract suite, provider smoke, deterministic fake, and explicit failure
 without silent CPU fallback.

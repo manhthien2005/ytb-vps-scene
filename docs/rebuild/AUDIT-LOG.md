@@ -620,6 +620,27 @@ historical evidence.
 - Next step: add the v2 worker image/entrypoint contract for stdout JSONL and
   run target-environment GPU/Docker smoke tests.
 
+## 2026-07-19T01:00:00+07:00 — Phase 8 v2 worker image/stdout contract
+
+- Objective: define a separate v2 worker image and entrypoint compatible with
+  `DockerOcrChunkDetector`, without changing the audited legacy containers.
+- Contract/invariants: the worker accepts bounded raw BGR frames on stdin,
+  writes detection JSONL only to stdout, writes `OCR_PROGRESS`/`OCR_DONE` only
+  to stderr, enforces `--output -`, and delegates crop, CUDA validation,
+  change detection, and canonical detection conversion to v2 adapters. The
+  Dockerfile installs only the v2 package; optional RapidOCR/NumPy/ONNX GPU
+  wheels are deliberately supplied by the target image build.
+- Files changed: `containers/ocr-v2/worker.py`, `containers/ocr-v2/Dockerfile`,
+  `containers/ocr-v2/README.md`, `src/ytb_vps_v2/adapters/ocr/worker_stdout.py`,
+  exports, and worker-image/stdout tests.
+- Tests: focused stdout/image contract tests passed; full v2 discovery (316
+  tests, 12 skips), compile, and diff checks passed.
+- Commit: pending in this worker-image slice.
+- Remaining risk: no Docker build or real GPU/model smoke ran on this host;
+  the base image intentionally lacks optional RapidOCR runtime wheels.
+- Next step: execute the Docker build and CUDA/model smoke on the target
+  environment, then pin the production runtime/model dependencies.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`
