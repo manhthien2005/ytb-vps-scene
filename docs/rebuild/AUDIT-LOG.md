@@ -567,7 +567,7 @@ historical evidence.
   `tests_v2/adapters/ocr/test_worker_loop.py`.
 - Tests: 6 focused worker/change-detection tests and full v2 discovery
   (306 tests, 12 skips) passed; compile and diff checks passed.
-- Commit: pending in this worker-loop slice.
+- Commit: `0f118a6` (`feat(v2): add OCR worker loop contract`).
 - Remaining risk: emitted detections are still accumulated before the atomic
   canonical sort/write; production ONNX/Paddle wrappers and a real model/GPU
   fixture remain unimplemented. Legacy container scripts remain intentionally
