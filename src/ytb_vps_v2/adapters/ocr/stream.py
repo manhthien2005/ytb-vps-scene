@@ -191,4 +191,3 @@ def write_canonical_jsonl(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-

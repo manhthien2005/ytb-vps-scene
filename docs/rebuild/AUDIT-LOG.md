@@ -525,7 +525,7 @@ historical evidence.
   and `tests_v2/adapters/ocr/test_stream.py`.
 - Tests: 7 focused stream tests and full v2 discovery (300 tests, 12 skips)
   passed; compile and diff checks passed.
-- Commit: pending in this stream-boundary slice.
+- Commit: `c53aafe` (`feat(v2): add bounded OCR frame and JSONL boundary`).
 - Remaining risk: worker scripts still own heavy runtime initialization and
   have not yet been refactored to consume this boundary; change detection,
   actual ONNX/Paddle inference, and production fixtures remain.
