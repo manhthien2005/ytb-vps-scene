@@ -1,0 +1,41 @@
+{
+  "name": "ytb-vps-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "tsx src/lib/db/migrate-cli.ts"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "1.0.2",
+    "next": "16.2.0",
+    "postgres": "3.4.7",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "zod": "4.1.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.7",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.3.0",
+    "@types/node": "22.15.3",
+    "@types/react": "19.1.2",
+    "@types/react-dom": "19.1.2",
+    "@vitejs/plugin-react": "4.4.1",
+    "eslint": "9.25.1",
+    "eslint-config-next": "16.2.0",
+    "jsdom": "26.1.0",
+    "tsx": "4.19.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
