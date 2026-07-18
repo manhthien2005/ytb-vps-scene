@@ -16,7 +16,15 @@ class WorkerImageContractTests(unittest.TestCase):
             "numpy==2.2.6",
             "onnxruntime-gpu==1.19.2",
             "rapidocr==3.9.0",
+            "nvidia-cuda-runtime-cu12==12.4.127",
+            "nvidia-cublas-cu12==12.4.5.8",
+            "nvidia-cufft-cu12==11.2.1.3",
+            "nvidia-curand-cu12==10.3.5.147",
+            "nvidia-cusolver-cu12==11.6.1.9",
+            "nvidia-cusparse-cu12==12.3.1.170",
             "nvidia-cudnn-cu12==9.24.0.43",
+            "nvidia-nvjitlink-cu12==12.4.127",
+            "nvidia-nvtx-cu12==12.4.127",
         ):
             self.assertIn(requirement, requirements)
 
