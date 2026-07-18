@@ -57,4 +57,3 @@ class OcrContractTests(unittest.TestCase):
             model_revision="r1",
         )
         self.assertIsNone(require_cuda_provider(report))
-

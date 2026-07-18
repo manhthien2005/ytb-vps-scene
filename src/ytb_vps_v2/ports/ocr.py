@@ -113,4 +113,3 @@ class OcrEngine(Protocol):
         frame_step: int,
         transform: CoordinateTransform,
     ) -> tuple[OcrDetection, ...]: ...
-

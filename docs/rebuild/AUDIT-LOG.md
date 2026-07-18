@@ -482,7 +482,7 @@ historical evidence.
   `tests_v2/ports/test_ocr.py`, and the Phase 8 master-plan status.
 - Tests: `python -m unittest tests_v2.ports.test_ocr -v` — 4 tests passed;
   compile and full-suite gates remain for the adapter follow-up slice.
-- Commit: pending in this contract-first slice.
+- Commit: `a71e177` (`feat(v2): add provider-neutral OCR contract`).
 - Remaining risk: ONNX Runtime, RapidOCR, PaddleOCR, Docker command execution,
   frame streaming, JSONL persistence, and change-detection are not yet wired.
 - Next step: add lazy ONNX/Docker smoke adapters and shared worker contract
