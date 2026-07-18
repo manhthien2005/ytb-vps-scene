@@ -488,6 +488,28 @@ historical evidence.
 - Next step: add lazy ONNX/Docker smoke adapters and shared worker contract
   tests without importing optional dependencies during package import.
 
+## 2026-07-18T19:00:00+07:00 — Phase 8 lazy provider smoke adapters
+
+- Objective: expose ONNX and Docker provider smoke checks without importing
+  optional runtimes during package import.
+- Contract/invariants: ONNX session/provider failures normalize to
+  `ProviderError`; the active provider list must start with
+  `CUDAExecutionProvider`. Docker uses an argv-only `docker run --rm
+  --network none ... --smoke` command, rejects unsafe image identifiers, and
+  parses only the shared JSON provider report. No shell interpolation or CPU
+  fallback is permitted.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/onnx.py`,
+  `src/ytb_vps_v2/adapters/ocr/docker.py`, adapter exports, and
+  `tests_v2/adapters/ocr/test_smoke.py`.
+- Tests: 8 focused smoke tests passed; full v2 discovery and compile gates
+  are the next verification step for this commit.
+- Commit: pending in this smoke-adapter slice.
+- Remaining risk: adapters only prove startup/report contracts; frame streaming,
+  model inference, JSONL artifact persistence, change detection, and real
+  Docker/ONNX environments are not yet exercised.
+- Next step: implement bounded frame streaming and canonical JSONL detection
+  conversion against the shared `OcrDetection` contract.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`
