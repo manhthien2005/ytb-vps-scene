@@ -61,4 +61,3 @@ def run_stdout_worker_loop(
     output.flush()
     emit_progress(f"OCR_DONE {frame_count} {detection_count}")
     return StdoutWorkerSummary(frame_count, detection_count)
-

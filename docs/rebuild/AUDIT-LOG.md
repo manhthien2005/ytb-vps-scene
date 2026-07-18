@@ -635,7 +635,7 @@ historical evidence.
   exports, and worker-image/stdout tests.
 - Tests: focused stdout/image contract tests passed; full v2 discovery (316
   tests, 12 skips), compile, and diff checks passed.
-- Commit: pending in this worker-image slice.
+- Commit: `f905a8c` (`feat(v2): add OCR worker stdout image contract`).
 - Remaining risk: no Docker build or real GPU/model smoke ran on this host;
   the base image intentionally lacks optional RapidOCR runtime wheels.
 - Next step: execute the Docker build and CUDA/model smoke on the target

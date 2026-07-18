@@ -30,4 +30,3 @@ class WorkerStdoutTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all("OCR_" not in line for line in output.getvalue().splitlines()))
         self.assertEqual(progress[-1], "OCR_DONE 2 2")
-

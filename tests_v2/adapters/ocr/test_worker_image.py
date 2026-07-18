@@ -20,4 +20,3 @@ class WorkerImageContractTests(unittest.TestCase):
         self.assertIn("COPY src ./src", dockerfile)
         self.assertIn('ENTRYPOINT ["python", "/app/worker.py"]', dockerfile)
         self.assertNotIn("ocr-legacy", dockerfile)
-
