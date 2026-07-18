@@ -376,6 +376,82 @@ class LocalArtifactWriterTests(unittest.TestCase):
         with self.assertRaises(ArtifactWriteError):
             self.writer.verify(self.key, entry.digest)
 
+    def test_read_verified_bytes_is_bounded_and_exact(self) -> None:
+        entry = self.writer.write_bytes(self.key, b"canonical")
+
+        self.assertEqual(
+            self.writer.read_verified_bytes(self.key, entry.digest, 64),
+            b"canonical",
+        )
+        with self.assertRaises(ArtifactWriteError):
+            self.writer.read_verified_bytes(self.key, entry.digest, 4)
+
+    @unittest.skipIf(
+        artifacts_module.os.name == "nt",
+        "POSIX anchored entry-swap regression",
+    )
+    def test_posix_read_verified_bytes_rejects_entry_swap_after_read(self) -> None:
+        entry = self.writer.write_bytes(self.key, b"canonical")
+        displaced = self.destination().with_name("displaced.json")
+        real_read = artifacts_module._read_bounded_and_digest
+
+        def read_then_swap(reader, max_bytes):
+            result = real_read(reader, max_bytes)
+            self.destination().rename(displaced)
+            self.destination().write_bytes(b"canonical")
+            return result
+
+        with mock.patch.object(
+            artifacts_module,
+            "_read_bounded_and_digest",
+            read_then_swap,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.read_verified_bytes(self.key, entry.digest, 64)
+
+    @unittest.skipUnless(
+        artifacts_module.os.name == "nt",
+        "Windows injected pinned-read regression",
+    )
+    def test_windows_read_verified_bytes_rechecks_pinned_entry_identity(self) -> None:
+        entry = self.writer.write_bytes(self.key, b"canonical")
+        with mock.patch.object(
+            artifacts_module._AnchoredArtifactParent,
+            "_recheck_destination_identity",
+            side_effect=BackupStoreError("injected entry replacement"),
+            create=True,
+        ):
+            with self.assertRaises(ArtifactWriteError):
+                self.writer.read_verified_bytes(self.key, entry.digest, 64)
+
+    @unittest.skipUnless(
+        artifacts_module.os.name == "nt",
+        "Windows pinned-handle replacement regression",
+    )
+    def test_windows_read_verified_bytes_pins_entry_against_replacement(self) -> None:
+        entry = self.writer.write_bytes(self.key, b"canonical")
+        displaced = self.destination().with_name("displaced.json")
+        real_read = artifacts_module._read_bounded_and_digest
+        replacement_blocked = False
+
+        def read_while_replacement_is_attempted(reader, max_bytes):
+            nonlocal replacement_blocked
+            with self.assertRaises(OSError):
+                self.destination().rename(displaced)
+            replacement_blocked = True
+            return real_read(reader, max_bytes)
+
+        with mock.patch.object(
+            artifacts_module,
+            "_read_bounded_and_digest",
+            read_while_replacement_is_attempted,
+        ):
+            raw = self.writer.read_verified_bytes(self.key, entry.digest, 64)
+
+        self.assertTrue(replacement_blocked)
+        self.assertEqual(raw, b"canonical")
+        self.assertFalse(displaced.exists())
+
     def test_verify_missing_artifact_fails_without_creating_parent_paths(self) -> None:
         key = PurePosixPath("missing/deep/artifact.bin")
         expected = FileDigest(0, hashlib.sha256(b"").hexdigest())

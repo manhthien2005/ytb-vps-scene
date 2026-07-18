@@ -13,6 +13,11 @@ from ytb_vps_v2.adapters.ffmpeg.media import FfmpegMediaAdapter
 from ytb_vps_v2.adapters.filesystem.additive import LocalAdditiveObjectStore
 from ytb_vps_v2.adapters.filesystem.archive import VerifiedInputArchiver
 from ytb_vps_v2.adapters.filesystem.artifacts import LocalArtifactWriter
+from ytb_vps_v2.adapters.filesystem.composition import (
+    LocalArtifactWriterFactory,
+    LocalFileDigestVerifier,
+    LocalPartPublisherFactory,
+)
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_file
 from ytb_vps_v2.adapters.filesystem.publish import LocalPartPublisher
 from ytb_vps_v2.adapters.offline.providers import (
@@ -21,6 +26,7 @@ from ytb_vps_v2.adapters.offline.providers import (
     DeterministicWaveTtsProvider,
 )
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
+from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.offline_slice import (
     FreshWorkspaceRequired,
@@ -30,6 +36,8 @@ from ytb_vps_v2.application.offline_slice import (
     OfflineSliceRequest,
     OfflineSliceRunner,
 )
+from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
+from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
 from ytb_vps_v2.domain.models import Part
@@ -38,8 +46,10 @@ from ytb_vps_v2.domain.pipeline import (
     CHECKPOINT_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
     MediaDocument,
+    PublicationDocument,
     RenderPlanDocument,
     RenderRequest,
+    TtsDocument,
     parse_render_plan_document_bytes,
     parse_publication_document_bytes,
     parse_tts_document_bytes,
@@ -47,6 +57,14 @@ from ytb_vps_v2.domain.pipeline import (
 from ytb_vps_v2.domain.timeline import FrameInterval
 from ytb_vps_v2.domain.timeline import Timeline
 from ytb_vps_v2.ports.pipeline import ArtifactWriteError
+
+
+def _local_slice_ports():
+    return (
+        LocalArtifactWriterFactory(),
+        LocalPartPublisherFactory(),
+        LocalFileDigestVerifier(),
+    )
 
 
 class LocalPartPublisherTests(unittest.TestCase):
@@ -95,6 +113,39 @@ class OfflineSliceApiTests(unittest.TestCase):
             tuple(name for name in expected if not hasattr(module, name)),
             (),
         )
+
+    def test_application_layer_has_no_adapter_imports(self) -> None:
+        application = Path(
+            importlib.import_module("ytb_vps_v2.application").__file__
+        ).parent
+        violations = tuple(
+            path.name
+            for path in sorted(application.glob("*.py"))
+            if "ytb_vps_v2.adapters" in path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(violations, ())
+
+    def test_runner_never_parses_canonical_documents_through_path_read(self) -> None:
+        source = Path(
+            importlib.import_module(
+                "ytb_vps_v2.application.offline_slice"
+            ).__file__
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(".read_bytes()", source)
+
+    def test_runner_uses_typed_media_documents_and_prepared_stage_values(self) -> None:
+        source = Path(
+            importlib.import_module(
+                "ytb_vps_v2.application.offline_slice"
+            ).__file__
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("media: object", source)
+        self.assertNotIn("prepared: object", source)
+        self.assertNotIn("dict[StageName, object]", source)
+        self.assertNotIn("# type: ignore", source)
 
 
 class OfflineSliceEndToEndTests(unittest.TestCase):
@@ -168,6 +219,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         )
         result = runner.run(request)
         return state_path, state, request, result
@@ -181,10 +233,17 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         self.assertTrue(
             all(unit.status is WorkStatus.SUCCEEDED for unit in result.work_units)
         )
-        self.assertEqual(len(result.artifacts), 8)
-        by_owner = {artifact.owner: artifact for artifact in result.artifacts}
-        self.assertEqual(set(by_owner), set(StageName))
+        self.assertEqual(len(result.artifacts), 11)
         expected_paths = tuple(PIPELINE_ARTIFACT_PATHS.values())
+        primary_paths = set(expected_paths)
+        primary_artifacts = tuple(
+            artifact
+            for artifact in result.artifacts
+            if artifact.relative_path in primary_paths
+        )
+        self.assertEqual(len(primary_artifacts), 8)
+        by_owner = {artifact.owner: artifact for artifact in primary_artifacts}
+        self.assertEqual(set(by_owner), set(StageName))
         self.assertEqual(
             tuple(by_owner[stage].relative_path for stage in StageName),
             expected_paths,
@@ -206,6 +265,10 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
 
         part_path = self.workspace.joinpath(*result.publication.part_paths[0].parts)
         self.assertEqual(digest_file(part_path), result.publication.part_digests[0])
+        tts_artifact = by_owner[StageName.TTS]
+        tts_document = parse_tts_document_bytes(
+            self.workspace.joinpath(*tts_artifact.relative_path.parts).read_bytes()
+        )
         render_artifact = by_owner[StageName.RENDER]
         render_plan = parse_render_plan_document_bytes(
             self.workspace.joinpath(*render_artifact.relative_path.parts).read_bytes()
@@ -233,6 +296,36 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         )
         rendered = self.media.validate_render(part_path, render_request)
         self.assertIs(rendered.has_audio, request.output_has_audio)
+        side_by_name = {
+            artifact.name: artifact
+            for artifact in result.artifacts
+            if artifact.relative_path not in primary_paths
+        }
+        expected_sides = {
+            "tts-audio": (
+                StageName.TTS,
+                tts_document.audio_path,
+                tts_document.audio_digest,
+            ),
+            "rendered-video": (
+                StageName.RENDER,
+                render_plan.rendered_path,
+                render_plan.rendered_digest,
+            ),
+            "published-part-001": (
+                StageName.PUBLISH,
+                result.publication.part_paths[0],
+                result.publication.part_digests[0],
+            ),
+        }
+        self.assertEqual(set(side_by_name), set(expected_sides))
+        for name, (owner, path, digest) in expected_sides.items():
+            side = side_by_name[name]
+            self.assertIs(side.owner, owner)
+            self.assertEqual(side.relative_path, path)
+            self.assertEqual(FileDigest(side.size_bytes, side.sha256), digest)
+            self.assertEqual(side.dependencies, by_owner[owner].dependencies)
+            LocalArtifactWriter(self.workspace).verify(path, digest)
 
         self.assertEqual(
             result.checkpoint.checkpoint_id,
@@ -251,13 +344,13 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(len(final_records), 1)
         self.assertEqual(result.final_checkpoint.manifest, final_records[0].manifest)
-        self.assertEqual(len(result.final_manifest.artifacts), 8)
+        self.assertEqual(len(result.final_manifest.artifacts), 11)
         snapshot_path = self.remote_root.joinpath(
             *result.final_manifest.state_snapshot.key.parts
         )
         snapshot = SqliteStateStore(snapshot_path)
         try:
-            self.assertEqual(len(snapshot.valid_artifacts(request.job_id)), 8)
+            self.assertEqual(len(snapshot.valid_artifacts(request.job_id)), 11)
             self.assertTrue(
                 all(
                     snapshot.get_work_unit(request.job_id, stage.value.lower()).status
@@ -296,6 +389,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         )
 
         second = runner.run(request)
@@ -331,6 +425,153 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         self._assert_clean_rerun_is_byte_identical(
             state_path, state, request, result
         )
+
+    def test_final_checkpoint_restores_all_side_assets_for_zero_work_cold_resume(
+        self,
+    ) -> None:
+        _, state, request, first = self._run_slice(
+            self.audio_source,
+            output_has_audio=True,
+        )
+        self._assert_complete(state, request, first)
+        store = LocalAdditiveObjectStore(self.remote_root)
+        restorer = CheckpointRestorer(store, LocalStagedRestoreWorkspace())
+        restore_parent = self.root / "restores"
+        restore_parent.mkdir()
+        side_artifacts = tuple(
+            artifact
+            for artifact in first.artifacts
+            if artifact.name
+            in {"tts-audio", "rendered-video", "published-part-001"}
+        )
+        self.assertEqual(len(side_artifacts), 3)
+
+        for artifact in side_artifacts:
+            remote_entry = next(
+                entry
+                for entry in first.final_manifest.artifacts
+                if entry.key.parts[-len(artifact.relative_path.parts) :]
+                == artifact.relative_path.parts
+            )
+            remote_path = self.remote_root.joinpath(*remote_entry.key.parts)
+            original = remote_path.read_bytes()
+            for damage in ("missing", "corrupt"):
+                with self.subTest(side=artifact.name, damage=damage):
+                    if damage == "missing":
+                        remote_path.unlink()
+                    else:
+                        remote_path.write_bytes(b"corrupt restored side")
+                    failed_target = restore_parent / f"{artifact.name}-{damage}"
+                    try:
+                        with self.assertRaises(RestoreError):
+                            restorer.restore(
+                                first.final_checkpoint.manifest,
+                                failed_target,
+                                restore_parent,
+                                101,
+                            )
+                        self.assertFalse(failed_target.exists())
+                    finally:
+                        remote_path.write_bytes(original)
+
+        target = restore_parent / "cold-resume"
+        restored = restorer.restore(
+            first.final_checkpoint.manifest,
+            target,
+            restore_parent,
+            102,
+        )
+        self.assertEqual(restored.artifact_count, 11)
+        restored_workspace = target / "workspace"
+        restored_archive = target / "archive"
+        restored_snapshots = target / "snapshots"
+        restored_snapshots.mkdir()
+        before_bytes = {
+            artifact.name: self.workspace.joinpath(
+                *artifact.relative_path.parts
+            ).read_bytes()
+            for artifact in side_artifacts
+        }
+        self.assertEqual(
+            before_bytes,
+            {
+                artifact.name: restored_workspace.joinpath(
+                    *artifact.relative_path.parts
+                ).read_bytes()
+                for artifact in side_artifacts
+            },
+        )
+
+        restored_state = SqliteStateStore(target / "job-v2.sqlite")
+        self.addCleanup(restored_state.close)
+        restored_request = replace(
+            request,
+            source=restored_archive.joinpath(*request.verified_input.archive.key.parts),
+            workspace_root=restored_workspace,
+            snapshot_dir=restored_snapshots,
+            fresh_workspace_root=None,
+        )
+        cold = OfflineSliceRunner(
+            restored_state,
+            CheckpointPublisher(
+                restored_state,
+                store,
+                restored_archive,
+                LocalFileIntegrity(),
+            ),
+            self.media,
+            DeterministicOcrProvider(),
+            DeterministicTranslationProvider(),
+            DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
+        ).run(restored_request)
+
+        self.assertEqual(tuple(unit.attempts for unit in cold.work_units), (1,) * 8)
+        self.assertEqual(
+            tuple(unit.status for unit in cold.work_units),
+            (WorkStatus.SUCCEEDED,) * 8,
+        )
+        self.assertEqual(cold.artifacts, first.artifacts)
+        self.assertEqual(len(cold.artifacts), 11)
+        self.assertEqual(
+            len(
+                tuple(
+                    artifact
+                    for artifact in cold.artifacts
+                    if artifact.relative_path in set(PIPELINE_ARTIFACT_PATHS.values())
+                )
+            ),
+            8,
+        )
+        render_artifact = next(
+            artifact
+            for artifact in cold.artifacts
+            if artifact.relative_path == PIPELINE_ARTIFACT_PATHS[RenderPlanDocument]
+        )
+        render_plan = parse_render_plan_document_bytes(
+            restored_workspace.joinpath(
+                *render_artifact.relative_path.parts
+            ).read_bytes()
+        )
+        render_request = RenderRequest(
+            render_plan.schema_version,
+            render_plan.job_id,
+            render_plan.media_digest,
+            render_plan.frame_count,
+            render_plan.width,
+            render_plan.height,
+            render_plan.dependency_path,
+            render_plan.dependency_digest,
+            render_plan.cues,
+            render_plan.blur_regions,
+            render_plan.tts_audio_path,
+            render_plan.tts_audio_digest,
+            render_plan.parts,
+            render_plan.output_has_audio,
+        )
+        restored_part = restored_workspace.joinpath(*cold.publication.part_paths[0].parts)
+        self.assertEqual(digest_file(restored_part), cold.publication.part_digests[0])
+        self.media.validate_render(restored_part, render_request)
 
 
 class _LightweightMedia:
@@ -452,6 +693,7 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
             interruption,
         )
 
@@ -539,7 +781,7 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                             archive_root,
                         ).run(request)
                         try:
-                            self.assertEqual(len(result.artifacts), 8)
+                            self.assertEqual(len(result.artifacts), 11)
                             self.assertTrue(
                                 all(
                                     unit.status is WorkStatus.SUCCEEDED
@@ -631,6 +873,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         )
         return workspace, archive_root, remote, state, runner, request
 
@@ -683,7 +926,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
                         for unit in resumed.work_units[1:]
                     )
                 )
-                self.assertEqual(len(resumed.artifacts), 8)
+                self.assertEqual(len(resumed.artifacts), 11)
                 self.assertEqual(
                     digest_file(
                         fresh.joinpath(*ocr_artifact.relative_path.parts)
@@ -722,8 +965,17 @@ class OfflineSliceResumeTests(unittest.TestCase):
                 workspace, _, _, state, runner, request = self._environment(root)
                 self.addCleanup(state.close)
                 first = runner.run(request)
+                primary_path = PIPELINE_ARTIFACT_PATHS[
+                    {
+                        StageName.TTS: TtsDocument,
+                        StageName.RENDER: RenderPlanDocument,
+                        StageName.PUBLISH: PublicationDocument,
+                    }[owner]
+                ]
                 primary = next(
-                    item for item in first.artifacts if item.owner is owner
+                    item
+                    for item in first.artifacts
+                    if item.owner is owner and item.relative_path == primary_path
                 )
                 document = parser(
                     workspace.joinpath(*primary.relative_path.parts).read_bytes()
@@ -756,7 +1008,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(resumed.workspace_root, fresh)
-                self.assertEqual(len(resumed.artifacts), 8)
+                self.assertEqual(len(resumed.artifacts), 11)
 
     def test_ambiguous_owner_and_dependency_mismatch_are_rejected_fail_closed(self) -> None:
         for variant in ("ambiguous-owner", "dependency-mismatch"):
@@ -835,6 +1087,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         )
 
         with self.assertRaisesRegex(OfflineSliceError, "INGEST"):
@@ -856,6 +1109,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         ).run(request)
         self.assertEqual(resumed.work_units[0].attempts, 2)
         self.assertTrue(
@@ -894,6 +1148,36 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         self.assertEqual(resumed.work_units[-1].attempts, 2)
 
+    def test_proof_repair_token_is_run_local_and_not_retained_by_runner(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _, _, remote, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        first = runner.run(request)
+        remote.joinpath(*first.checkpoint.state_snapshot_path.parts).unlink()
+
+        with self.assertRaises(FreshWorkspaceRequired):
+            runner.run(request)
+
+        fresh = root / "fresh-run-local"
+        fresh.mkdir()
+        repaired_request = replace(request, fresh_workspace_root=fresh)
+        repaired = runner.run(repaired_request)
+
+        self.assertFalse(hasattr(runner, "_proof_repair_token"))
+        clean = runner.run(
+            replace(
+                repaired_request,
+                workspace_root=fresh,
+                fresh_workspace_root=None,
+            )
+        )
+        self.assertEqual(
+            clean.proof_manifest.checkpoint_id,
+            repaired.proof_manifest.checkpoint_id,
+        )
+
     def test_first_proof_remote_corruption_fails_backup_then_rotates_additively(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -913,6 +1197,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         )
 
         with self.assertRaisesRegex(OfflineSliceError, "BACKUP"):
@@ -950,6 +1235,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(),
             DeterministicWaveTtsProvider(),
+            *_local_slice_ports(),
         ).run(request)
         self.assertNotEqual(
             resumed.proof_manifest.checkpoint_id,
@@ -990,14 +1276,14 @@ class OfflineSliceResumeTests(unittest.TestCase):
         self.assertEqual(repaired_manifest_path.read_bytes(), repaired_manifest_bytes)
         self.assertEqual(repaired_state_path.read_bytes(), repaired_state_bytes)
         self.assertEqual(len(state.completed_checkpoints(request.job_id)), 3)
-        self.assertEqual(len(repaired.final_manifest.artifacts), 8)
+        self.assertEqual(len(repaired.final_manifest.artifacts), 11)
         inspection_root = root / "repaired-final-inspection"
         inspection_root.mkdir()
         inspection_path = inspection_root / "job-v2.sqlite"
         inspection_path.write_bytes(repaired_state_bytes)
         inspection = SqliteStateStore(inspection_path)
         try:
-            self.assertEqual(len(inspection.valid_artifacts(request.job_id)), 8)
+            self.assertEqual(len(inspection.valid_artifacts(request.job_id)), 11)
             self.assertTrue(
                 all(
                     inspection.get_work_unit(

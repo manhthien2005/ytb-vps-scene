@@ -6,17 +6,15 @@ import tempfile
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Callable, TypeAlias, TypeVar
 
-from ytb_vps_v2.adapters.filesystem.artifacts import LocalArtifactWriter
-from ytb_vps_v2.adapters.filesystem.integrity import digest_file
-from ytb_vps_v2.adapters.filesystem.publish import LocalPartPublisher
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.invalidation import plan_invalidation
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
     CheckpointRecord,
     FileDigest,
+    ManifestEntry,
     VerifiedInputArchive,
 )
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -41,6 +39,7 @@ from ytb_vps_v2.domain.pipeline import (
     CheckpointDocument,
     MediaDocument,
     OcrDocument,
+    PipelineDocument,
     PublicationDocument,
     RenderPlanDocument,
     RenderRequest,
@@ -60,7 +59,18 @@ from ytb_vps_v2.domain.pipeline import (
 from ytb_vps_v2.domain.restore import RemoteObjectEvidence
 from ytb_vps_v2.domain.timeline import FrameInterval
 from ytb_vps_v2.ports.backup import BackupStoreError
-from ytb_vps_v2.ports.pipeline import OcrProvider, TranslationProvider, TtsProvider
+from ytb_vps_v2.ports.pipeline import (
+    ArtifactWriter,
+    ArtifactWriterFactory,
+    FileDigestVerifier,
+    MediaPipeline,
+    OcrProvider,
+    PartPublisher,
+    PartPublisherFactory,
+    TranslationProvider,
+    TtsProvider,
+    TtsSynthesis,
+)
 from ytb_vps_v2.ports.state import StateRepository
 
 
@@ -100,9 +110,17 @@ _DOCUMENT_TYPES = (
 _PATHS = tuple(PIPELINE_ARTIFACT_PATHS[item] for item in _DOCUMENT_TYPES)
 _NAMES = tuple(f"{stage.value.lower()}-document" for stage in STAGE_ORDER)
 _UNIT_KEYS = tuple(stage.value.lower() for stage in STAGE_ORDER)
+_TTS_AUDIO_PATH = PurePosixPath("artifacts/tts/voice.wav")
 _RENDERED_PATH = PurePosixPath("artifacts/render/rendered.mp4")
+_PUBLISHED_PATH = PurePosixPath("published/part-001.mp4")
+_SIDE_NAMES = {
+    StageName.TTS: "tts-audio",
+    StageName.RENDER: "rendered-video",
+    StageName.PUBLISH: "published-part-001",
+}
 _PART = Part(1, 1, FrameInterval(0, 900), (0,))
 _VERIFY_METHOD = "sha256-readback"
+_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,15 +152,52 @@ class OfflineSliceResult:
     final_checkpoint: CheckpointRecord
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedRender:
+    request: RenderRequest
+    temporary_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPublish:
+    plan: RenderPlanDocument
+    source: Path
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedBackup:
+    publication: PublicationDocument
+    proof: CheckpointManifest | None
+    record: CheckpointRecord
+
+
+PreparedStage: TypeAlias = (
+    PipelineDocument | TtsSynthesis | PreparedRender | PreparedPublish | PreparedBackup
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeState:
+    workspace: Path
+    documents: dict[StageName, PipelineDocument]
+    proof_repair_token: str | None
+
+
+_DocumentT = TypeVar("_DocumentT", bound=PipelineDocument)
+
+
 class OfflineSliceRunner:
     def __init__(
         self,
         state: StateRepository,
         checkpoints: CheckpointPublisher,
-        media: object,
+        media: MediaPipeline,
         ocr: OcrProvider,
         translation: TranslationProvider,
         tts: TtsProvider,
+        artifact_writers: ArtifactWriterFactory,
+        part_publishers: PartPublisherFactory,
+        files: FileDigestVerifier,
         interruption: InterruptionHook | None = None,
     ) -> None:
         self.state = state
@@ -151,13 +206,15 @@ class OfflineSliceRunner:
         self.ocr = ocr
         self.translation = translation
         self.tts = tts
+        self.artifact_writers = artifact_writers
+        self.part_publishers = part_publishers
+        self.files = files
         self.interruption = interruption
 
     def run(self, request: OfflineSliceRequest) -> OfflineSliceResult:
         self._validate_request(request)
-        self._proof_repair_token: str | None = None
         try:
-            if digest_file(request.source) != request.verified_input.archive.digest:
+            if self.files.digest(request.source) != request.verified_input.archive.digest:
                 raise OfflineSliceError("Archived input failed exact digest verification")
             self.state.recover_stale_work(request.at)
             self.state.create_job(
@@ -168,9 +225,11 @@ class OfflineSliceRunner:
             )
             self.state.record_verified_input(request.job_id, request.verified_input)
             self._ensure_units(request)
-            workspace, documents = self._resume_workspace(request)
-            writer = LocalArtifactWriter(workspace)
-            publisher = LocalPartPublisher(workspace)
+            resumed = self._resume_workspace(request)
+            workspace = resumed.workspace
+            documents = resumed.documents
+            writer = self.artifact_writers(workspace)
+            publisher = self.part_publishers(workspace)
 
             for index, stage in enumerate(STAGE_ORDER):
                 unit = self.state.get_work_unit(request.job_id, _UNIT_KEYS[index])
@@ -182,13 +241,15 @@ class OfflineSliceRunner:
                     continue
                 self.state.start_work_unit(request.job_id, unit.key, request.at)
                 self._hit(stage, InterruptionPoint.BEFORE_PROVIDER)
-                prepared: object | None = None
+                prepared: PreparedStage | None = None
                 try:
                     prepared = self._prepare(
                         stage,
                         request,
                         workspace,
                         documents,
+                        writer,
+                        resumed.proof_repair_token,
                     )
                     self._hit(stage, InterruptionPoint.AFTER_PROVIDER)
                     self._hit(stage, InterruptionPoint.BEFORE_FILESYSTEM_PUBLICATION)
@@ -197,32 +258,31 @@ class OfflineSliceRunner:
                         prepared,
                         writer,
                         publisher,
-                        workspace,
                     )
-                    raw = canonical_document_bytes(document)
-                    entry = writer.write_bytes(_PATHS[index], raw)
-                    self._hit(stage, InterruptionPoint.AFTER_FILESYSTEM_PUBLICATION)
-                    artifact = Artifact(
-                        _NAMES[index],
+                    primary_entry = writer.write_bytes(
                         _PATHS[index],
-                        entry.digest.size_bytes,
-                        entry.digest.sha256,
-                        stage,
-                        () if index == 0 else (_NAMES[index - 1],),
+                        canonical_document_bytes(document),
                     )
-                    self.state.commit_artifact(
+                    self._hit(stage, InterruptionPoint.AFTER_FILESYSTEM_PUBLICATION)
+                    artifacts = self._stage_artifacts(
+                        stage,
+                        index,
+                        document,
+                        primary_entry,
+                    )
+                    self.state.commit_artifacts(
                         request.job_id,
                         unit.key,
-                        artifact,
+                        artifacts,
                         request.at,
                     )
                     documents[stage] = document
                     self._hit(stage, InterruptionPoint.AFTER_SQLITE_COMMIT)
                 except OfflineSliceInterrupted:
-                    self._discard_prepared(stage, prepared)
+                    self._discard_prepared(prepared)
                     raise
                 except BaseException as exc:
-                    self._discard_prepared(stage, prepared)
+                    self._discard_prepared(prepared)
                     current = self.state.get_work_unit(request.job_id, unit.key)
                     if current.status is WorkStatus.RUNNING:
                         self.state.fail_work_unit(
@@ -236,8 +296,12 @@ class OfflineSliceRunner:
                         f"Offline stage failed: {stage.value}"
                     ) from exc
 
-            checkpoint_document = documents[StageName.BACKUP]
-            proof_id = checkpoint_document.checkpoint_id  # type: ignore[attr-defined]
+            checkpoint_document = self._document(
+                documents,
+                StageName.BACKUP,
+                CheckpointDocument,
+            )
+            proof_id = checkpoint_document.checkpoint_id
             final_base = self._effective_checkpoint_id(
                 request,
                 request.final_checkpoint_id,
@@ -272,10 +336,6 @@ class OfflineSliceRunner:
                 final_record,
                 request.verification_observed_at,
             )
-            artifacts_by_owner = {
-                artifact.owner: artifact
-                for artifact in self.state.valid_artifacts(request.job_id)
-            }
             return OfflineSliceResult(
                 request.job_id,
                 workspace,
@@ -283,9 +343,9 @@ class OfflineSliceRunner:
                     self.state.get_work_unit(request.job_id, key)
                     for key in _UNIT_KEYS
                 ),
-                tuple(artifacts_by_owner[stage] for stage in STAGE_ORDER),
-                documents[StageName.PUBLISH],  # type: ignore[arg-type]
-                documents[StageName.BACKUP],  # type: ignore[arg-type]
+                self.state.valid_artifacts(request.job_id),
+                self._document(documents, StageName.PUBLISH, PublicationDocument),
+                checkpoint_document,
                 proof,
                 final,
                 final_record,
@@ -294,6 +354,17 @@ class OfflineSliceRunner:
             raise
         except BaseException as exc:
             raise OfflineSliceError("Offline slice could not complete") from exc
+
+    @staticmethod
+    def _document(
+        documents: dict[StageName, PipelineDocument],
+        stage: StageName,
+        expected: type[_DocumentT],
+    ) -> _DocumentT:
+        value = documents.get(stage)
+        if type(value) is not expected:
+            raise OfflineSliceError(f"Typed document is missing: {stage.value}")
+        return value
 
     @staticmethod
     def _validate_request(request: OfflineSliceRequest) -> None:
@@ -310,12 +381,17 @@ class OfflineSliceRunner:
         if (
             type(request.config_fingerprints) is not tuple
             or len(request.config_fingerprints) != len(STAGE_ORDER)
-            or any(type(item) is not StageConfigFingerprint for item in request.config_fingerprints)
+            or any(
+                type(item) is not StageConfigFingerprint
+                for item in request.config_fingerprints
+            )
         ):
             raise OfflineSliceError("Offline configuration snapshot is incomplete")
         for path in (request.workspace_root, request.snapshot_dir):
             if not isinstance(path, Path) or not path.is_absolute() or not path.is_dir():
-                raise OfflineSliceError("Offline workspace paths must be existing absolute directories")
+                raise OfflineSliceError(
+                    "Offline workspace paths must be existing absolute directories"
+                )
         if type(request.output_has_audio) is not bool:
             raise OfflineSliceError("Output audio policy must be boolean")
         if (
@@ -323,7 +399,11 @@ class OfflineSliceRunner:
             or request.verification_observed_at < 0
         ):
             raise OfflineSliceError("Checkpoint observation must be non-negative")
-        for value in (request.at, request.proof_checkpoint_id, request.final_checkpoint_id):
+        for value in (
+            request.at,
+            request.proof_checkpoint_id,
+            request.final_checkpoint_id,
+        ):
             if (
                 type(value) is not str
                 or not value
@@ -430,11 +510,9 @@ class OfflineSliceRunner:
         return newest.checkpoint_id
 
     @staticmethod
-    def _discard_prepared(stage: StageName, prepared: object | None) -> None:
-        if stage is StageName.RENDER and isinstance(prepared, tuple) and len(prepared) == 2:
-            candidate = prepared[1]
-            if isinstance(candidate, Path):
-                candidate.unlink(missing_ok=True)
+    def _discard_prepared(prepared: PreparedStage | None) -> None:
+        if type(prepared) is PreparedRender:
+            prepared.temporary_path.unlink(missing_ok=True)
 
     @staticmethod
     def _digest(raw: bytes) -> FileDigest:
@@ -459,62 +537,163 @@ class OfflineSliceRunner:
             plan.output_has_audio,
         )
 
-    def _resume_workspace(
-        self,
-        request: OfflineSliceRequest,
-    ) -> tuple[Path, dict[StageName, object]]:
-        artifacts = self.state.valid_artifacts(request.job_id)
-        by_owner: dict[StageName, list[Artifact]] = {stage: [] for stage in STAGE_ORDER}
-        for artifact in artifacts:
-            by_owner[artifact.owner].append(artifact)
-        for index, stage in enumerate(STAGE_ORDER):
-            values = by_owner[stage]
-            if len(values) > 1:
-                raise OfflineSliceError("Canonical artifact ownership is ambiguous")
-            if values:
-                artifact = values[0]
-                expected_dependencies = () if index == 0 else (_NAMES[index - 1],)
-                if (
-                    artifact.name != _NAMES[index]
-                    or artifact.relative_path != _PATHS[index]
-                    or artifact.dependencies != expected_dependencies
-                ):
-                    raise OfflineSliceError("Canonical artifact graph is inconsistent")
+    @staticmethod
+    def _dependencies(index: int) -> tuple[str, ...]:
+        return () if index == 0 else (_NAMES[index - 1],)
 
-        writer = LocalArtifactWriter(request.workspace_root)
-        documents: dict[StageName, object] = {}
-        damaged: StageName | None = None
-        upstream: object | None = None
-        parsers = (
-            parse_media_document_bytes,
-            parse_ocr_document_bytes,
-            parse_track_document_bytes,
-            parse_translation_document_bytes,
-            parse_tts_document_bytes,
-            parse_render_plan_document_bytes,
-            parse_publication_document_bytes,
-            parse_checkpoint_document_bytes,
+    def _stage_artifacts(
+        self,
+        stage: StageName,
+        index: int,
+        document: PipelineDocument,
+        primary: ManifestEntry,
+    ) -> tuple[Artifact, ...]:
+        dependencies = self._dependencies(index)
+        artifacts = [
+            Artifact(
+                _NAMES[index],
+                _PATHS[index],
+                primary.digest.size_bytes,
+                primary.digest.sha256,
+                stage,
+                dependencies,
+            )
+        ]
+        side: tuple[str, PurePosixPath, FileDigest] | None = None
+        if type(document) is TtsDocument:
+            if document.audio_path != _TTS_AUDIO_PATH:
+                raise OfflineSliceError("TTS side path is not canonical")
+            side = (_SIDE_NAMES[stage], document.audio_path, document.audio_digest)
+        elif type(document) is RenderPlanDocument:
+            if document.rendered_path != _RENDERED_PATH:
+                raise OfflineSliceError("Rendered side path is not canonical")
+            side = (
+                _SIDE_NAMES[stage],
+                document.rendered_path,
+                document.rendered_digest,
+            )
+        elif type(document) is PublicationDocument:
+            if document.part_paths != (_PUBLISHED_PATH,) or len(document.part_digests) != 1:
+                raise OfflineSliceError("Published side path is not canonical")
+            side = (
+                _SIDE_NAMES[stage],
+                document.part_paths[0],
+                document.part_digests[0],
+            )
+        if side is not None:
+            name, path, digest = side
+            artifacts.append(
+                Artifact(
+                    name,
+                    path,
+                    digest.size_bytes,
+                    digest.sha256,
+                    stage,
+                    dependencies,
+                )
+            )
+        return tuple(artifacts)
+
+    def _classify_stage_artifacts(
+        self,
+        stage: StageName,
+        index: int,
+        artifacts: tuple[Artifact, ...],
+    ) -> tuple[Artifact, Artifact | None] | None:
+        dependencies = self._dependencies(index)
+        expected = {(_NAMES[index], _PATHS[index])}
+        side_name = _SIDE_NAMES.get(stage)
+        side_path = {
+            StageName.TTS: _TTS_AUDIO_PATH,
+            StageName.RENDER: _RENDERED_PATH,
+            StageName.PUBLISH: _PUBLISHED_PATH,
+        }.get(stage)
+        if side_name is not None and side_path is not None:
+            expected.add((side_name, side_path))
+        actual = {(item.name, item.relative_path) for item in artifacts}
+        if len(actual) != len(artifacts) or any(
+            item.owner is not stage or item.dependencies != dependencies
+            for item in artifacts
+        ):
+            raise OfflineSliceError("Canonical artifact ownership is ambiguous")
+        if not actual.issubset(expected):
+            raise OfflineSliceError(
+                "Canonical artifact graph is ambiguous: unknown extras"
+            )
+        if actual != expected:
+            return None
+        by_identity = {
+            (item.name, item.relative_path): item
+            for item in artifacts
+        }
+        primary = by_identity[(_NAMES[index], _PATHS[index])]
+        side = (
+            None
+            if side_name is None or side_path is None
+            else by_identity[(side_name, side_path)]
         )
+        return primary, side
+
+    def _parse_document(
+        self,
+        stage: StageName,
+        raw: bytes,
+        upstream: PipelineDocument | None,
+    ) -> PipelineDocument:
+        if stage is StageName.INGEST:
+            return parse_media_document_bytes(raw)
+        if stage is StageName.OCR and type(upstream) is MediaDocument:
+            return parse_ocr_document_bytes(raw, upstream)
+        if stage is StageName.TRACK and type(upstream) is OcrDocument:
+            return parse_track_document_bytes(raw, upstream)
+        if stage is StageName.TRANSLATE and type(upstream) is TrackDocument:
+            return parse_translation_document_bytes(raw, upstream)
+        if stage is StageName.TTS and type(upstream) is TranslationDocument:
+            return parse_tts_document_bytes(raw, upstream)
+        if stage is StageName.RENDER and type(upstream) is TtsDocument:
+            return parse_render_plan_document_bytes(raw, upstream)
+        if stage is StageName.PUBLISH and type(upstream) is RenderPlanDocument:
+            return parse_publication_document_bytes(raw, upstream)
+        if stage is StageName.BACKUP and type(upstream) is PublicationDocument:
+            return parse_checkpoint_document_bytes(raw, upstream)
+        raise OfflineSliceError("Canonical document dependency type is invalid")
+
+    def _resume_workspace(self, request: OfflineSliceRequest) -> ResumeState:
+        artifacts = self.state.valid_artifacts(request.job_id)
+        by_owner: dict[StageName, tuple[Artifact, ...]] = {
+            stage: tuple(item for item in artifacts if item.owner is stage)
+            for stage in STAGE_ORDER
+        }
+        writer = self.artifact_writers(request.workspace_root)
+        documents: dict[StageName, PipelineDocument] = {}
+        damaged: StageName | None = None
+        upstream: PipelineDocument | None = None
+        primary_by_stage: dict[StageName, Artifact] = {}
         for index, stage in enumerate(STAGE_ORDER):
             unit = self.state.get_work_unit(request.job_id, _UNIT_KEYS[index])
             values = by_owner[stage]
             if unit.status is not WorkStatus.SUCCEEDED:
                 if values:
                     raise OfflineSliceError("Non-succeeded work owns a valid artifact")
-                upstream = None if index == 0 else upstream
                 continue
-            if len(values) != 1:
+            classified = self._classify_stage_artifacts(stage, index, values)
+            if classified is None:
                 damaged = stage
                 break
-            artifact = values[0]
+            primary, side = classified
+            primary_by_stage[stage] = primary
             try:
-                expected = FileDigest(artifact.size_bytes, artifact.sha256)
-                writer.verify(artifact.relative_path, expected)
-                raw = request.workspace_root.joinpath(*artifact.relative_path.parts).read_bytes()
-                document = parsers[index](raw) if index == 0 else parsers[index](raw, upstream)
+                expected = FileDigest(primary.size_bytes, primary.sha256)
+                raw = writer.read_verified_bytes(
+                    primary.relative_path,
+                    expected,
+                    _MAX_DOCUMENT_BYTES,
+                )
+                document = self._parse_document(stage, raw, upstream)
                 self._verify_side(
                     stage,
                     document,
+                    side,
                     documents,
                     writer,
                     request.workspace_root,
@@ -528,28 +707,27 @@ class OfflineSliceRunner:
 
         if damaged is None:
             for stage, key in zip(STAGE_ORDER, _UNIT_KEYS, strict=True):
-                if (
-                    self.state.get_work_unit(request.job_id, key).status
-                    is WorkStatus.INVALID
-                ):
+                if self.state.get_work_unit(request.job_id, key).status is WorkStatus.INVALID:
                     damaged = stage
                     break
         if damaged is None:
-            return request.workspace_root, documents
+            return ResumeState(request.workspace_root, documents, None)
+
         invalidation = plan_invalidation(
             request.config_fingerprints,
             request.config_fingerprints,
             changed_artifact_owners=(damaged,),
         )
         self.state.apply_invalidation(request.job_id, invalidation, request.at)
+        proof_repair_token = None
         if damaged is StageName.BACKUP:
-            previous = request.workspace_root.joinpath(*_PATHS[-1].parts)
-            if previous.is_file():
-                self._proof_repair_token = hashlib.sha256(
-                    previous.read_bytes()
-                ).hexdigest()[:20]
-            elif by_owner[StageName.BACKUP]:
-                self._proof_repair_token = by_owner[StageName.BACKUP][0].sha256[:20]
+            primary = primary_by_stage.get(StageName.BACKUP)
+            candidates = by_owner[StageName.BACKUP]
+            if primary is not None:
+                proof_repair_token = primary.sha256[:20]
+            elif candidates:
+                proof_repair_token = candidates[0].sha256[:20]
+
         fresh = request.fresh_workspace_root
         if (
             fresh is None
@@ -562,78 +740,79 @@ class OfflineSliceRunner:
             raise FreshWorkspaceRequired(
                 f"Damaged {damaged.value} output requires an empty fresh workspace"
             )
-        fresh_writer = LocalArtifactWriter(fresh)
+        fresh_writer = self.artifact_writers(fresh)
         damaged_index = STAGE_ORDER.index(damaged)
         for index in range(damaged_index):
-            artifact = by_owner[STAGE_ORDER[index]][0]
-            source = request.workspace_root.joinpath(*artifact.relative_path.parts)
-            fresh_writer.write_file(artifact.relative_path, source)
-            self._copy_sides(documents[STAGE_ORDER[index]], request.workspace_root, fresh_writer)
-        return fresh, {
-            stage: document
-            for stage, document in documents.items()
-            if STAGE_ORDER.index(stage) < damaged_index
-        }
-
-    def _copy_sides(
-        self,
-        document: object,
-        old_root: Path,
-        writer: LocalArtifactWriter,
-    ) -> None:
-        references: tuple[tuple[PurePosixPath, FileDigest], ...] = ()
-        if type(document) is TtsDocument:
-            references = ((document.audio_path, document.audio_digest),)
-        elif type(document) is RenderPlanDocument:
-            references = ((document.rendered_path, document.rendered_digest),)
-        elif type(document) is PublicationDocument:
-            references = tuple(zip(document.part_paths, document.part_digests, strict=True))
-        for path, digest in references:
-            source = old_root.joinpath(*path.parts)
-            if digest_file(source) != digest:
-                raise FreshWorkspaceRequired("Verified upstream side asset changed")
-            writer.write_file(path, source)
+            for artifact in by_owner[STAGE_ORDER[index]]:
+                expected = FileDigest(artifact.size_bytes, artifact.sha256)
+                source = request.workspace_root.joinpath(*artifact.relative_path.parts)
+                if self.files.digest(source) != expected:
+                    raise FreshWorkspaceRequired("Verified upstream artifact changed")
+                copied = fresh_writer.write_file(artifact.relative_path, source)
+                if copied.digest != expected:
+                    raise FreshWorkspaceRequired("Upstream artifact copy changed")
+        return ResumeState(
+            fresh,
+            {
+                stage: document
+                for stage, document in documents.items()
+                if STAGE_ORDER.index(stage) < damaged_index
+            },
+            proof_repair_token,
+        )
 
     def _verify_side(
         self,
         stage: StageName,
-        document: object,
-        documents: dict[StageName, object],
-        writer: LocalArtifactWriter,
+        document: PipelineDocument,
+        side: Artifact | None,
+        documents: dict[StageName, PipelineDocument],
+        writer: ArtifactWriter,
         workspace: Path,
         observed_at: int,
     ) -> None:
-        if stage is StageName.TTS:
-            value = document
-            writer.verify(value.audio_path, value.audio_digest)  # type: ignore[attr-defined]
-        elif stage is StageName.RENDER:
-            value = document
-            writer.verify(value.rendered_path, value.rendered_digest)  # type: ignore[attr-defined]
+        expected: tuple[PurePosixPath, FileDigest] | None = None
+        if type(document) is TtsDocument:
+            expected = (document.audio_path, document.audio_digest)
+        elif type(document) is RenderPlanDocument:
+            expected = (document.rendered_path, document.rendered_digest)
+        elif type(document) is PublicationDocument:
+            if len(document.part_paths) != 1 or len(document.part_digests) != 1:
+                raise OfflineSliceError("Offline publication side evidence is invalid")
+            expected = (document.part_paths[0], document.part_digests[0])
+        if expected is not None:
+            path, digest = expected
+            if side is None or (
+                side.relative_path != path
+                or FileDigest(side.size_bytes, side.sha256) != digest
+            ):
+                raise OfflineSliceError("Side artifact row does not match its document")
+            writer.verify(path, digest)
+        elif side is not None:
+            raise OfflineSliceError("Unexpected side artifact row")
+
+        if type(document) is RenderPlanDocument:
             self.media.validate_render(
-                workspace.joinpath(*value.rendered_path.parts),  # type: ignore[attr-defined]
-                self._render_request(value),  # type: ignore[arg-type]
+                workspace.joinpath(*document.rendered_path.parts),
+                self._render_request(document),
             )
-        elif stage is StageName.PUBLISH:
-            value = document
-            plan = documents[StageName.RENDER]
-            for path, digest in zip(value.part_paths, value.part_digests, strict=True):  # type: ignore[attr-defined]
-                writer.verify(path, digest)
-                self.media.validate_render(
-                    workspace.joinpath(*path.parts),
-                    self._render_request(plan),  # type: ignore[arg-type]
-                )
-        elif stage is StageName.BACKUP:
-            value = document
+        elif type(document) is PublicationDocument:
+            plan = self._document(documents, StageName.RENDER, RenderPlanDocument)
+            self.media.validate_render(
+                workspace.joinpath(*document.part_paths[0].parts),
+                self._render_request(plan),
+            )
+        elif type(document) is CheckpointDocument:
             records = tuple(
                 item
-                for item in self.state.completed_checkpoints(value.job_id)  # type: ignore[attr-defined]
-                if item.checkpoint_id == value.checkpoint_id  # type: ignore[attr-defined]
+                for item in self.state.completed_checkpoints(document.job_id)
+                if item.checkpoint_id == document.checkpoint_id
             )
             if len(records) != 1 or (
-                records[0].manifest.key != value.manifest_path  # type: ignore[attr-defined]
-                or records[0].manifest.digest != value.manifest_digest  # type: ignore[attr-defined]
-                or records[0].state_snapshot.key != value.state_snapshot_path  # type: ignore[attr-defined]
-                or records[0].state_snapshot.digest != value.state_snapshot_digest  # type: ignore[attr-defined]
+                records[0].manifest.key != document.manifest_path
+                or records[0].manifest.digest != document.manifest_digest
+                or records[0].state_snapshot.key != document.state_snapshot_path
+                or records[0].state_snapshot.digest != document.state_snapshot_digest
             ):
                 raise OfflineSliceError("Proof checkpoint evidence is invalid")
             self._verify_checkpoint_record(records[0], observed_at)
@@ -643,20 +822,23 @@ class OfflineSliceRunner:
         stage: StageName,
         request: OfflineSliceRequest,
         workspace: Path,
-        documents: dict[StageName, object],
-    ) -> object:
+        documents: dict[StageName, PipelineDocument],
+        writer: ArtifactWriter,
+        proof_repair_token: str | None,
+    ) -> PreparedStage:
         if stage is StageName.INGEST:
-            probed = self.media.probe(request.source)
             return replace(
-                probed,
+                self.media.probe(request.source),
                 job_id=request.job_id,
                 source_path=request.verified_input.archive.key,
                 source_digest=request.verified_input.archive.digest,
             )
         if stage is StageName.OCR:
-            return self.ocr.detect(documents[StageName.INGEST])
+            return self.ocr.detect(
+                self._document(documents, StageName.INGEST, MediaDocument)
+            )
         if stage is StageName.TRACK:
-            ocr = documents[StageName.OCR]
+            ocr = self._document(documents, StageName.OCR, OcrDocument)
             return TrackDocument(
                 ocr.schema_version,
                 ocr.job_id,
@@ -673,12 +855,16 @@ class OfflineSliceRunner:
                 ),
             )
         if stage is StageName.TRANSLATE:
-            return self.translation.translate(documents[StageName.TRACK])
+            return self.translation.translate(
+                self._document(documents, StageName.TRACK, TrackDocument)
+            )
         if stage is StageName.TTS:
-            return self.tts.synthesize(documents[StageName.TRANSLATE])
+            return self.tts.synthesize(
+                self._document(documents, StageName.TRANSLATE, TranslationDocument)
+            )
         if stage is StageName.RENDER:
-            tts = documents[StageName.TTS]
-            track = documents[StageName.TRACK]
+            tts = self._document(documents, StageName.TTS, TtsDocument)
+            track = self._document(documents, StageName.TRACK, TrackDocument)
             render_request = RenderRequest(
                 tts.schema_version,
                 tts.job_id,
@@ -710,49 +896,54 @@ class OfflineSliceRunner:
                 render_request,
                 temporary_path,
             )
-            return render_request, temporary_path
+            return PreparedRender(render_request, temporary_path)
         if stage is StageName.PUBLISH:
-            plan = documents[StageName.RENDER]
+            plan = self._document(documents, StageName.RENDER, RenderPlanDocument)
             source = workspace.joinpath(*plan.rendered_path.parts)
-            if digest_file(source) != plan.rendered_digest:
+            if self.files.digest(source) != plan.rendered_digest:
                 raise OfflineSliceError("Rendered side asset changed before publication")
             self.media.validate_render(source, self._render_request(plan))
-            return plan, source
+            return PreparedPublish(plan, source)
         if stage is StageName.BACKUP:
-            publication = documents[StageName.PUBLISH]
+            publication = self._document(
+                documents,
+                StageName.PUBLISH,
+                PublicationDocument,
+            )
             existing_path = workspace.joinpath(*_PATHS[-1].parts)
             if existing_path.is_file():
-                existing = parse_checkpoint_document_bytes(
-                    existing_path.read_bytes(),
-                    publication,  # type: ignore[arg-type]
+                expected = self.files.digest(existing_path)
+                raw = writer.read_verified_bytes(
+                    _PATHS[-1],
+                    expected,
+                    _MAX_DOCUMENT_BYTES,
                 )
-                records = tuple(
-                    item
-                    for item in self.state.completed_checkpoints(request.job_id)
-                    if item.checkpoint_id == existing.checkpoint_id
+                existing = parse_checkpoint_document_bytes(raw, publication)
+                record = self._checkpoint_record(
+                    request.job_id,
+                    existing.checkpoint_id,
                 )
-                if len(records) != 1 or (
-                    records[0].manifest.key != existing.manifest_path
-                    or records[0].manifest.digest != existing.manifest_digest
-                    or records[0].state_snapshot.key != existing.state_snapshot_path
-                    or records[0].state_snapshot.digest
-                    != existing.state_snapshot_digest
+                if (
+                    record.manifest.key != existing.manifest_path
+                    or record.manifest.digest != existing.manifest_digest
+                    or record.state_snapshot.key != existing.state_snapshot_path
+                    or record.state_snapshot.digest != existing.state_snapshot_digest
                 ):
                     raise OfflineSliceError(
                         "Uncommitted BACKUP document has invalid proof evidence"
                     )
                 self._verify_checkpoint_record(
-                    records[0],
+                    record,
                     request.verification_observed_at,
                 )
-                return publication, None, records[0]
+                return PreparedBackup(publication, None, record)
             proof_base = self._effective_checkpoint_id(
                 request,
                 request.proof_checkpoint_id,
                 STAGE_ORDER[:-1],
             )
-            if self._proof_repair_token is not None:
-                proof_base = f"{proof_base}-repair-{self._proof_repair_token}"
+            if proof_repair_token is not None:
+                proof_base = f"{proof_base}-repair-{proof_repair_token}"
             proof_id = self._checkpoint_id_for_publication(
                 request.job_id,
                 proof_base,
@@ -770,35 +961,43 @@ class OfflineSliceRunner:
                 record,
                 request.verification_observed_at,
             )
-            return publication, proof, record
+            return PreparedBackup(publication, proof, record)
         raise OfflineSliceError("Unsupported offline stage")
 
     def _publish_prepared(
         self,
         stage: StageName,
-        prepared: object,
-        writer: LocalArtifactWriter,
-        publisher: LocalPartPublisher,
-        workspace: Path,
-    ) -> object:
-        if stage in {
-            StageName.INGEST,
-            StageName.OCR,
-            StageName.TRACK,
-            StageName.TRANSLATE,
-        }:
+        prepared: PreparedStage,
+        writer: ArtifactWriter,
+        publisher: PartPublisher,
+    ) -> PipelineDocument:
+        if stage is StageName.INGEST and type(prepared) is MediaDocument:
             return prepared
-        if stage is StageName.TTS:
-            writer.write_bytes(prepared.document.audio_path, prepared.audio_bytes)  # type: ignore[attr-defined]
-            writer.verify(prepared.document.audio_path, prepared.document.audio_digest)  # type: ignore[attr-defined]
-            return prepared.document  # type: ignore[attr-defined]
-        if stage is StageName.RENDER:
-            request, temporary_path = prepared  # type: ignore[misc]
+        if stage is StageName.OCR and type(prepared) is OcrDocument:
+            return prepared
+        if stage is StageName.TRACK and type(prepared) is TrackDocument:
+            return prepared
+        if stage is StageName.TRANSLATE and type(prepared) is TranslationDocument:
+            return prepared
+        if stage is StageName.TTS and type(prepared) is TtsSynthesis:
+            entry = writer.write_bytes(
+                prepared.document.audio_path,
+                prepared.audio_bytes,
+            )
+            if entry.digest != prepared.document.audio_digest:
+                raise OfflineSliceError("TTS side publication changed")
+            writer.verify(prepared.document.audio_path, entry.digest)
+            return prepared.document
+        if stage is StageName.RENDER and type(prepared) is PreparedRender:
             try:
-                rendered_entry = writer.write_file(_RENDERED_PATH, temporary_path)
+                rendered_entry = writer.write_file(
+                    _RENDERED_PATH,
+                    prepared.temporary_path,
+                )
             finally:
-                temporary_path.unlink(missing_ok=True)
+                prepared.temporary_path.unlink(missing_ok=True)
             writer.verify(_RENDERED_PATH, rendered_entry.digest)
+            request = prepared.request
             return RenderPlanDocument(
                 request.schema_version,
                 request.job_id,
@@ -817,9 +1016,9 @@ class OfflineSliceRunner:
                 _RENDERED_PATH,
                 rendered_entry.digest,
             )
-        if stage is StageName.PUBLISH:
-            plan, source = prepared  # type: ignore[misc]
-            part_entry = publisher.publish(source, _PART)
+        if stage is StageName.PUBLISH and type(prepared) is PreparedPublish:
+            part_entry = publisher.publish(prepared.source, _PART)
+            plan = prepared.plan
             return PublicationDocument(
                 plan.schema_version,
                 plan.job_id,
@@ -833,8 +1032,9 @@ class OfflineSliceRunner:
                 (part_entry.key,),
                 (part_entry.digest,),
             )
-        if stage is StageName.BACKUP:
-            publication, _, record = prepared  # type: ignore[misc]
+        if stage is StageName.BACKUP and type(prepared) is PreparedBackup:
+            publication = prepared.publication
+            record = prepared.record
             return CheckpointDocument(
                 publication.schema_version,
                 publication.job_id,
@@ -850,4 +1050,4 @@ class OfflineSliceRunner:
                 record.state_snapshot.key,
                 record.state_snapshot.digest,
             )
-        raise OfflineSliceError("Unsupported offline publication stage")
+        raise OfflineSliceError("Prepared stage value does not match its stage")

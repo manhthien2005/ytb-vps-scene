@@ -75,8 +75,13 @@ class DeterministicProviderTests(unittest.TestCase):
         for name in (
             "AdditiveObjectStore",
             "ArtifactWriter",
+            "ArtifactWriterFactory",
             "ArtifactWriteError",
+            "FileDigestVerifier",
+            "MediaPipeline",
             "OcrProvider",
+            "PartPublisher",
+            "PartPublisherFactory",
             "ProviderError",
             "StateRepository",
             "StagedRestoreWorkspace",
@@ -87,6 +92,12 @@ class DeterministicProviderTests(unittest.TestCase):
             self.assertTrue(hasattr(ports, name), name)
             self.assertIn(name, ports.__all__)
         self.assertIs(filesystem_adapters.LocalArtifactWriter, LocalArtifactWriter)
+        for name in (
+            "LocalArtifactWriterFactory",
+            "LocalFileDigestVerifier",
+            "LocalPartPublisherFactory",
+        ):
+            self.assertTrue(hasattr(filesystem_adapters, name), name)
         self.assertIs(
             offline_adapters.DeterministicOcrProvider,
             DeterministicOcrProvider,

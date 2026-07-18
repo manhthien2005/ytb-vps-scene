@@ -74,6 +74,14 @@ class StateRepository(Protocol):
         at: str,
     ) -> None: ...
 
+    def commit_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        artifacts: tuple[Artifact, ...],
+        at: str,
+    ) -> None: ...
+
     def valid_artifacts(self, job_id: JobId) -> tuple[Artifact, ...]: ...
 
     def apply_invalidation(

@@ -532,16 +532,30 @@ class SqliteStateStore:
         artifact: Artifact,
         at: str,
     ) -> None:
+        self.commit_artifacts(job_id, unit_key, (artifact,), at)
+
+    def commit_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        artifacts: tuple[Artifact, ...],
+        at: str,
+    ) -> None:
         job = _job_id(job_id)
         key = _text("Work unit key", unit_key)
-        if type(artifact) is not Artifact:
-            raise StateStoreError("Committed artifact must be Artifact")
+        if (
+            type(artifacts) is not tuple
+            or not artifacts
+            or any(type(artifact) is not Artifact for artifact in artifacts)
+        ):
+            raise StateStoreError(
+                "Committed artifacts must be a non-empty Artifact tuple"
+            )
+        names = tuple(artifact.name for artifact in artifacts)
+        paths = tuple(str(artifact.relative_path) for artifact in artifacts)
+        if len(set(names)) != len(names) or len(set(paths)) != len(paths):
+            raise StateStoreError("Committed artifact identities must be unique")
         timestamp = _text("Artifact commit timestamp", at, 128)
-        dependencies_json = json.dumps(
-            artifact.dependencies,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT stage, status FROM work_units "
@@ -552,7 +566,7 @@ class SqliteStateStore:
                 raise StateTransitionError(
                     f"Artifact owner work unit is not running: {key}"
                 )
-            if row["stage"] != artifact.owner.value:
+            if any(row["stage"] != artifact.owner.value for artifact in artifacts):
                 raise StateTransitionError(
                     f"Artifact owner does not match work unit stage: {key}"
                 )
@@ -560,50 +574,56 @@ class SqliteStateStore:
                 "SELECT name, relative_path FROM artifacts "
                 "WHERE job_id=? AND owner_stage=? AND is_valid=0 "
                 "ORDER BY name",
-                (job.value, artifact.owner.value),
+                (job.value, row["stage"]),
             ).fetchall()
-            if invalid_identities and (
-                len(invalid_identities) != 1
-                or invalid_identities[0]["name"] != artifact.name
-                or invalid_identities[0]["relative_path"]
-                != str(artifact.relative_path)
-            ):
+            invalid_identity_set = {
+                (item["name"], item["relative_path"])
+                for item in invalid_identities
+            }
+            submitted_identity_set = set(zip(names, paths, strict=True))
+            if invalid_identity_set and invalid_identity_set != submitted_identity_set:
                 raise StateStoreError(
                     "Invalidated artifact identity is ambiguous or changed"
                 )
-            recommitted = connection.execute(
-                "UPDATE artifacts SET size_bytes=?, sha256=?, "
-                "dependencies_json=?, is_valid=1, committed_at=? "
-                "WHERE job_id=? AND name=? AND relative_path=? "
-                "AND owner_stage=? AND is_valid=0",
-                (
-                    artifact.size_bytes,
-                    artifact.sha256,
-                    dependencies_json,
-                    timestamp,
-                    job.value,
-                    artifact.name,
-                    str(artifact.relative_path),
-                    artifact.owner.value,
-                ),
-            )
-            if recommitted.rowcount == 0:
-                connection.execute(
-                    "INSERT INTO artifacts("
-                    "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
-                    "dependencies_json, is_valid, committed_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            for artifact in artifacts:
+                dependencies_json = json.dumps(
+                    artifact.dependencies,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                recommitted = connection.execute(
+                    "UPDATE artifacts SET size_bytes=?, sha256=?, "
+                    "dependencies_json=?, is_valid=1, committed_at=? "
+                    "WHERE job_id=? AND name=? AND relative_path=? "
+                    "AND owner_stage=? AND is_valid=0",
                     (
+                        artifact.size_bytes,
+                        artifact.sha256,
+                        dependencies_json,
+                        timestamp,
                         job.value,
                         artifact.name,
                         str(artifact.relative_path),
-                        artifact.size_bytes,
-                        artifact.sha256,
                         artifact.owner.value,
-                        dependencies_json,
-                        timestamp,
                     ),
                 )
+                if recommitted.rowcount == 0:
+                    connection.execute(
+                        "INSERT INTO artifacts("
+                        "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
+                        "dependencies_json, is_valid, committed_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                        (
+                            job.value,
+                            artifact.name,
+                            str(artifact.relative_path),
+                            artifact.size_bytes,
+                            artifact.sha256,
+                            artifact.owner.value,
+                            dependencies_json,
+                            timestamp,
+                        ),
+                    )
             cursor = connection.execute(
                 "UPDATE work_units SET status=?, error_kind=NULL, "
                 "error_message=NULL, updated_at=? "

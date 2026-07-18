@@ -22,6 +22,7 @@ from ytb_vps_v2.ports.pipeline import ArtifactWriteError
 
 
 _CHUNK_SIZE = 1024 * 1024
+_MAX_VERIFIED_READ_BYTES = 16 * 1024 * 1024
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_DIRECTORY", 0)
@@ -52,6 +53,27 @@ def _digest_reader(reader: BinaryIO) -> FileDigest:
         hasher.update(chunk)
         size += len(chunk)
     return FileDigest(size, hasher.hexdigest())
+
+
+def _read_bounded_and_digest(
+    reader: BinaryIO,
+    max_bytes: int,
+) -> tuple[bytes, FileDigest]:
+    if type(max_bytes) is not int or not 0 < max_bytes <= _MAX_VERIFIED_READ_BYTES:
+        raise BackupStoreError("Artifact read bound is invalid")
+    chunks: list[bytes] = []
+    hasher = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = reader.read(min(_CHUNK_SIZE, max_bytes - size + 1))
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise BackupStoreError("Workspace artifact exceeds its read bound")
+        chunks.append(chunk)
+        hasher.update(chunk)
+    return b"".join(chunks), FileDigest(size, hasher.hexdigest())
 
 
 def _validated_destination(
@@ -336,6 +358,72 @@ class _AnchoredArtifactParent:
             if (current.st_dev, current.st_ino) != (status.st_dev, status.st_ino):
                 raise BackupStoreError("Artifact destination identity changed")
             return digest
+
+    def _recheck_posix_chain(self) -> None:
+        checked: list[int] = []
+        try:
+            current = os.open(self.root, _DIRECTORY_FLAGS)
+            checked.append(current)
+            for expected_fd in self._posix_fds:
+                observed_status = os.fstat(current)
+                expected_status = os.fstat(expected_fd)
+                if (observed_status.st_dev, observed_status.st_ino) != (
+                    expected_status.st_dev,
+                    expected_status.st_ino,
+                ):
+                    raise BackupStoreError("Artifact parent chain identity changed")
+                index = len(checked) - 1
+                parts = self._relative_parent_parts()
+                if index < len(parts):
+                    current = os.open(
+                        parts[index],
+                        _DIRECTORY_FLAGS,
+                        dir_fd=current,
+                    )
+                    checked.append(current)
+        except OSError as exc:
+            raise BackupStoreError("Artifact parent chain identity changed") from exc
+        finally:
+            for descriptor in reversed(checked):
+                os.close(descriptor)
+
+    def _recheck_destination_identity(self, expected: tuple[int, int]) -> None:
+        if os.name == "nt":
+            self._recheck_windows_chain()
+            current = os.stat(self.destination, follow_symlinks=False)
+        else:
+            self._recheck_posix_chain()
+            current = os.stat(
+                self.destination.name,
+                dir_fd=self._parent_fd,
+                follow_symlinks=False,
+            )
+        if not stat.S_ISREG(current.st_mode) or (
+            current.st_dev,
+            current.st_ino,
+        ) != expected:
+            raise BackupStoreError("Artifact destination identity changed")
+
+    def read_verified_destination(
+        self,
+        max_bytes: int,
+    ) -> tuple[bytes, FileDigest]:
+        if os.name == "nt":
+            handle = self._open_windows_destination(share_delete=False)
+        else:
+            descriptor = os.open(
+                self.destination.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=self._parent_fd,
+            )
+            handle = os.fdopen(descriptor, "rb")
+        with handle:
+            status = os.fstat(handle.fileno())
+            if not stat.S_ISREG(status.st_mode):
+                raise BackupStoreError("Artifact destination is not a regular file")
+            raw, digest = _read_bounded_and_digest(handle, max_bytes)
+            self._recheck_destination_identity((status.st_dev, status.st_ino))
+            return raw, digest
 
     def _open_windows_destination(self, *, share_delete: bool) -> BinaryIO:
         import msvcrt
@@ -691,6 +779,32 @@ class LocalArtifactWriter:
                 return ManifestEntry(key, expected)
         except (BackupStoreError, DomainInvariantError, OSError) as exc:
             raise ArtifactWriteError("Workspace artifact failed verification") from exc
+
+    def read_verified_bytes(
+        self,
+        key: PurePosixPath,
+        expected: FileDigest,
+        max_bytes: int,
+    ) -> bytes:
+        if type(expected) is not FileDigest:
+            raise ArtifactWriteError("Expected artifact digest must be FileDigest")
+        try:
+            destination = _validated_destination(self.root, key, expected)
+            with _anchored_artifact_parent(
+                self.root,
+                destination,
+                create_parents=False,
+            ) as anchored:
+                raw, observed = anchored.read_verified_destination(max_bytes)
+                if observed != expected:
+                    raise BackupStoreError(
+                        "Workspace artifact does not match expected digest"
+                    )
+                return raw
+        except (BackupStoreError, DomainInvariantError, OSError) as exc:
+            raise ArtifactWriteError(
+                "Workspace artifact failed bounded verified read"
+            ) from exc
 
 
 DurableArtifactWriter = LocalArtifactWriter

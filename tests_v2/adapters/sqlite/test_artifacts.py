@@ -84,6 +84,145 @@ class SqliteArtifactTests(unittest.TestCase):
         )
         self.assertEqual(self.store.valid_artifacts(self.job_id), (artifact,))
 
+    def test_multiple_artifacts_and_success_commit_in_one_transaction(self) -> None:
+        self._running("tts:multi", StageName.TTS)
+        primary = self._artifact(
+            "tts-document",
+            StageName.TTS,
+            "artifacts/tts/tts.json",
+        )
+        side = self._artifact(
+            "tts-audio",
+            StageName.TTS,
+            "artifacts/tts/voice.wav",
+        )
+
+        self.store.commit_artifacts(
+            self.job_id,
+            "tts:multi",
+            (primary, side),
+            "committed",
+        )
+
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "tts:multi").status,
+            WorkStatus.SUCCEEDED,
+        )
+        self.assertEqual(
+            set(self.store.valid_artifacts(self.job_id)),
+            {primary, side},
+        )
+
+    def test_multiple_artifact_collision_rolls_back_every_insert_and_success(self) -> None:
+        self._running("ocr:existing", StageName.OCR)
+        existing = self._artifact(
+            "existing",
+            StageName.OCR,
+            "artifacts/shared.bin",
+        )
+        self.store.commit_artifact(
+            self.job_id,
+            "ocr:existing",
+            existing,
+            "existing",
+        )
+        self._running("tts:multi", StageName.TTS)
+        primary = self._artifact("tts-document", StageName.TTS)
+        collision = self._artifact(
+            "tts-audio",
+            StageName.TTS,
+            "artifacts/shared.bin",
+        )
+
+        with self.assertRaises(StateStoreError):
+            self.store.commit_artifacts(
+                self.job_id,
+                "tts:multi",
+                (primary, collision),
+                "conflict",
+            )
+
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "tts:multi").status,
+            WorkStatus.RUNNING,
+        )
+        self.assertEqual(self.store.valid_artifacts(self.job_id), (existing,))
+
+    def test_multiple_artifact_contract_rejects_empty_duplicate_and_mixed_owner(self) -> None:
+        self._running("tts:multi", StageName.TTS)
+        first = self._artifact("tts-document", StageName.TTS)
+        duplicate_name = replace(
+            self._artifact("tts-audio", StageName.TTS),
+            name=first.name,
+        )
+        duplicate_path = replace(
+            self._artifact("tts-audio", StageName.TTS),
+            relative_path=first.relative_path,
+        )
+        mixed_owner = self._artifact("rendered", StageName.RENDER)
+
+        for artifacts in (
+            (),
+            (first, duplicate_name),
+            (first, duplicate_path),
+            (first, mixed_owner),
+        ):
+            with self.subTest(artifacts=artifacts):
+                with self.assertRaises((StateStoreError, StateTransitionError)):
+                    self.store.commit_artifacts(
+                        self.job_id,
+                        "tts:multi",
+                        artifacts,
+                        "invalid",
+                    )
+                self.assertIs(
+                    self.store.get_work_unit(
+                        self.job_id,
+                        "tts:multi",
+                    ).status,
+                    WorkStatus.RUNNING,
+                )
+                self.assertEqual(self.store.valid_artifacts(self.job_id), ())
+
+    def test_multiple_invalidated_artifacts_require_exact_identity_set(self) -> None:
+        self._running("tts:multi", StageName.TTS)
+        primary = self._artifact("tts-document", StageName.TTS)
+        side = self._artifact("tts-audio", StageName.TTS)
+        self.store.commit_artifacts(
+            self.job_id,
+            "tts:multi",
+            (primary, side),
+            "first",
+        )
+        invalidation = plan_invalidation(
+            stage_config_fingerprints(self.config),
+            stage_config_fingerprints(self.config),
+            changed_artifact_owners=(StageName.TTS,),
+        )
+        self.store.apply_invalidation(self.job_id, invalidation, "invalidated")
+        self.store.start_work_unit(self.job_id, "tts:multi", "restarted")
+        changed = tuple(
+            replace(item, size_bytes=84, sha256="b" * 64)
+            for item in (primary, side)
+        )
+
+        with self.assertRaises(StateStoreError):
+            self.store.commit_artifacts(
+                self.job_id,
+                "tts:multi",
+                (changed[0],),
+                "missing-side",
+            )
+        self.assertEqual(self.store.valid_artifacts(self.job_id), ())
+
+        self.store.commit_artifacts(
+            self.job_id,
+            "tts:multi",
+            changed,
+            "complete",
+        )
+        self.assertEqual(set(self.store.valid_artifacts(self.job_id)), set(changed))
+
     def test_commit_rejects_non_running_and_owner_mismatch(self) -> None:
         self.store.put_work_unit(
             self.job_id,

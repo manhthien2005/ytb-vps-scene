@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
+from typing import TypeAlias
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -565,6 +566,18 @@ class CheckpointDocument:
         _digest("Checkpoint state snapshot digest", self.state_snapshot_digest)
         if self.manifest_path == self.state_snapshot_path:
             raise DomainInvariantError("Checkpoint artifact paths must be distinct")
+
+
+PipelineDocument: TypeAlias = (
+    MediaDocument
+    | OcrDocument
+    | TrackDocument
+    | TranslationDocument
+    | TtsDocument
+    | RenderPlanDocument
+    | PublicationDocument
+    | CheckpointDocument
+)
 
 
 PIPELINE_ARTIFACT_PATHS = MappingProxyType(
