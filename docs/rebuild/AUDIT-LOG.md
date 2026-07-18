@@ -575,6 +575,30 @@ historical evidence.
 - Next step: implement a v2 ONNX detector wrapper that converts RapidOCR output
   into `OcrDetection` and injects it into this worker loop.
 
+## 2026-07-18T23:00:00+07:00 — Phase 8 RapidOCR ONNX detector wrapper
+
+- Objective: provide the production-facing lazy RapidOCR detector callable for
+  the v2 worker loop without making optional GPU libraries package-import
+  dependencies.
+- Contract/invariants: `rapidocr` and NumPy load only on first production use;
+  injected fake engines/decoders remain available for deterministic tests. Both
+  active detection and recognition sessions must start with
+  `CUDAExecutionProvider`. Raw frame length, crop ratios, confidence, result
+  lengths, finite box coordinates, blank text, and minimum-confidence filtering
+  are validated before constructing canonical `OcrDetection` values. Default
+  RapidOCR parameters explicitly request CUDA; callers may supply the complete
+  coordinate transform for scaled/cropped frames.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/onnx_detector.py`, OCR adapter
+  exports, and `tests_v2/adapters/ocr/test_onnx_detector.py`.
+- Tests: 4 focused detector tests, 2 worker-loop regression tests, and full v2
+  discovery (310 tests, 12 skips) passed; compile and diff checks passed.
+- Commit: pending in this ONNX detector slice.
+- Remaining risk: no ONNX Runtime/RapidOCR/model is installed on this host, so
+  real CUDA session creation and inference are not claimed. Docker detector
+  parity and a pinned production model fixture remain.
+- Next step: add a Docker detector wrapper with the same output contract, then
+  run the real ONNX CUDA/model smoke on the target environment.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`

@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phase 8 OCR worker loop complete against fake engine; production inference wrapper next
+Status: Phase 8 ONNX detector wrapper complete against fake runtime; production GPU smoke next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -98,8 +98,9 @@ smoke contract. Production ONNX and optional Docker legacy adapters use this
 contract; heavy vendor runtimes remain lazy and CPU fallback is forbidden.
 
 The contract, lazy smoke adapters, bounded frame stream, canonical JSONL
-normalization, change detection/re-emission boundary, and v2 worker loop are
-complete. Actual ONNX/Docker OCR execution remains the next Phase 8 slice.
+normalization, change detection/re-emission boundary, v2 worker loop, and lazy
+RapidOCR ONNX detector wrapper are complete. A real model/GPU smoke and Docker
+detector parity remain the next Phase 8 slices.
 
 Gate: contract suite, provider smoke, deterministic fake, and explicit failure
 without silent CPU fallback.
