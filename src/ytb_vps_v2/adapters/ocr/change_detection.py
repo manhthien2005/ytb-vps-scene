@@ -73,4 +73,3 @@ def process_frames(
         output.append(FrameDetections(frame.frame_index, previous_detections))
         previous = frame
     return tuple(output)
-

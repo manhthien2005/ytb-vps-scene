@@ -546,7 +546,7 @@ historical evidence.
   exports, and `tests_v2/adapters/ocr/test_change_detection.py`.
 - Tests: 4 focused change-detection tests and full v2 discovery (304 tests,
   12 skips) passed; compile and diff checks passed.
-- Commit: pending in this change-detection slice.
+- Commit: `2c9fc9d` (`feat(v2): add OCR change detection re-emission`).
 - Remaining risk: worker scripts are not yet wired to this helper; actual
   ONNX/Paddle inference, JSONL emission integration, and 30-second/10-minute
   performance fixtures remain.
