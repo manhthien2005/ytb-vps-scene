@@ -599,6 +599,27 @@ historical evidence.
 - Next step: add a Docker detector wrapper with the same output contract, then
   run the real ONNX CUDA/model smoke on the target environment.
 
+## 2026-07-19T00:00:00+07:00 — Phase 8 Docker detector parity
+
+- Objective: add a production-facing Docker chunk adapter with the same
+  canonical detection contract as the lazy ONNX detector.
+- Contract/invariants: one bounded chunk invokes Docker through an argv-only
+  command with `--rm --network none`; raw frames are supplied through stdin,
+  timeout and output-size limits are enforced, nonzero exits fail closed, and
+  worker JSONL is parsed through the shared `OcrDetection` converter. The
+  adapter never invokes a shell and accepts an injected runner for deterministic
+  tests.
+- Files changed: `src/ytb_vps_v2/adapters/ocr/docker_detector.py`, OCR adapter
+  exports, and `tests_v2/adapters/ocr/test_docker_detector.py`.
+- Tests: 3 focused Docker parity tests and full v2 discovery (313 tests, 12
+  skips) passed; compile and diff checks passed.
+- Commit: pending in this Docker parity slice.
+- Remaining risk: existing legacy container workers still expect file output,
+  while this adapter's next v2 worker image must support stdout JSONL; no real
+  Docker/ONNX runtime or target GPU smoke has run here.
+- Next step: add the v2 worker image/entrypoint contract for stdout JSONL and
+  run target-environment GPU/Docker smoke tests.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`

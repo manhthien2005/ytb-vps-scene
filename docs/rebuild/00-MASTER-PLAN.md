@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phase 8 ONNX detector wrapper complete against fake runtime; production GPU smoke next
+Status: Phase 8 ONNX and Docker detector adapters complete against fake runtimes; target smoke next
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -100,7 +100,7 @@ contract; heavy vendor runtimes remain lazy and CPU fallback is forbidden.
 The contract, lazy smoke adapters, bounded frame stream, canonical JSONL
 normalization, change detection/re-emission boundary, v2 worker loop, and lazy
 RapidOCR ONNX detector wrapper are complete. A real model/GPU smoke and Docker
-detector parity remain the next Phase 8 slices.
+chunk worker smoke remain the next Phase 8 slices.
 
 Gate: contract suite, provider smoke, deterministic fake, and explicit failure
 without silent CPU fallback.
@@ -176,3 +176,6 @@ Gate: G8.
 A phase is complete only when its tests and gates pass, the full diff and staged
 filenames have been reviewed, `git diff --check` is clean, the audit entry names
 remaining risks and the next phase, and the single-purpose commit succeeds.
+The Docker chunk adapter now uses one shell-free container invocation per
+bounded chunk, passes raw frames via stdin, enforces timeout/output limits, and
+parses the same canonical `OcrDetection` JSONL contract as ONNX.

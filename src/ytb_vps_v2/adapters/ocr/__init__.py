@@ -1,6 +1,7 @@
 """Optional OCR provider adapters with lazy runtime loading."""
 
 from ytb_vps_v2.adapters.ocr.docker import DockerOcrSmokeAdapter
+from ytb_vps_v2.adapters.ocr.docker_detector import DockerOcrChunkDetector
 from ytb_vps_v2.adapters.ocr.change_detection import (
     ChangeDetectionPolicy,
     FrameDetections,
@@ -21,6 +22,7 @@ from ytb_vps_v2.adapters.ocr.stream import (
 
 __all__ = [
     "DockerOcrSmokeAdapter",
+    "DockerOcrChunkDetector",
     "ChangeDetectionPolicy",
     "FrameDetections",
     "iter_processed_frames",
