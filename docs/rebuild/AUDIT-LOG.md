@@ -467,6 +467,27 @@ historical evidence.
   including the ONNX adapter and optional Docker legacy adapter against one
   shared coordinate/output contract.
 
+## 2026-07-18T18:00:00+07:00 — Phase 8 OCR contract slice
+
+- Objective: establish the provider-neutral OCR detection, coordinate
+  normalization, and smoke/failure contract before loading ONNX or Paddle
+  runtimes.
+- Contract/invariants: detections carry non-negative frame indexes, typed
+  canonical `BoundingBox` values, non-empty text, and exact `Fraction`
+  confidence in `[0, 1]`. Crop coordinates map through positive scale and
+  offset into bounded source-frame coordinates. An ONNX report must expose
+  `CUDAExecutionProvider` as its first active provider; CPU-only fallback is a
+  hard error.
+- Files changed: `src/ytb_vps_v2/ports/ocr.py`, `src/ytb_vps_v2/ports/__init__.py`,
+  `tests_v2/ports/test_ocr.py`, and the Phase 8 master-plan status.
+- Tests: `python -m unittest tests_v2.ports.test_ocr -v` — 4 tests passed;
+  compile and full-suite gates remain for the adapter follow-up slice.
+- Commit: pending in this contract-first slice.
+- Remaining risk: ONNX Runtime, RapidOCR, PaddleOCR, Docker command execution,
+  frame streaming, JSONL persistence, and change-detection are not yet wired.
+- Next step: add lazy ONNX/Docker smoke adapters and shared worker contract
+  tests without importing optional dependencies during package import.
+
 ## 2026-07-18T15:00:00+07:00 — Phase 7 final-fix wave and cold-restore re-audit
 
 - Fix commit: `308aacc043d1a6d651fcafaa60c00e3d55be36e1`

@@ -22,6 +22,13 @@ from ytb_vps_v2.ports.pipeline import (
     TtsProvider,
     TtsSynthesis,
 )
+from ytb_vps_v2.ports.ocr import (
+    CoordinateTransform,
+    OcrDetection,
+    OcrEngine,
+    OcrProviderReport,
+    require_cuda_provider,
+)
 from ytb_vps_v2.ports.state import StateRepository
 from ytb_vps_v2.ports.restore import StagedRestoreWorkspace
 
@@ -47,4 +54,9 @@ __all__ = [
     "TtsProvider",
     "TtsSynthesis",
     "UnsafeDeletionTargetError",
+    "CoordinateTransform",
+    "OcrDetection",
+    "OcrEngine",
+    "OcrProviderReport",
+    "require_cuda_provider",
 ]
