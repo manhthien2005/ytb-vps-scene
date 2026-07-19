@@ -52,11 +52,12 @@ describe("Drive control-plane repository", () => {
 
   it("consumes a saved OAuth nonce once and prunes expired entries", async () => {
     const repository = repo();
-    await repository.saveOAuthNonce(HASH_A, new Date(NOW.getTime() + 60_000));
-    await repository.saveOAuthNonce(HASH_B, new Date(NOW.getTime() - 1));
+    const now = new Date();
+    await repository.saveOAuthNonce(HASH_A, new Date(now.getTime() + 60_000));
+    await repository.saveOAuthNonce(HASH_B, new Date(now.getTime() - 1));
 
-    await expect(repository.consumeOAuthNonce(HASH_A, NOW)).resolves.toBe(true);
-    await expect(repository.consumeOAuthNonce(HASH_A, NOW)).resolves.toBe(false);
+    await expect(repository.consumeOAuthNonce(HASH_A, now)).resolves.toBe(true);
+    await expect(repository.consumeOAuthNonce(HASH_A, now)).resolves.toBe(false);
     const rows = await db.query("select nonce_hash from oauth_states");
     expect(rows.rows).toHaveLength(0);
   });
