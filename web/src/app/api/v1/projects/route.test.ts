@@ -137,8 +137,31 @@ describe("/api/v1/projects", () => {
     expect(service.createProject).not.toHaveBeenCalled();
   });
 
+  it("accepts approved punctuation and rejects comma-bearing keys before the body", async () => {
+    const safeKey = "project.key_01:retry-safe";
+    const accepted = await POST(postRequest({ idempotencyKey: safeKey }));
+    expect(accepted.status).toBe(201);
+    expect(service.createProject).toHaveBeenCalledWith({
+      idempotencyKey: safeKey,
+      name: "Test 1",
+    });
+    service.createProject.mockClear();
+
+    const rejected = await POST(postRequest({
+      idempotencyKey: "0123456789abc,def",
+      body: "x".repeat(1_025),
+      contentLength: "1",
+    }));
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({ code: "INVALID_REQUEST" });
+    expect(service.createProject).not.toHaveBeenCalled();
+  });
+
   it("rejects duplicate idempotency-key headers", async () => {
-    const request = postRequest();
+    const request = postRequest({
+      body: "x".repeat(1_025),
+      contentLength: "1",
+    });
     request.headers.append("idempotency-key", "fedcba9876543210");
 
     const response = await POST(request);
@@ -172,6 +195,20 @@ describe("/api/v1/projects", () => {
     await expect(response.json()).resolves.toEqual({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
+  it("returns a stable no-store 500 for an unexpected POST service failure", async () => {
+    const internal = new Error("private internal detail");
+    internal.stack = "private internal stack";
+    service.createProject.mockRejectedValue(internal);
+
+    const response = await POST(postRequest());
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain(internal.message);
+    expect(body).not.toContain(internal.stack);
+  });
+
   it("authenticates GET without requiring Origin and returns no-store domain projects", async () => {
     const response = await GET(new NextRequest("http://localhost:3000/api/v1/projects", {
       headers: { origin: "https://attacker.test" },
@@ -181,6 +218,20 @@ describe("/api/v1/projects", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({ projects: [PROJECT] });
     expect(service.listProjects).toHaveBeenCalledOnce();
+  });
+
+  it("returns a stable no-store 500 for an unexpected GET service failure", async () => {
+    const internal = new Error("private internal detail");
+    internal.stack = "private internal stack";
+    service.listProjects.mockRejectedValue(internal);
+
+    const response = await GET(new NextRequest("http://localhost:3000/api/v1/projects"));
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain(internal.message);
+    expect(body).not.toContain(internal.stack);
   });
 
   it("rejects unauthenticated GET before calling the service", async () => {

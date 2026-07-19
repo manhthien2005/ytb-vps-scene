@@ -18,7 +18,7 @@ import { createCredentialCipher } from "@/lib/security/credential-cipher";
 export const runtime = "nodejs";
 const BODY_BYTES = 1_024;
 const createProjectBody = z.object({ name: z.string().trim().min(1).max(160) }).strict();
-const idempotencyKey = z.string().min(16).max(128).regex(/^[\x20-\x7E]+$/);
+const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 
 function errorResponse(error: AppError): NextResponse {
   return NextResponse.json(
@@ -27,9 +27,16 @@ function errorResponse(error: AppError): NextResponse {
   );
 }
 
+function unexpectedErrorResponse(): NextResponse {
+  return NextResponse.json(
+    { code: "INTERNAL_ERROR" },
+    { status: 500, headers: { "cache-control": "no-store" } },
+  );
+}
+
 function parseIdempotencyKey(request: NextRequest): string {
   const value = request.headers.get("idempotency-key");
-  if (value === null || value.includes(", ")) throw new HttpError(400, "INVALID_REQUEST");
+  if (value === null) throw new HttpError(400, "INVALID_REQUEST");
   const parsed = idempotencyKey.safeParse(value);
   if (!parsed.success) throw new HttpError(400, "INVALID_REQUEST");
   return parsed.data;
@@ -71,7 +78,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    throw error;
+    return unexpectedErrorResponse();
   }
 }
 
@@ -86,6 +93,6 @@ export async function GET(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    throw error;
+    return unexpectedErrorResponse();
   }
 }
