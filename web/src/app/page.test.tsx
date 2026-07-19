@@ -19,7 +19,7 @@ describe("HomePage", () => {
     Object.assign(process.env, {
       NODE_ENV: "test",
       DATABASE_URL: "postgresql://test:test@localhost/test",
-      ADMIN_KEY_HASH: "scrypt$test",
+      ADMIN_KEY_HASH: "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       SESSION_SECRET: "s".repeat(64),
       APP_ORIGIN: "http://localhost:3000",
     });

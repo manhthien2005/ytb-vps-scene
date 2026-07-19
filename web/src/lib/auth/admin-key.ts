@@ -17,6 +17,11 @@ const r = 8;
 const p = 1;
 const length = 32;
 
+export type ParsedAdminKeyHash = Readonly<{
+  salt: Buffer;
+  digest: Buffer;
+}>;
+
 export async function encodeAdminKey(key: string, salt = randomBytes(16)): Promise<string> {
   const digest = (await scrypt(key, salt, length, {
     N,
@@ -34,10 +39,10 @@ function decodeBase64url(value: string): Buffer | null {
   return decoded.toString("base64url") === value ? decoded : null;
 }
 
-export async function verifyAdminKey(candidate: string, encoded: string): Promise<boolean> {
+export function parseAdminKeyHash(encoded: string): ParsedAdminKeyHash | null {
   try {
     const parts = encoded.split("$");
-    if (parts.length !== 6) return false;
+    if (parts.length !== 6) return null;
 
     const [name, n, rr, pp, saltText, digestText] = parts;
     if (
@@ -48,21 +53,31 @@ export async function verifyAdminKey(candidate: string, encoded: string): Promis
       !saltText ||
       !digestText
     ) {
-      return false;
+      return null;
     }
 
     const salt = decodeBase64url(saltText);
-    const expected = decodeBase64url(digestText);
-    if (!salt || salt.length !== 16 || !expected || expected.length !== length) return false;
+    const digest = decodeBase64url(digestText);
+    if (!salt || salt.length !== 16 || !digest || digest.length !== length) return null;
+    return { salt, digest };
+  } catch {
+    return null;
+  }
+}
 
-    const actual = (await scrypt(candidate, salt, length, {
+export async function verifyAdminKey(candidate: string, encoded: string): Promise<boolean> {
+  try {
+    const parsed = parseAdminKeyHash(encoded);
+    if (!parsed) return false;
+
+    const actual = (await scrypt(candidate, parsed.salt, length, {
       N,
       r,
       p,
       maxmem: 64 * 1024 * 1024,
     })) as Buffer;
 
-    return expected.length === actual.length && timingSafeEqual(expected, actual);
+    return parsed.digest.length === actual.length && timingSafeEqual(parsed.digest, actual);
   } catch {
     return false;
   }

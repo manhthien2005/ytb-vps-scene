@@ -1,12 +1,16 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { encodeAdminKey } from "@/lib/auth/admin-key";
 
-const { repository } = vi.hoisted(() => ({
+const { repository, verifyAdminKey } = vi.hoisted(() => ({
   repository: {
     consumeLoginAttempt: vi.fn(),
     clearLoginAttempts: vi.fn(),
   },
+  verifyAdminKey: vi.fn(),
+}));
+vi.mock("@/lib/auth/admin-key", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/auth/admin-key")>()),
+  verifyAdminKey,
 }));
 vi.mock("@/lib/repositories/neon-control-plane", () => ({
   createNeonControlPlaneRepository: () => repository,
@@ -20,24 +24,30 @@ describe("POST /api/v1/auth/login", () => {
     Object.assign(process.env, {
       NODE_ENV: "test",
       DATABASE_URL: "postgresql://test:test@localhost/test",
-      ADMIN_KEY_HASH: await encodeAdminKey("correct private key", Buffer.alloc(16, 3)),
+      ADMIN_KEY_HASH: "scrypt$16384$8$1$AwMDAwMDAwMDAwMDAwMDAw$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       SESSION_SECRET: "s".repeat(64),
       APP_ORIGIN: "http://localhost:3000",
     });
     delete process.env.OPENAI_API_KEY;
     repository.consumeLoginAttempt.mockResolvedValue({ allowed: true, retryAfterSeconds: 0 });
     repository.clearLoginAttempts.mockResolvedValue(undefined);
+    verifyAdminKey.mockImplementation(async (candidate: string) => candidate === "correct private key");
   });
 
   function request(origin: string, key: string) {
+    return rawRequest(origin, JSON.stringify({ key }));
+  }
+
+  function rawRequest(origin: string, body: string, contentLength?: string) {
     return new NextRequest("http://localhost:3000/api/v1/auth/login", {
       method: "POST",
       headers: {
         origin,
         "content-type": "application/json",
         "x-forwarded-for": "127.0.0.1",
+        ...(contentLength === undefined ? {} : { "content-length": contentLength }),
       },
-      body: JSON.stringify({ key }),
+      body,
     });
   }
 
@@ -53,6 +63,43 @@ describe("POST /api/v1/auth/login", () => {
     expect(response.headers.get("retry-after")).toBe("900");
     expect(repository.clearLoginAttempts).not.toHaveBeenCalled();
   });
+
+  it("rejects extra JSON fields before rate limiting or key derivation", async () => {
+    const response = await POST(rawRequest(
+      "http://localhost:3000",
+      JSON.stringify({ key: "correct private key", extra: true }),
+    ));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ code: "INVALID_REQUEST" });
+    expect(repository.consumeLoginAttempt).not.toHaveBeenCalled();
+    expect(verifyAdminKey).not.toHaveBeenCalled();
+  });
+
+  it("rejects an overlong admin key before rate limiting or scrypt", async () => {
+    const response = await POST(request("http://localhost:3000", "k".repeat(257)));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ code: "INVALID_REQUEST" });
+    expect(repository.consumeLoginAttempt).not.toHaveBeenCalled();
+    expect(verifyAdminKey).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "1"])(
+    "rejects a streamed oversized body before rate limiting even with content-length %s",
+    async (contentLength) => {
+      const response = await POST(rawRequest(
+        "http://localhost:3000",
+        JSON.stringify({ key: "k", padding: "x".repeat(4096) }),
+        contentLength,
+      ));
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toEqual({ code: "REQUEST_TOO_LARGE" });
+      expect(repository.consumeLoginAttempt).not.toHaveBeenCalled();
+      expect(verifyAdminKey).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not clear attempts after an invalid key", async () => {
     const response = await POST(request("http://localhost:3000", "wrong private key"));

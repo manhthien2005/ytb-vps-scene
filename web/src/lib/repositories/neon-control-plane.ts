@@ -14,9 +14,14 @@ function parseJobState(value: unknown): JobState {
   return value;
 }
 
-export function createNeonControlPlaneRepository(databaseUrl: string): ControlPlaneRepository {
-  const sql = createSql(databaseUrl);
+export type ControlPlaneSqlClient = Readonly<{
+  query: (
+    text: string,
+    parameters?: unknown[],
+  ) => Promise<Readonly<{ rows: Record<string, unknown>[] }>>;
+}>;
 
+export function createControlPlaneRepository(sql: ControlPlaneSqlClient): ControlPlaneRepository {
   return {
     async listJobs(): Promise<readonly JobSummary[]> {
       const result = await sql.query(
@@ -41,7 +46,7 @@ export function createNeonControlPlaneRepository(databaseUrl: string): ControlPl
 
     async health(): Promise<RepositoryHealth> {
       const start = performance.now();
-      await sql`select 1 as ok`;
+      await sql.query("select 1 as ok");
       return { ok: true, latencyMs: Math.round(performance.now() - start) };
     },
 
@@ -51,7 +56,10 @@ export function createNeonControlPlaneRepository(databaseUrl: string): ControlPl
          values ($1,$2,1,null)
          on conflict(key_hash) do update set
            window_started = case when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then excluded.window_started else auth_login_windows.window_started end,
-           attempt_count = case when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then 1 else auth_login_windows.attempt_count + 1 end,
+           attempt_count = case
+             when auth_login_windows.blocked_until > excluded.window_started then auth_login_windows.attempt_count
+             when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then 1
+             else least(auth_login_windows.attempt_count + 1, 1000) end,
            blocked_until = case
              when auth_login_windows.blocked_until > excluded.window_started then auth_login_windows.blocked_until
              when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then null
@@ -72,4 +80,8 @@ export function createNeonControlPlaneRepository(databaseUrl: string): ControlPl
       await sql.query("delete from auth_login_windows where key_hash = $1", [keyHash]);
     },
   };
+}
+
+export function createNeonControlPlaneRepository(databaseUrl: string): ControlPlaneRepository {
+  return createControlPlaneRepository(createSql(databaseUrl));
 }

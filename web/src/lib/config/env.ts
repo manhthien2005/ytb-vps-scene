@@ -1,10 +1,13 @@
 import { z } from "zod";
+import { parseAdminKeyHash } from "@/lib/auth/admin-key";
 
 const schema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]),
     DATABASE_URL: z.string().url().startsWith("postgresql://"),
-    ADMIN_KEY_HASH: z.string().startsWith("scrypt$"),
+    ADMIN_KEY_HASH: z.string().refine((value) => parseAdminKeyHash(value) !== null, {
+      message: "ADMIN_KEY_HASH must be a canonical supported scrypt hash",
+    }),
     SESSION_SECRET: z.string().min(64),
     APP_ORIGIN: z.string().url(),
   })

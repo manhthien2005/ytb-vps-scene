@@ -717,3 +717,17 @@ historical evidence.
   included in this phase gate.
 - Next step: run the independent Node 22 CI job in an authorized GitHub Actions
   workflow before treating hosted execution as verified.
+
+## 2026-07-19T08:10:20+07:00 — Phase 8 final-review correction
+
+- Correction to the original Phase 8 gate evidence: after the final review
+  regressions were added, the full Vitest suite passed with 70 tests in 16
+  files. Typecheck, lint, and the Next.js production build passed again with a
+  structurally valid, non-secret synthetic admin hash.
+- Task 6 implementation history began with `6b957ec` and its security-contract
+  test completion is `e0cc2f4`. The seven task-completion hashes recorded in the
+  original Phase 8 entry remain unchanged.
+- Final-review coverage now includes bounded strict login bodies, canonical
+  admin-hash configuration, reachable final-failure transitions, a real PGlite
+  active-block saturation regression, an exact Drive 90-percent threshold, and
+  the Neon HTTP local-runtime runbook contract.

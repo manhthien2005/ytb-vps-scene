@@ -7,11 +7,77 @@ import { parseServerEnv } from "@/lib/config/env";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
 
 export const runtime = "nodejs";
+const MAX_LOGIN_BODY_BYTES = 2_048;
+const MAX_ADMIN_KEY_CHARACTERS = 256;
+
+type LoginBodyResult =
+  | Readonly<{ kind: "valid"; key: string }>
+  | Readonly<{ kind: "invalid" }>
+  | Readonly<{ kind: "too-large" }>;
+
+async function readLoginBody(request: NextRequest): Promise<LoginBodyResult> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_LOGIN_BODY_BYTES) {
+    return { kind: "too-large" };
+  }
+
+  if (!request.body) return { kind: "invalid" };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_LOGIN_BODY_BYTES) {
+        await reader.cancel();
+        return { kind: "too-large" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { kind: "invalid" };
+  }
+
+  try {
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 1 ||
+      !("key" in value) ||
+      typeof value.key !== "string" ||
+      value.key.length === 0 ||
+      value.key.length > MAX_ADMIN_KEY_CHARACTERS
+    ) {
+      return { kind: "invalid" };
+    }
+    return { kind: "valid", key: value.key };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
 
 export async function POST(request: NextRequest) {
   const env = parseServerEnv(process.env);
   if (request.headers.get("origin") !== env.appOrigin) {
     return NextResponse.json({ code: "ORIGIN_REJECTED" }, { status: 403 });
+  }
+
+  const body = await readLoginBody(request);
+  if (body.kind === "too-large") {
+    return NextResponse.json({ code: "REQUEST_TOO_LARGE" }, { status: 413 });
+  }
+  if (body.kind === "invalid") {
+    return NextResponse.json({ code: "INVALID_REQUEST" }, { status: 400 });
   }
 
   const address = (
@@ -34,8 +100,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const body = (await request.json().catch(() => null)) as { key?: unknown } | null;
-  if (typeof body?.key !== "string" || !(await verifyAdminKey(body.key, env.adminKeyHash))) {
+  if (!(await verifyAdminKey(body.key, env.adminKeyHash))) {
     return NextResponse.json({ code: "AUTH_REJECTED" }, { status: 401 });
   }
 

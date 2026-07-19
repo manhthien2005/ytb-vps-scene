@@ -37,4 +37,16 @@ describe("assessFreeTier", () => {
       }).mode,
     ).toBe("READ_ONLY");
   });
+
+  it("reports Drive storage high at exactly ninety percent", () => {
+    expect(
+      assessFreeTier({
+        neonBytes: 100,
+        neonLimitBytes: 1_000,
+        driveBytes: 1_800,
+        driveLimitBytes: 2_000,
+        stale: false,
+      }),
+    ).toEqual({ mode: "READ_ONLY", reasons: ["DRIVE_STORAGE_HIGH"] });
+  });
 });
