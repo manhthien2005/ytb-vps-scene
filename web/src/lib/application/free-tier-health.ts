@@ -56,6 +56,7 @@ function validSnapshot(snapshot: UsageSnapshot | null, provider: UsageSnapshot["
     validQuotaValue(snapshot.limitBytes, 1) &&
     snapshot.usedBytes <= snapshot.limitBytes &&
     validQuotaValue(snapshot.appManagedBytes) &&
+    (provider === "DRIVE" ? snapshot.appManagedBytes <= snapshot.usedBytes : snapshot.appManagedBytes === 0) &&
     (snapshot.mode === "READ_WRITE" || snapshot.mode === "READ_ONLY") &&
     Array.isArray(snapshot.reasonCodes) &&
     snapshot.reasonCodes.every((reason) => typeof reason === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(reason)) &&
@@ -79,6 +80,19 @@ function fallbackSnapshot(
     now.getTime() - observedAt > staleAfterSeconds * 1_000
   ) return { snapshot: null, reason: "DRIVE_QUOTA_STALE" };
   return { snapshot, reason: null };
+}
+
+async function loadFallbackSnapshot(
+  repository: DriveControlPlaneRepository,
+  provider: UsageSnapshot["provider"],
+  now: Date,
+  staleAfterSeconds: number,
+): Promise<SnapshotResult> {
+  try {
+    return fallbackSnapshot(await repository.getUsage(provider), provider, now, staleAfterSeconds);
+  } catch {
+    return { snapshot: null, reason: "QUOTA_INVALID" };
+  }
 }
 
 function connectionFrom(error: unknown): DriveConnectionStatus {
@@ -137,46 +151,63 @@ export function createFreeTierHealthService(
   async function refreshDrive(now: Date): Promise<Readonly<SnapshotResult & {
     driveConnection: DriveConnectionStatus;
   }>> {
+    let accessToken: string;
     try {
-      const accessToken = await dependencies.access.getAccessToken();
-      const [account, appManagedBytes] = await Promise.all([
-        dependencies.files.inspectAccount(accessToken),
-        dependencies.repository.appManagedDriveBytes(),
-      ]);
-      if (
-        !validDriveAccount(account) ||
-        !validQuotaValue(appManagedBytes)
-      ) return { snapshot: null, reason: "QUOTA_INVALID", driveConnection: "CONNECTED" };
-      const snapshot: UsageSnapshot = {
-        provider: "DRIVE",
-        usedBytes: account.usedBytes,
-        limitBytes: account.limitBytes,
-        appManagedBytes,
-        mode: "READ_WRITE",
-        reasonCodes: [],
-        observedAt: now.toISOString(),
-      };
-      return { snapshot, reason: null, driveConnection: "CONNECTED" };
+      accessToken = await dependencies.access.getAccessToken();
     } catch (error) {
       const driveConnection = connectionFrom(error);
       const reason = connectionReason(error);
       if (reason !== null) return { snapshot: null, reason, driveConnection };
+      return { snapshot: null, reason: "DRIVE_QUOTA_STALE", driveConnection };
+    }
+
+    let account: Awaited<ReturnType<DriveFilesPort["inspectAccount"]>>;
+    try {
+      account = await dependencies.files.inspectAccount(accessToken);
+    } catch {
       return {
-        ...fallbackSnapshot(
-          await dependencies.repository.getUsage("DRIVE"),
+        ...await loadFallbackSnapshot(
+          dependencies.repository,
           "DRIVE",
           now,
           dependencies.staleAfterSeconds,
         ),
-        driveConnection,
+        driveConnection: "CONNECTED",
       };
     }
+
+    if (!validDriveAccount(account)) {
+      return { snapshot: null, reason: "QUOTA_INVALID", driveConnection: "CONNECTED" };
+    }
+    let appManagedBytes: number;
+    try {
+      appManagedBytes = await dependencies.repository.appManagedDriveBytes();
+    } catch {
+      return { snapshot: null, reason: "QUOTA_INVALID", driveConnection: "CONNECTED" };
+    }
+    if (!validQuotaValue(appManagedBytes) || appManagedBytes > account.usedBytes) {
+      return { snapshot: null, reason: "QUOTA_INVALID", driveConnection: "CONNECTED" };
+    }
+    const snapshot: UsageSnapshot = {
+      provider: "DRIVE",
+      usedBytes: account.usedBytes,
+      limitBytes: account.limitBytes,
+      appManagedBytes,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: now.toISOString(),
+    };
+    return { snapshot, reason: null, driveConnection: "CONNECTED" };
   }
 
   async function refreshNeon(now: Date): Promise<SnapshotResult> {
     try {
       const neonBytes = await dependencies.repository.databaseUsedBytes();
-      if (!validQuotaValue(neonBytes) || !validQuotaValue(dependencies.neonLimitBytes, 1)) {
+      if (
+        !validQuotaValue(neonBytes) ||
+        !validQuotaValue(dependencies.neonLimitBytes, 1) ||
+        neonBytes > dependencies.neonLimitBytes
+      ) {
         return { snapshot: null, reason: "QUOTA_INVALID" };
       }
       const snapshot: UsageSnapshot = {
@@ -190,12 +221,7 @@ export function createFreeTierHealthService(
       };
       return { snapshot, reason: null };
     } catch {
-      return fallbackSnapshot(
-        await dependencies.repository.getUsage("NEON"),
-        "NEON",
-        now,
-        dependencies.staleAfterSeconds,
-      );
+      return { snapshot: null, reason: "QUOTA_INVALID" };
     }
   }
 
@@ -214,10 +240,22 @@ export function createFreeTierHealthService(
       };
     }
 
-    const [previousDrive, previousNeon] = await Promise.all([
-      dependencies.repository.getUsage("DRIVE"),
-      dependencies.repository.getUsage("NEON"),
-    ]);
+    let previousDrive: UsageSnapshot | null;
+    let previousNeon: UsageSnapshot | null;
+    try {
+      [previousDrive, previousNeon] = await Promise.all([
+        dependencies.repository.getUsage("DRIVE"),
+        dependencies.repository.getUsage("NEON"),
+      ]);
+    } catch {
+      return {
+        mode: "READ_ONLY",
+        reasons: ["QUOTA_INVALID"],
+        driveConnection: "CONNECTED",
+        drive: null,
+        neon: null,
+      };
+    }
     const [driveResult, neonResult] = await Promise.all([refreshDrive(now), refreshNeon(now)]);
     const reasons = uniqueReasons([
       ...(driveResult.reason === null ? snapshotReasons(driveResult.snapshot, now, dependencies, "DRIVE") : [driveResult.reason]),
