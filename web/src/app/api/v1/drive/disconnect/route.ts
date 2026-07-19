@@ -1,0 +1,47 @@
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { createGoogleDriveFilesAdapter } from "@/lib/adapters/google/drive-files";
+import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
+import { disconnectDrive } from "@/lib/application/drive-connection";
+import { parseServerEnv } from "@/lib/config/env";
+import { AppError } from "@/lib/domain/errors";
+import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
+import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
+import { createCredentialCipher } from "@/lib/security/credential-cipher";
+
+export const runtime = "nodejs";
+const BODY_BYTES = 128;
+const emptyBody = z.object({}).strict();
+
+function errorResponse(error: AppError): NextResponse {
+  return NextResponse.json(
+    { code: error.code },
+    { status: error.status, headers: { "cache-control": "no-store" } },
+  );
+}
+
+export async function POST(request: NextRequest) {
+  const env = parseServerEnv(process.env);
+  try {
+    await requireAdmin(request, env.sessionSecret);
+    requireMutationOrigin(request, env.appOrigin);
+    await readStrictJson(request, emptyBody, BODY_BYTES);
+
+    const result = await disconnectDrive({ now: new Date() }, {
+      repository: createNeonDriveControlPlaneRepository(env.databaseUrl),
+      oauth: createGoogleOAuthAdapter({
+        clientId: env.googleOAuthClientId,
+        clientSecret: env.googleOAuthClientSecret,
+      }),
+      files: createGoogleDriveFilesAdapter(),
+      cipher: createCredentialCipher(env.driveTokenKeyV1),
+    });
+    return NextResponse.json(
+      { status: result.status },
+      { headers: { "cache-control": "no-store" } },
+    );
+  } catch (error) {
+    if (error instanceof AppError) return errorResponse(error);
+    throw error;
+  }
+}

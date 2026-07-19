@@ -4,6 +4,7 @@ import { AppError, publicErrorBody, PUBLIC_CODES } from "./errors";
 describe("public application errors", () => {
   it("defines one unique stable code for each public error", () => {
     expect(new Set(PUBLIC_CODES).size).toBe(PUBLIC_CODES.length);
+    expect(PUBLIC_CODES).toContain("DRIVE_REMOTE_MISMATCH");
   });
 
   it("exposes only the stable code through a route response mapper", () => {
