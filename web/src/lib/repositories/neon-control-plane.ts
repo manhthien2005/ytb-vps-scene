@@ -1,7 +1,18 @@
 import "server-only";
-import type { JobState, JobSummary } from "@/lib/domain/control-plane";
+import { JOB_STATES, type JobState, type JobSummary } from "@/lib/domain/control-plane";
 import { createSql } from "@/lib/db/client";
 import type { AuditEvent, ControlPlaneRepository, LoginAttemptDecision, RepositoryHealth } from "./control-plane";
+
+function isJobState(value: unknown): value is JobState {
+  return typeof value === "string" && JOB_STATES.some((state) => state === value);
+}
+
+function parseJobState(value: unknown): JobState {
+  if (!isJobState(value)) {
+    throw new Error("Invalid job state returned by database");
+  }
+  return value;
+}
 
 export function createNeonControlPlaneRepository(databaseUrl: string): ControlPlaneRepository {
   const sql = createSql(databaseUrl);
@@ -15,7 +26,7 @@ export function createNeonControlPlaneRepository(databaseUrl: string): ControlPl
       return result.rows.map((row) => ({
         id: String(row.id),
         projectName: String(row.project_name),
-        state: String(row.state) as JobState,
+        state: parseJobState(row.state),
         progressPercent: Number(row.progress_percent),
         updatedAt: new Date(String(row.updated_at)).toISOString(),
       }));
