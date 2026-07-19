@@ -5,6 +5,7 @@ const { currentAdmin } = vi.hoisted(() => ({ currentAdmin: vi.fn() }));
 vi.mock("@/lib/auth/current-admin", () => ({ currentAdmin }));
 
 import { HttpError, readStrictJson, requireAdmin, requireMutationOrigin } from "./requests";
+import { AppError } from "@/lib/domain/errors";
 
 describe("request guards", () => {
   it("rejects an unauthenticated mutation before parsing its body", async () => {
@@ -71,6 +72,6 @@ describe("readStrictJson", () => {
   });
 
   it("uses a typed HTTP error", () => {
-    expect(new HttpError(400, "INVALID_REQUEST")).toBeInstanceOf(Error);
+    expect(new HttpError(400, "INVALID_REQUEST")).toBeInstanceOf(AppError);
   });
 });

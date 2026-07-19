@@ -1,12 +1,10 @@
 import { z } from "zod";
 import { currentAdmin } from "@/lib/auth/current-admin";
+import { AppError, type PublicCode } from "@/lib/domain/errors";
 
-export class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-  ) {
-    super(code);
+export class HttpError extends AppError {
+  constructor(status: number, code: PublicCode) {
+    super(code, status);
   }
 }
 
