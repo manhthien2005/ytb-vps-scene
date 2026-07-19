@@ -143,6 +143,11 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     const existing = this.artifacts.get(input.artifactId);
     if (existing) {
       if (existing.projectId === input.projectId && existing.kind === "SOURCE" && ["INVALID", "DELETED"].includes(existing.status)) {
+        const competingLiveSource = [...this.artifacts.values()].some(
+          (artifact) => artifact.id !== input.artifactId && artifact.projectId === input.projectId &&
+            artifact.kind === "SOURCE" && artifact.status !== "DELETED",
+        );
+        if (competingLiveSource) throw new Error("Project not ready or source already reserved");
         const replacement: Artifact = {
           id: input.artifactId,
           projectId: input.projectId,

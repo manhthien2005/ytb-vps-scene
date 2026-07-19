@@ -390,4 +390,40 @@ describe("FakeDriveControlPlaneRepository", () => {
       sizeBytes: 200,
     })).resolves.toMatchObject({ status: "PENDING", expectedSizeBytes: 200 });
   });
+
+  it("rejects reactivating a deleted source when another source is live", async () => {
+    const fake = new FakeDriveControlPlaneRepository();
+    const reserved = await fake.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Demo",
+    });
+    if (reserved.outcome === "CONFLICT") throw new Error("unexpected conflict");
+    const project = await fake.completeProjectFolders(
+      reserved.project.id,
+      "drive-project-folder-001",
+      "drive-input-folder-001",
+    );
+    const source = {
+      artifactId: ARTIFACT_ID,
+      projectId: project.id,
+      driveFileId: "drive-source-file-001",
+      driveParentId: project.driveInputFolderId!,
+      fileName: "source.mp4",
+      mimeType: "video/mp4" as const,
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "mp4" as const,
+    };
+    await fake.reserveSourceArtifact(source);
+    await fake.markSourceDeleted(ARTIFACT_ID);
+    await fake.reserveSourceArtifact({
+      ...source,
+      artifactId: "20000000-0000-4000-8000-000000000002",
+      driveFileId: "drive-source-file-002",
+    });
+
+    await expect(fake.reserveSourceArtifact(source))
+      .rejects.toThrow("Project not ready or source already reserved");
+  });
 });
