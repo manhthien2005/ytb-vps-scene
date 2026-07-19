@@ -12,6 +12,8 @@ const SESSION_URI =
   "https://www.googleapis.com/upload/drive/v3/files/source-file?upload_id=synthetic-capability";
 const RENEWED_SESSION_URI =
   "https://www.googleapis.com/upload/drive/v3/files/source-file?upload_id=renewed-synthetic-capability";
+const HOSTILE_SESSION_URI =
+  "https://app.example/api/private-upload?capability=hostile-mutation-marker";
 const EXPIRES_AT = "2026-07-26T00:00:00.000Z";
 const RENEWED_EXPIRES_AT = "2026-07-27T00:00:00.000Z";
 const NOW = Date.parse("2026-07-19T00:00:00.000Z");
@@ -362,6 +364,100 @@ describe("ResumableUploader", () => {
       publicCode: "UPLOAD_RETRY_EXHAUSTED",
       committedBytes: 0,
     });
+  });
+
+  it("restores the retry budget after each advancing upload acknowledgement", async () => {
+    const file = fileOfSize(16_777_217);
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const fetcher = queuedFetcher(
+      response(429),
+      response(429),
+      response(308, { Range: "bytes=0-8388607" }),
+      response(429),
+      response(429),
+      response(308, { Range: "bytes=0-16777215" }),
+      response(429),
+      response(201),
+    );
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const sleep = vi.fn<(milliseconds: number) => Promise<void>>(async () => undefined);
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep,
+    });
+
+    await uploader.start(file, session);
+
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+      1_000,
+      2_000,
+      1_000,
+      2_000,
+      1_000,
+    ]);
+    expect(fetcher.requests).toHaveLength(8);
+    expect(uploader.snapshot()).toMatchObject({
+      phase: "READY",
+      committedBytes: file.size,
+    });
+  });
+
+  it("restores the retry budget after an advancing status-query acknowledgement", async () => {
+    const file = fileOfSize(8_388_609);
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    await store.put(session);
+    const fetcher = queuedFetcher(
+      response(429),
+      response(429),
+      response(429),
+      response(429),
+      response(308, { Range: "bytes=0-8388607" }),
+      response(429),
+      response(201),
+    );
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const sleep = vi.fn<(milliseconds: number) => Promise<void>>(async () => undefined);
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep,
+    });
+
+    await uploader.resume(file, session);
+
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+      1_000,
+      2_000,
+      4_000,
+      8_000,
+      1_000,
+    ]);
+    expect(fetcher.requests.slice(0, 5).every((request) => (
+      request.headers.get("content-range") === `*/${file.size}`
+    ))).toBe(true);
+    expect(fetcher.requests.slice(5).map((request) => request.headers.get("content-range")))
+      .toEqual([
+        `bytes 8388608-${file.size - 1}/${file.size}`,
+        `bytes 8388608-${file.size - 1}/${file.size}`,
+      ]);
+    expect(uploader.snapshot().phase).toBe("READY");
   });
 
   it("sends chunk bodies directly without Authorization or Content-Length", async () => {
@@ -974,6 +1070,200 @@ describe("ResumableUploader", () => {
   });
 
   it.each([
+    ["media", "start", false],
+    ["status", "resume", true],
+  ] as const)(
+    "snapshots the accepted record before an awaited store write for a %s request",
+    async (_requestKind, method, recovering) => {
+      const file = fileOfSize();
+      const session = sessionFor(file);
+      const acceptedSession = {
+        ...session,
+        fileIdentity: { ...session.fileIdentity },
+      };
+      const store = new MemoryUploadSessionStore();
+      const writeGate = deferred<void>();
+      const originalPut = store.put.bind(store);
+      vi.spyOn(store, "put").mockImplementation(async (record) => {
+        await writeGate.promise;
+        await originalPut(record);
+      });
+      const fetcher = recovering
+        ? queuedFetcher(response(308), response(201))
+        : queuedFetcher(response(201));
+      const api = controlPlaneApi();
+      vi.mocked(api.complete).mockResolvedValue({
+        status: "SOURCE_READY",
+        actualSizeBytes: file.size,
+      });
+      const uploader = createResumableUploader({
+        fetcher: fetcher.fetcher,
+        store,
+        api,
+        now: () => NOW,
+        random: () => 0,
+        sleep: vi.fn(async () => undefined),
+      });
+
+      const running = uploader[method](file, session);
+      await vi.waitFor(() => expect(store.put).toHaveBeenCalledOnce());
+      Object.assign(session, {
+        projectId: "mutated-project",
+        artifactId: "mutated-artifact",
+        sessionUri: HOSTILE_SESSION_URI,
+        nextOffset: 123,
+        chunkBytes: 1,
+        expiresAt: "1999-01-01T00:00:00.000Z",
+      });
+      Object.assign(session.fileIdentity, {
+        displayName: "mutated-source.mp4",
+        sizeBytes: 1,
+        mimeType: "text/plain",
+        lastModified: 1,
+      });
+      writeGate.resolve();
+      await running;
+
+      expect(fetcher.requests.length).toBeGreaterThan(0);
+      expect(
+        fetcher.requests.every((request) => request.url === acceptedSession.sessionUri),
+      ).toBe(true);
+      expect(store.puts.length).toBeGreaterThan(0);
+      for (const persisted of store.puts) {
+        expect(persisted).toEqual(acceptedSession);
+      }
+      expect(api.complete).toHaveBeenCalledWith(
+        acceptedSession.projectId,
+        acceptedSession.artifactId,
+      );
+      const exposed = JSON.stringify(uploader.snapshot());
+      expect(exposed).not.toContain(HOSTILE_SESSION_URI);
+      expect(exposed).not.toContain(acceptedSession.sessionUri);
+      expect(exposed).not.toContain("upload_id");
+    },
+  );
+
+  it.each([
+    ["media", "start", false],
+    ["status", "resume", true],
+  ] as const)(
+    "isolates a %s request from a persistence effect that mutates to another Drive destination",
+    async (_requestKind, method, recovering) => {
+      const file = fileOfSize();
+      const session = sessionFor(file);
+      const store = new MemoryUploadSessionStore();
+      const originalPut = store.put.bind(store);
+      vi.spyOn(store, "put").mockImplementation(async (record) => {
+        await originalPut(record);
+        (record as { sessionUri: string }).sessionUri = RENEWED_SESSION_URI;
+      });
+      const fetcher = recovering
+        ? queuedFetcher(response(308), response(201))
+        : queuedFetcher(response(201));
+      const api = controlPlaneApi();
+      vi.mocked(api.complete).mockResolvedValue({
+        status: "SOURCE_READY",
+        actualSizeBytes: file.size,
+      });
+      const uploader = createResumableUploader({
+        fetcher: fetcher.fetcher,
+        store,
+        api,
+        now: () => NOW,
+        random: () => 0,
+        sleep: vi.fn(async () => undefined),
+      });
+
+      await uploader[method](file, session);
+
+      expect(fetcher.requests.length).toBeGreaterThan(0);
+      expect(fetcher.requests.every((request) => request.url === SESSION_URI)).toBe(true);
+      expect(JSON.stringify(uploader.snapshot())).not.toContain("upload_id");
+    },
+  );
+
+  it("revalidates a renewed destination after persistence and before media fetch", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const fetcher = queuedFetcher(response(404), response(201));
+    const api = controlPlaneApi();
+    let sessionUriReads = 0;
+    vi.mocked(api.renewSession).mockResolvedValue({
+      artifactId: session.artifactId,
+      get sessionUri() {
+        sessionUriReads += 1;
+        return sessionUriReads === 1 ? RENEWED_SESSION_URI : HOSTILE_SESSION_URI;
+      },
+      chunkBytes: 8_388_608,
+      expiresAt: RENEWED_EXPIRES_AT,
+    });
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await expect(uploader.start(file, session)).rejects.toMatchObject({
+      code: "UPLOAD_REMOTE_MISMATCH",
+    });
+
+    expect(api.renewSession).toHaveBeenCalledOnce();
+    expect(fetcher.requests).toHaveLength(1);
+    expect(fetcher.requests[0]!.url).toBe(SESSION_URI);
+    expect(JSON.stringify(uploader.snapshot())).not.toContain(HOSTILE_SESSION_URI);
+  });
+
+  it("isolates the accepted file identity from renewal API mutation", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const acceptedIdentity = { ...session.fileIdentity };
+    const store = new MemoryUploadSessionStore();
+    const fetcher = queuedFetcher(response(404), response(201));
+    const api = controlPlaneApi();
+    vi.mocked(api.renewSession).mockImplementation(async (_projectId, identity) => {
+      Object.assign(identity, {
+        displayName: "mutated-by-renewal.mp4",
+        sizeBytes: 1,
+        mimeType: "text/plain",
+        lastModified: 1,
+      });
+      return {
+        artifactId: session.artifactId,
+        sessionUri: RENEWED_SESSION_URI,
+        chunkBytes: 8_388_608,
+        expiresAt: RENEWED_EXPIRES_AT,
+      };
+    });
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await uploader.start(file, session);
+
+    expect(store.puts.length).toBeGreaterThan(1);
+    for (const persisted of store.puts) {
+      expect(persisted.fileIdentity).toEqual(acceptedIdentity);
+    }
+  });
+
+  it.each([
     ["non-Drive URI", { sessionUri: "https://app.example/api/upload" }],
     ["different artifact", { artifactId: "c0000000-0000-4000-8000-000000000003" }],
   ])("rejects a renewed capability with a %s", async (_name, override) => {
@@ -1335,6 +1625,199 @@ describe("ResumableUploader", () => {
 
     expect(await store.get(session.projectId, session.artifactId)).toBeNull();
     expect(uploader.snapshot().phase).toBe("CANCELLED");
+  });
+
+  it("rejects cancellation after SOURCE_READY is claimed during store deletion", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const deleteGate = deferred<void>();
+    const originalDelete = store.delete.bind(store);
+    vi.spyOn(store, "delete").mockImplementation(async (projectId, artifactId) => {
+      await deleteGate.promise;
+      await originalDelete(projectId, artifactId);
+    });
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    vi.mocked(api.cancel).mockRejectedValue(
+      new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503),
+    );
+    const uploader = createResumableUploader({
+      fetcher: queuedFetcher(response(201)).fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+    const phases: string[] = [];
+    uploader.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    const running = uploader.start(file, session);
+    await vi.waitFor(() => expect(store.delete).toHaveBeenCalledOnce());
+    const cancelResult = await uploader.cancel().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    deleteGate.resolve();
+    await running;
+
+    expect(cancelResult).toMatchObject({ code: "INVALID_REQUEST" });
+    expect(api.cancel).not.toHaveBeenCalled();
+    expect(phases).not.toContain("PAUSED_ERROR");
+    expect(phases.filter((phase) => phase === "READY" || phase === "CANCELLED"))
+      .toEqual(["READY"]);
+    expect(await store.get(session.projectId, session.artifactId)).toBeNull();
+    expect(uploader.snapshot().phase).toBe("READY");
+  });
+
+  it("keeps READY when an earlier concurrent cancellation later rejects", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const completionResponse = deferred<Readonly<{
+      status: "SOURCE_READY";
+      actualSizeBytes: number;
+    }>>();
+    const cancellationResponse = deferred<void>();
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockReturnValue(completionResponse.promise);
+    vi.mocked(api.cancel).mockReturnValue(cancellationResponse.promise);
+    const deleteSpy = vi.spyOn(store, "delete");
+    const uploader = createResumableUploader({
+      fetcher: queuedFetcher(response(201)).fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+    const phases: string[] = [];
+    uploader.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    const running = uploader.start(file, session);
+    await vi.waitFor(() => expect(api.complete).toHaveBeenCalledOnce());
+    const cancellation = uploader.cancel().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
+    completionResponse.resolve({ status: "SOURCE_READY", actualSizeBytes: file.size });
+    await Promise.resolve();
+    await Promise.resolve();
+    cancellationResponse.reject(new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503));
+
+    const cancellationResult = await cancellation;
+    await running;
+
+    expect(cancellationResult).toBeNull();
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(phases).not.toContain("PAUSED_ERROR");
+    expect(phases.filter((phase) => phase === "READY" || phase === "CANCELLED"))
+      .toEqual(["READY"]);
+    expect(await store.get(session.projectId, session.artifactId)).toBeNull();
+    expect(uploader.snapshot().phase).toBe("READY");
+  });
+
+  it("keeps confirmed cancellation when stale SOURCE_READY arrives later", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const completionResponse = deferred<Readonly<{
+      status: "SOURCE_READY";
+      actualSizeBytes: number;
+    }>>();
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockReturnValue(completionResponse.promise);
+    vi.mocked(api.cancel).mockResolvedValue(undefined);
+    const deleteSpy = vi.spyOn(store, "delete");
+    const uploader = createResumableUploader({
+      fetcher: queuedFetcher(response(201)).fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+    const phases: string[] = [];
+    uploader.subscribe((snapshot) => phases.push(snapshot.phase));
+
+    const running = uploader.start(file, session);
+    await vi.waitFor(() => expect(api.complete).toHaveBeenCalledOnce());
+    await uploader.cancel();
+    completionResponse.resolve({ status: "SOURCE_READY", actualSizeBytes: file.size });
+    await running;
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(phases).not.toContain("READY");
+    expect(phases.filter((phase) => phase === "READY" || phase === "CANCELLED"))
+      .toEqual(["CANCELLED"]);
+    expect(await store.get(session.projectId, session.artifactId)).toBeNull();
+    expect(uploader.snapshot().phase).toBe("CANCELLED");
+  });
+
+  it("keeps READY terminal when capability cleanup rejects", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    vi.spyOn(store, "delete").mockRejectedValue(new Error("synthetic cleanup failure"));
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const uploader = createResumableUploader({
+      fetcher: queuedFetcher(response(201)).fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await expect(uploader.start(file, session)).rejects.toMatchObject({
+      code: "DRIVE_TEMPORARILY_UNAVAILABLE",
+    });
+
+    expect(uploader.snapshot().phase).toBe("READY");
+    await expect(uploader.start(file, session)).rejects.toMatchObject({
+      code: "INVALID_REQUEST",
+    });
+  });
+
+  it("keeps confirmed cancellation terminal and reports capability cleanup rejection", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    vi.spyOn(store, "delete").mockRejectedValue(new Error("synthetic cleanup failure"));
+    const uploadResponse = deferred<Response>();
+    const fetcher = queuedFetcher(() => uploadResponse.promise);
+    const api = controlPlaneApi();
+    vi.mocked(api.cancel).mockResolvedValue(undefined);
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+    const running = uploader.start(file, session);
+    await vi.waitFor(() => expect(fetcher.requests).toHaveLength(1));
+
+    await expect(uploader.cancel()).rejects.toMatchObject({
+      code: "DRIVE_TEMPORARILY_UNAVAILABLE",
+    });
+    uploadResponse.resolve(response(201));
+    await running;
+
+    expect(uploader.snapshot().phase).toBe("CANCELLED");
+    await expect(uploader.resume(file, session)).rejects.toMatchObject({
+      code: "INVALID_REQUEST",
+    });
   });
 
   it("notifies subscribers with sanitized snapshots and honors unsubscribe", async () => {

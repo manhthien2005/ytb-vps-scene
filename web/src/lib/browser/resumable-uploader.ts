@@ -2,6 +2,23 @@ import type { StoredUploadSession, UploadSessionStore } from "./upload-store";
 import { AppError } from "../domain/errors";
 import { nextRetry, parseAcknowledgedRange } from "../domain/upload";
 
+function snapshotSession(record: StoredUploadSession): StoredUploadSession {
+  return {
+    projectId: record.projectId,
+    artifactId: record.artifactId,
+    sessionUri: record.sessionUri,
+    fileIdentity: {
+      displayName: record.fileIdentity.displayName,
+      sizeBytes: record.fileIdentity.sizeBytes,
+      mimeType: record.fileIdentity.mimeType,
+      lastModified: record.fileIdentity.lastModified,
+    },
+    nextOffset: record.nextOffset,
+    chunkBytes: record.chunkBytes,
+    expiresAt: record.expiresAt,
+  };
+}
+
 function validDriveSessionUri(value: string): boolean {
   if (value.length < 1 || value.length > 4_096 || !/^[\x20-\x7E]+$/.test(value)) return false;
   try {
@@ -94,6 +111,7 @@ export interface ResumableUploader {
 export function createResumableUploader(
   dependencies: ResumableUploaderDependencies,
 ): ResumableUploader {
+  let terminalOutcome: "READY" | "CANCELLED" | null = null;
   let value: UploadSnapshot = {
     phase: "IDLE",
     committedBytes: 0,
@@ -113,6 +131,7 @@ export function createResumableUploader(
   const waitInterruptors = new Set<() => void>();
 
   function publish(next: UploadSnapshot): void {
+    if (terminalOutcome !== null && next.phase !== terminalOutcome) return;
     value = next;
     for (const listener of listeners) {
       try {
@@ -124,6 +143,7 @@ export function createResumableUploader(
   }
 
   async function driveFetch(input: string, init: RequestInit): Promise<Response> {
+    if (!validDriveSessionUri(input)) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
     if (disposed) throw new DOMException("The operation was aborted", "AbortError");
     const controller = new AbortController();
     activeController = controller;
@@ -160,7 +180,7 @@ export function createResumableUploader(
   }
 
   async function persist(record: StoredUploadSession): Promise<void> {
-    const write = dependencies.store.put(record);
+    const write = dependencies.store.put(snapshotSession(record));
     activeStoreWrite = write;
     try {
       await write;
@@ -178,17 +198,17 @@ export function createResumableUploader(
       disposed ||
       runActive ||
       cancelInProgress ||
-      value.phase === "READY" ||
-      value.phase === "CANCELLED"
+      terminalOutcome !== null
     ) {
       throw new AppError("INVALID_REQUEST", 400);
     }
     runActive = true;
+    const initialRecord = snapshotSession(initial);
     pauseRequested = false;
     cancelRequested = false;
     publish({
       phase: "UPLOADING",
-      committedBytes: initial.nextOffset,
+      committedBytes: initialRecord.nextOffset,
       totalBytes: file.size,
       bytesPerSecond: 0,
       publicCode: null,
@@ -197,16 +217,16 @@ export function createResumableUploader(
     try {
       if (disposed) throw new AppError("INVALID_REQUEST", 400);
       if (
-        file.name !== initial.fileIdentity.displayName ||
-        file.size !== initial.fileIdentity.sizeBytes ||
-        file.type !== initial.fileIdentity.mimeType ||
-        file.lastModified !== initial.fileIdentity.lastModified ||
-        !validDriveSessionUri(initial.sessionUri)
+        file.name !== initialRecord.fileIdentity.displayName ||
+        file.size !== initialRecord.fileIdentity.sizeBytes ||
+        file.type !== initialRecord.fileIdentity.mimeType ||
+        file.lastModified !== initialRecord.fileIdentity.lastModified ||
+        !validDriveSessionUri(initialRecord.sessionUri)
       ) {
         throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       }
-      currentRecord = initial;
-      let record = initial;
+      currentRecord = initialRecord;
+      let record = initialRecord;
       let failedAttempts = 0;
       const locallyExpired = Date.parse(record.expiresAt) <= dependencies.now();
       let action: "UPLOAD" | "COMPLETE" | "QUERY" | "RENEW" = record.nextOffset === file.size
@@ -232,7 +252,7 @@ export function createResumableUploader(
       if (locallyExpired && action === "RENEW") {
         await recordFailure();
       } else if (!locallyExpired) {
-        await persist(initial);
+        await persist(initialRecord);
       }
 
       while (true) {
@@ -258,7 +278,8 @@ export function createResumableUploader(
             headers,
             body: file.slice(record.nextOffset, endExclusive, file.type),
           });
-        } catch {
+        } catch (error) {
+          if (error instanceof AppError) throw error;
           if (disposed || cancelRequested) return;
           if (isFinalChunk) {
             // A rejected final request can mean Drive committed the bytes but
@@ -285,6 +306,7 @@ export function createResumableUploader(
           record = { ...record, nextOffset };
           await persist(record);
           if (disposed || cancelRequested) return;
+          failedAttempts = 0;
           currentRecord = record;
           publish({ ...value, committedBytes: nextOffset });
           action = nextOffset === file.size ? "COMPLETE" : "UPLOAD";
@@ -328,7 +350,7 @@ export function createResumableUploader(
         try {
           renewed = await dependencies.api.renewSession(
             record.projectId,
-            record.fileIdentity,
+            { ...record.fileIdentity },
           );
         } catch (error) {
           if (disposed || cancelRequested) return;
@@ -381,20 +403,22 @@ export function createResumableUploader(
           action = "COMPLETE";
           continue;
         }
-        if (cancelRequested) return;
         if (completion.status === "SOURCE_READY") {
           if (completion.actualSizeBytes !== file.size) {
             throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
           }
-          await dependencies.store.delete(record.projectId, record.artifactId);
+          if (terminalOutcome === "CANCELLED") return;
+          terminalOutcome = "READY";
           currentRecord = null;
           publish({
             ...value,
             phase: "READY",
             committedBytes: completion.actualSizeBytes,
           });
+          await dependencies.store.delete(record.projectId, record.artifactId);
           return;
         }
+        if (cancelRequested) return;
         await recordFailure();
         action = "QUERY";
         continue;
@@ -406,7 +430,8 @@ export function createResumableUploader(
           method: "PUT",
           headers: new Headers({ "content-range": `*/${file.size}` }),
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof AppError) throw error;
         if (disposed || cancelRequested) return;
         await recordFailure();
         action = verifying ? "COMPLETE" : "QUERY";
@@ -439,11 +464,13 @@ export function createResumableUploader(
         continue;
       }
       if (query.status !== 308) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
+      const previousOffset = record.nextOffset;
       const nextOffset = parseAcknowledgedRange(query.headers.get("range"));
       if (nextOffset > file.size) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       record = { ...record, nextOffset };
       await persist(record);
       if (disposed || cancelRequested) return;
+      if (nextOffset > previousOffset) failedAttempts = 0;
       currentRecord = record;
       action = nextOffset === file.size ? "COMPLETE" : "UPLOAD";
       verifying = action === "COMPLETE";
@@ -454,7 +481,7 @@ export function createResumableUploader(
       });
       }
     } catch (error) {
-      if (disposed || cancelRequested) return;
+      if ((disposed || cancelRequested) && terminalOutcome === null) return;
       const safeError = error instanceof AppError
         ? error
         : new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
@@ -488,7 +515,7 @@ export function createResumableUploader(
     },
 
     async cancel() {
-      if (currentRecord === null || cancelInProgress || disposed) {
+      if (currentRecord === null || cancelInProgress || disposed || terminalOutcome !== null) {
         throw new AppError("INVALID_REQUEST", 400);
       }
       const record = currentRecord;
@@ -497,30 +524,37 @@ export function createResumableUploader(
       cancelRequested = true;
       interruptWaiters();
       activeController?.abort();
+      let claimedCancellation = false;
       try {
         await dependencies.api.cancel(record.projectId, record.artifactId);
+        if (terminalOutcome !== null) return;
+        terminalOutcome = "CANCELLED";
+        claimedCancellation = true;
+        currentRecord = null;
+        publish({
+          ...value,
+          phase: "CANCELLED",
+          publicCode: null,
+        });
         const pendingWrite = activeStoreWrite;
         if (pendingWrite !== null) await pendingWrite.catch(() => undefined);
         await dependencies.store.delete(record.projectId, record.artifactId);
       } catch (error) {
+        if (terminalOutcome !== null && !claimedCancellation) return;
         const safeError = error instanceof AppError
           ? error
           : new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
-        publish({
-          ...value,
-          phase: "PAUSED_ERROR",
-          publicCode: safeError.code,
-        });
+        if (!claimedCancellation) {
+          publish({
+            ...value,
+            phase: "PAUSED_ERROR",
+            publicCode: safeError.code,
+          });
+        }
         throw safeError;
       } finally {
         cancelInProgress = false;
       }
-      currentRecord = null;
-      publish({
-        ...value,
-        phase: "CANCELLED",
-        publicCode: null,
-      });
     },
 
     subscribe(listener) {
