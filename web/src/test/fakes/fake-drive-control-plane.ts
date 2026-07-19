@@ -117,6 +117,17 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return { outcome: "CREATED", project: structuredClone(project) };
   }
 
+  async getProject(projectId: string): Promise<Project | null> {
+    const stored = this.projects.get(projectId);
+    return stored ? structuredClone(stored.project) : null;
+  }
+
+  async markProjectFailed(projectId: string): Promise<void> {
+    if (this.projects.get(projectId)?.project.status === "PROVISIONING") {
+      this.updateProject(projectId, { status: "FAILED" });
+    }
+  }
+
   async completeProjectFolders(projectId: string, projectFolderId: string, inputFolderId: string): Promise<Project> {
     const stored = this.projects.get(projectId);
     if (!stored || (stored.project.status !== "PROVISIONING" && (

@@ -52,6 +52,8 @@ export interface DriveControlPlaneRepository {
   setCredentialStatus(status: "REAUTH_REQUIRED" | "REVOKE_PENDING" | "DISCONNECTED"): Promise<void>;
   hasDriveContent(): Promise<boolean>;
   reserveProject(input: ProjectReservation): Promise<ProjectReservationResult>;
+  getProject(projectId: string): Promise<Project | null>;
+  markProjectFailed(projectId: string): Promise<void>;
   completeProjectFolders(projectId: string, projectFolderId: string, inputFolderId: string): Promise<Project>;
   listProjects(): Promise<readonly Project[]>;
   reserveSourceArtifact(input: SourceReservation): Promise<Artifact>;

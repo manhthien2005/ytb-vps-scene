@@ -84,6 +84,86 @@ describe("Drive control-plane repository", () => {
     });
   });
 
+  it("returns null when a project is absent", async () => {
+    await expect(repo().getProject(PROJECT_ID)).resolves.toBeNull();
+  });
+
+  it("returns every validated field for an existing project", async () => {
+    const repository = repo();
+    const reserved = await repository.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Demo",
+    });
+    if (reserved.outcome === "CONFLICT") throw new Error("unexpected conflict");
+
+    await expect(repository.getProject(reserved.project.id)).resolves.toEqual(reserved.project);
+  });
+
+  it.each([
+    ["id", "wrong"],
+    ["status", "WRONG"],
+    ["name", " Demo"],
+    ["source_status", "WRONG"],
+    ["drive_project_folder_id", "short"],
+    ["drive_input_folder_id", "short"],
+    ["created_at", "not-a-date"],
+    ["updated_at", "not-a-date"],
+  ])("fails closed when getProject returns an invalid %s", async (field, value) => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{
+        id: PROJECT_ID,
+        status: "READY",
+        name: "Demo",
+        source_status: "NO_SOURCE",
+        drive_project_folder_id: "drive-project-folder-001",
+        drive_input_folder_id: "drive-input-folder-001",
+        created_at: NOW,
+        updated_at: NOW,
+        [field]: value,
+      }],
+    });
+
+    await expect(createDriveControlPlaneRepository({ query }).getProject(PROJECT_ID))
+      .rejects.toThrow("Invalid project row returned by database");
+  });
+
+  it("marks only provisioning projects as failed", async () => {
+    const repository = repo();
+    const provisioning = await repository.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Provisioning",
+    });
+    const ready = await repository.reserveProject({
+      idempotencyKeyHash: "c".repeat(64),
+      requestHash: "d".repeat(64),
+      name: "Ready",
+    });
+    const failed = await repository.reserveProject({
+      idempotencyKeyHash: "e".repeat(64),
+      requestHash: "f".repeat(64),
+      name: "Failed",
+    });
+    if (provisioning.outcome === "CONFLICT" || ready.outcome === "CONFLICT" || failed.outcome === "CONFLICT") {
+      throw new Error("unexpected conflict");
+    }
+    await repository.completeProjectFolders(
+      ready.project.id,
+      "drive-project-folder-001",
+      "drive-input-folder-001",
+    );
+    await db.query("update projects set status='FAILED' where id=$1", [failed.project.id]);
+
+    await repository.markProjectFailed(provisioning.project.id);
+    await repository.markProjectFailed(ready.project.id);
+    await repository.markProjectFailed(failed.project.id);
+
+    await expect(repository.getProject(provisioning.project.id)).resolves.toMatchObject({ status: "FAILED" });
+    await expect(repository.getProject(ready.project.id)).resolves.toMatchObject({ status: "READY" });
+    await expect(repository.getProject(failed.project.id)).resolves.toMatchObject({ status: "FAILED" });
+  });
+
   it("serializes concurrent project reservations for the same idempotency key", async () => {
     const repository = repo();
     const input = { idempotencyKeyHash: HASH_A, requestHash: HASH_B, name: "Demo" } as const;

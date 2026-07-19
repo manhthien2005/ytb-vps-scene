@@ -357,6 +357,22 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return { outcome: project.status === "PROVISIONING" ? "RESUME" : "EXISTING", project };
     },
 
+    async getProject(projectId) {
+      const result = await sql.query(
+        `select ${projectColumns()} from projects where id=$1`,
+        [projectId],
+      );
+      return result.rows.length === 0 ? null : parseProject(result.rows[0]!);
+    },
+
+    async markProjectFailed(projectId) {
+      await sql.query(
+        `update projects set status='FAILED',updated_at=now()
+         where id=$1 and status='PROVISIONING'`,
+        [projectId],
+      );
+    },
+
     async completeProjectFolders(projectId, projectFolderId, inputFolderId) {
       const result = await sql.query(
         `update projects set
