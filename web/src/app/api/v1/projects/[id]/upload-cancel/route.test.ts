@@ -67,6 +67,19 @@ describe("/api/v1/projects/[id]/upload-cancel", () => {
     service.cancel.mockResolvedValue({ status: "CANCELLED" });
   });
 
+  it("contains invalid server configuration in the stable no-store envelope", async () => {
+    process.env.SESSION_SECRET = "private-invalid-config-detail";
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain("private-invalid-config-detail");
+    expect(service.cancel).not.toHaveBeenCalled();
+  });
+
   it("authenticates before Origin, path, body, or service", async () => {
     currentAdmin.mockResolvedValue(false);
     const response = await POST(

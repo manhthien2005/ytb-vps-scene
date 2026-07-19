@@ -69,8 +69,8 @@ async function projectId(context: RouteContext): Promise<string> {
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
-  const env = parseServerEnv(process.env);
   try {
+    const env = parseServerEnv(process.env);
     await requireAdmin(request, env.sessionSecret);
     requireMutationOrigin(request, env.appOrigin);
     const id = await projectId(context);
@@ -80,10 +80,19 @@ export async function POST(request: NextRequest, context: RouteContext) {
       artifactId: body.artifactId,
       now: new Date(),
     });
-    return NextResponse.json(result, {
-      status: result.status === "SOURCE_READY" ? 200 : 202,
-      headers: RESPONSE_HEADERS,
-    });
+    if (result.status === "SOURCE_READY") {
+      return NextResponse.json({
+        status: "SOURCE_READY",
+        actualSizeBytes: result.actualSizeBytes,
+      }, { status: 200, headers: RESPONSE_HEADERS });
+    }
+    if (result.status === "UPLOAD_PENDING") {
+      return NextResponse.json({
+        status: "UPLOAD_PENDING",
+        retryAfterMs: result.retryAfterMs,
+      }, { status: 202, headers: RESPONSE_HEADERS });
+    }
+    throw new Error("Unexpected upload completion result");
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
     return unexpectedErrorResponse();

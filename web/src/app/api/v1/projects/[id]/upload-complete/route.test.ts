@@ -69,6 +69,19 @@ describe("/api/v1/projects/[id]/upload-complete", () => {
     service.complete.mockResolvedValue({ status: "SOURCE_READY", actualSizeBytes: 524_288 });
   });
 
+  it("contains invalid server configuration in the stable no-store envelope", async () => {
+    process.env.SESSION_SECRET = "private-invalid-config-detail";
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain("private-invalid-config-detail");
+    expect(service.complete).not.toHaveBeenCalled();
+  });
+
   it("authenticates before Origin, path, body, or service", async () => {
     currentAdmin.mockResolvedValue(false);
     const response = await POST(
@@ -123,6 +136,41 @@ describe("/api/v1/projects/[id]/upload-complete", () => {
       artifactId: ARTIFACT_ID,
       now: expect.any(Date),
     });
+  });
+
+  it.each([
+    [{ status: "SOURCE_READY", actualSizeBytes: 524_288 }, 200],
+    [{ status: "UPLOAD_PENDING", retryAfterMs: 1_000 }, 202],
+  ])("projects only the documented completion DTO for HTTP %s", async (documented, status) => {
+    service.complete.mockResolvedValue({
+      ...documented,
+      sessionUri: "sensitive-capability-sentinel",
+      driveFileId: "sensitive-provider-id-sentinel",
+      providerBody: "sensitive-provider-body-sentinel",
+    });
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual(documented);
+  });
+
+  it("rejects an unexpected runtime completion status with the stable envelope", async () => {
+    service.complete.mockResolvedValue({
+      status: "SENSITIVE_PROVIDER_STATUS_SENTINEL",
+      retryAfterMs: 1_000,
+      providerBody: "sensitive-provider-body-sentinel",
+    });
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain("SENSITIVE_PROVIDER_STATUS_SENTINEL");
+    expect(body).not.toContain("sensitive-provider-body-sentinel");
   });
 
   it("returns only stable no-store error bodies", async () => {

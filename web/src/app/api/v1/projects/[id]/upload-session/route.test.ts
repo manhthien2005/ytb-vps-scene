@@ -99,6 +99,19 @@ describe("/api/v1/projects/[id]/upload-session", () => {
     service.createSession.mockResolvedValue(SESSION);
   });
 
+  it("contains invalid server configuration in the secured stable envelope", async () => {
+    process.env.SESSION_SECRET = "private-invalid-config-detail";
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(500);
+    expectSessionSecurityHeaders(response);
+    const body = JSON.stringify(await response.json());
+    expect(body).toBe('{"code":"INTERNAL_ERROR"}');
+    expect(body).not.toContain("private-invalid-config-detail");
+    expect(service.createSession).not.toHaveBeenCalled();
+  });
+
   it("authenticates before Origin, path, body, or service", async () => {
     currentAdmin.mockResolvedValue(false);
     const response = await POST(

@@ -69,8 +69,8 @@ async function projectId(context: RouteContext): Promise<string> {
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
-  const env = parseServerEnv(process.env);
   try {
+    const env = parseServerEnv(process.env);
     await requireAdmin(request, env.sessionSecret);
     requireMutationOrigin(request, env.appOrigin);
     const id = await projectId(context);
