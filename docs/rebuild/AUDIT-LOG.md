@@ -745,3 +745,19 @@ historical evidence.
   placeholders. The runbook explicitly requires replacing the Neon URL, admin
   hash, and random 64-character session secret while keeping the plaintext
   admin key private.
+
+## 2026-07-19T08:30:27+07:00 — Phase 8 dependency-security correction
+
+- A clean `npm ci` followed by `npm audit --audit-level=low` reproduced five
+  published-advisory findings: two low, one moderate, one high, and one
+  critical vulnerability.
+- Exact patch upgrades are Next.js `16.2.0` to `16.2.10`, matching
+  `eslint-config-next` `16.2.0` to `16.2.10`, Vitest `3.2.4` to `3.2.7`, and
+  ESLint `9.25.1` to `9.39.5`. Next.js `16.2.10` still pins vulnerable PostCSS
+  `8.4.31`, so its dependency is narrowly overridden to PostCSS `8.5.19`.
+- After a fresh clean install, `npm audit --audit-level=low` reported zero
+  vulnerabilities. All 71 Vitest tests in 16 files, typecheck, lint, and the
+  Next.js `16.2.10` production build passed.
+- This is local Node 24 evidence with the expected Node 22 engine warning. The
+  project and CI pins remain Node 22; this entry does not claim that hosted
+  GitHub Actions executed.
