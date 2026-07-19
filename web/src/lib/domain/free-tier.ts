@@ -21,6 +21,12 @@ export type ProjectedUpload = Readonly<{
   softPercent: number;
 }>;
 
+function parseCanonicalUtcTimestamp(value: string): number | null {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  return new Date(milliseconds).toISOString() === value ? milliseconds : null;
+}
+
 export function assessFreeTier(value: FreeTierSnapshot): FreeTierDecision {
   const numbers = [value.neonBytes, value.neonLimitBytes, value.driveBytes, value.driveLimitBytes];
   if (
@@ -51,9 +57,9 @@ export function assessProjectedUpload(value: ProjectedUpload): FreeTierDecision 
     return { mode: "READ_ONLY", reasons: ["QUOTA_INVALID"] };
   }
 
-  const observedAt = Date.parse(value.observedAt);
-  const now = Date.parse(value.now);
-  if (!Number.isFinite(observedAt) || !Number.isFinite(now) || observedAt > now || now - observedAt > value.staleAfterSeconds * 1_000) {
+  const observedAt = parseCanonicalUtcTimestamp(value.observedAt);
+  const now = parseCanonicalUtcTimestamp(value.now);
+  if (observedAt === null || now === null || observedAt > now || now - observedAt > value.staleAfterSeconds * 1_000) {
     return { mode: "READ_ONLY", reasons: ["DRIVE_QUOTA_STALE"] };
   }
 

@@ -17,6 +17,10 @@ export class AppError extends Error {
   }
 }
 
+export function publicErrorBody(error: AppError): Readonly<{ code: PublicCode }> {
+  return { code: error.code };
+}
+
 export const DRIVE_AUDIT_EVENTS = [
   "DRIVE_CONNECT_STARTED", "DRIVE_CONNECTED", "DRIVE_REAUTH_REQUIRED",
   "DRIVE_DISCONNECTED", "PROJECT_CREATED", "UPLOAD_SESSION_CREATED",
