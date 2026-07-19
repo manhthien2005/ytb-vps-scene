@@ -55,7 +55,10 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
         `insert into auth_login_windows(key_hash,window_started,attempt_count,blocked_until)
          values ($1,$2,1,null)
          on conflict(key_hash) do update set
-           window_started = case when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then excluded.window_started else auth_login_windows.window_started end,
+           window_started = case
+             when auth_login_windows.blocked_until > excluded.window_started then auth_login_windows.window_started
+             when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then excluded.window_started
+             else auth_login_windows.window_started end,
            attempt_count = case
              when auth_login_windows.blocked_until > excluded.window_started then auth_login_windows.attempt_count
              when auth_login_windows.window_started <= excluded.window_started - interval '15 minutes' then 1

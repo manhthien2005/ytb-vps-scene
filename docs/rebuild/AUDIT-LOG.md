@@ -731,3 +731,17 @@ historical evidence.
   admin-hash configuration, reachable final-failure transitions, a real PGlite
   active-block saturation regression, an exact Drive 90-percent threshold, and
   the Neon HTTP local-runtime runbook contract.
+
+## 2026-07-19T08:20:00+07:00 — Phase 8 final-review follow-up
+
+- Correction to the preceding final-review evidence: the follow-up regression
+  raises the full Vitest result to 71 passing tests in 16 files. Typecheck,
+  lint, and the Next.js production build passed again with non-secret synthetic
+  environment values.
+- A real PGlite timeline now proves that an active login block does not renew
+  its original window, retains stable Retry-After values, and resets to one
+  allowed attempt exactly at the advertised expiry.
+- The tracked environment example now contains deliberately unusable
+  placeholders. The runbook explicitly requires replacing the Neon URL, admin
+  hash, and random 64-character session secret while keeping the plaintext
+  admin key private.
