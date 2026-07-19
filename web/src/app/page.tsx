@@ -1,12 +1,21 @@
-export default function HomePage() {
-  return (
-    <main className="page-shell">
-      <section className="hero-card">
-        <p className="eyebrow">Control plane cá nhân</p>
-        <h1>YTB VPS Studio</h1>
-        <p>Chuẩn bị dự án trên web, chỉ thuê GPU khi cần render.</p>
-        <div className="status-pill" role="status">Chưa gắn GPU VPS</div>
-      </section>
-    </main>
-  );
+import { DashboardShell } from "@/components/dashboard-shell";
+import { LoginForm } from "@/components/login-form";
+import { currentAdmin } from "@/lib/auth/current-admin";
+import { parseServerEnv } from "@/lib/config/env";
+import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
+
+export const dynamic = "force-dynamic";
+
+export default async function HomePage() {
+  const env = parseServerEnv(process.env);
+  if (!(await currentAdmin(env.sessionSecret))) {
+    return (
+      <main className="page-shell">
+        <LoginForm />
+      </main>
+    );
+  }
+
+  const jobs = await createNeonControlPlaneRepository(env.databaseUrl).listJobs();
+  return <DashboardShell workerOnline={false} jobs={jobs} />;
 }
