@@ -83,6 +83,19 @@ describe("Drive control-plane repository", () => {
     });
   });
 
+  it("serializes concurrent project reservations for the same idempotency key", async () => {
+    const repository = repo();
+    const input = { idempotencyKeyHash: HASH_A, requestHash: HASH_B, name: "Demo" } as const;
+    const results = await Promise.all([
+      repository.reserveProject(input),
+      repository.reserveProject(input),
+    ]);
+
+    expect(results.map((result) => result.outcome).sort()).toEqual(["CREATED", "RESUME"]);
+    const projectIds = results.flatMap((result) => result.outcome === "CONFLICT" ? [] : [result.project.id]);
+    expect(new Set(projectIds).size).toBe(1);
+  });
+
   it("fails closed when project rows contain invalid data", async () => {
     await db.exec("alter table projects drop constraint projects_status_check");
     await db.query(
@@ -125,6 +138,42 @@ describe("Drive control-plane repository", () => {
       accountHint: "a***@example.com",
       rootFolderId: "drive-root-folder-001",
     });
+  });
+
+  it("rejects noncanonical credential encodings before writing", async () => {
+    const repository = repo();
+    await expect(repository.saveConnectedCredential({
+      status: "CONNECTED",
+      envelope: {
+        ciphertext: "***",
+        nonce: Buffer.alloc(12, 1).toString("base64url"),
+        authTag: Buffer.alloc(16, 2).toString("base64url"),
+        keyVersion: 1,
+        scope: DRIVE_FILE_SCOPE,
+      },
+      accountPermissionIdHash: HASH_A,
+      accountHint: "a***@example.com",
+      rootFolderId: "drive-root-folder-001",
+    })).rejects.toThrow("Invalid encrypted credential");
+  });
+
+  it("fails closed when a credential row exposes an unmasked account hint", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{
+        status: "CONNECTED",
+        ciphertext: Buffer.from("ciphertext"),
+        nonce: Buffer.alloc(12, 1),
+        auth_tag: Buffer.alloc(16, 2),
+        key_version: 1,
+        scope: DRIVE_FILE_SCOPE,
+        account_hint: "full@example.com",
+        account_permission_id_hash: HASH_A,
+        root_folder_id: "drive-root-folder-001",
+      }],
+    });
+
+    await expect(createDriveControlPlaneRepository({ query }).getCredential())
+      .rejects.toThrow("Invalid credential row returned by database");
   });
 
   it("persists the complete source artifact lifecycle without session URIs", async () => {
@@ -187,6 +236,82 @@ describe("Drive control-plane repository", () => {
       .rejects.toThrow("Artifact reservation mismatch");
   });
 
+  it.each(["INVALID", "DELETED"] as const)(
+    "atomically resets a %s source reservation for a new upload",
+    async (terminalStatus) => {
+      const project = await readyProject();
+      const repository = repo();
+      const source = {
+        artifactId: ARTIFACT_ID,
+        projectId: project.id,
+        driveFileId: "drive-source-file-001",
+        driveParentId: project.driveInputFolderId!,
+        fileName: "source.mp4",
+        mimeType: "video/mp4" as const,
+        sizeBytes: 100,
+        lastModified: 1,
+        normalizedExtension: "mp4" as const,
+      };
+      await repository.reserveSourceArtifact(source);
+      if (terminalStatus === "INVALID") {
+        await repository.markSourceInvalid(ARTIFACT_ID);
+      } else {
+        await repository.markSourceDeleted(ARTIFACT_ID);
+      }
+
+      await expect(repository.reserveSourceArtifact({
+        ...source,
+        driveFileId: "drive-source-file-002",
+        fileName: "replacement.mp4",
+        sizeBytes: 200,
+        lastModified: 2,
+      })).resolves.toMatchObject({
+        id: ARTIFACT_ID,
+        status: "PENDING",
+        driveFileId: "drive-source-file-002",
+        displayName: "replacement.mp4",
+        expectedSizeBytes: 200,
+        actualSizeBytes: null,
+      });
+      await expect(repository.listProjects()).resolves.toEqual([
+        expect.objectContaining({ id: project.id, sourceStatus: "UPLOAD_PENDING" }),
+      ]);
+    },
+  );
+
+  it("allows only one of two concurrent live source reservations", async () => {
+    const project = await readyProject();
+    const repository = repo();
+    const base = {
+      projectId: project.id,
+      driveParentId: project.driveInputFolderId!,
+      fileName: "source.mp4",
+      mimeType: "video/mp4" as const,
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "mp4" as const,
+    };
+    const results = await Promise.allSettled([
+      repository.reserveSourceArtifact({
+        ...base,
+        artifactId: ARTIFACT_ID,
+        driveFileId: "drive-source-file-001",
+      }),
+      repository.reserveSourceArtifact({
+        ...base,
+        artifactId: "20000000-0000-4000-8000-000000000002",
+        driveFileId: "drive-source-file-002",
+      }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const live = await db.query<{ count: string }>(
+      "select count(*) from artifacts where kind='SOURCE' and status<>'DELETED'",
+    );
+    expect(Number(live.rows[0]?.count)).toBe(1);
+  });
+
   it("saves usage snapshots, reports content, database bytes, and bounded audits", async () => {
     const repository = repo();
     const snapshot: UsageSnapshot = {
@@ -230,5 +355,39 @@ describe("FakeDriveControlPlaneRepository", () => {
     expect(fake.auditEvents).toEqual([
       { eventType: "DRIVE_CONNECTED", actorClass: "admin", payload: { ok: true } },
     ]);
+  });
+
+  it("matches terminal source reset behavior", async () => {
+    const fake = new FakeDriveControlPlaneRepository();
+    const reserved = await fake.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Demo",
+    });
+    if (reserved.outcome === "CONFLICT") throw new Error("unexpected conflict");
+    const project = await fake.completeProjectFolders(
+      reserved.project.id,
+      "drive-project-folder-001",
+      "drive-input-folder-001",
+    );
+    const source = {
+      artifactId: ARTIFACT_ID,
+      projectId: project.id,
+      driveFileId: "drive-source-file-001",
+      driveParentId: project.driveInputFolderId!,
+      fileName: "source.mp4",
+      mimeType: "video/mp4" as const,
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "mp4" as const,
+    };
+    await fake.reserveSourceArtifact(source);
+    await fake.markSourceDeleted(ARTIFACT_ID);
+
+    await expect(fake.reserveSourceArtifact({
+      ...source,
+      driveFileId: "drive-source-file-002",
+      sizeBytes: 200,
+    })).resolves.toMatchObject({ status: "PENDING", expectedSizeBytes: 200 });
   });
 });

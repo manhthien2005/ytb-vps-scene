@@ -83,6 +83,16 @@ function bytes(value: unknown, expectedLength?: number): Buffer | null {
   return expectedLength === undefined || parsed.length === expectedLength ? parsed : null;
 }
 
+function canonicalBase64url(value: unknown, expectedLength?: number, allowEmpty = false): Buffer | null {
+  if (
+    typeof value !== "string" || (!allowEmpty && value.length === 0) ||
+    (value.length > 0 && !/^[A-Za-z0-9_-]+$/.test(value))
+  ) return null;
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.toString("base64url") !== value) return null;
+  return expectedLength === undefined || decoded.length === expectedLength ? decoded : null;
+}
+
 function parseProject(row: Record<string, unknown>): Project {
   const id = boundedText(row.id, 36, 36);
   const name = boundedText(row.name, 1, 160, true);
@@ -151,7 +161,10 @@ function parseCredential(row: Record<string, unknown>): StoredDriveCredential {
       : fail("credential");
   const accountHint = nullableBoundedText(row.account_hint, 1, 255);
   const rootFolderId = nullableBoundedText(row.root_folder_id, 10, 256);
-  if (accountHint === undefined || rootFolderId === undefined) fail("credential");
+  if (
+    accountHint === undefined || rootFolderId === undefined ||
+    (accountHint !== null && !accountHint.includes("*"))
+  ) fail("credential");
 
   if (row.status === "REAUTH_REQUIRED" || row.status === "DISCONNECTED") {
     if (
@@ -266,9 +279,16 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
     },
 
     async saveConnectedCredential(value: StoredConnectedCredential) {
-      const ciphertext = Buffer.from(value.envelope.ciphertext, "base64url");
-      const nonce = Buffer.from(value.envelope.nonce, "base64url");
-      const authTag = Buffer.from(value.envelope.authTag, "base64url");
+      const ciphertext = canonicalBase64url(value.envelope.ciphertext, undefined, true);
+      const nonce = canonicalBase64url(value.envelope.nonce, 12);
+      const authTag = canonicalBase64url(value.envelope.authTag, 16);
+      if (
+        !ciphertext || ciphertext.length > 4096 || !nonce || !authTag ||
+        value.envelope.keyVersion !== 1 || value.envelope.scope !== DRIVE_FILE_SCOPE ||
+        !HASH_PATTERN.test(value.accountPermissionIdHash) ||
+        !boundedText(value.accountHint, 1, 255) || !value.accountHint.includes("*") ||
+        !boundedText(value.rootFolderId, 10, 256)
+      ) throw new Error("Invalid encrypted credential");
       await sql.query(
         `insert into oauth_credentials(
            id,status,ciphertext,nonce,auth_tag,key_version,scope,account_hint,
@@ -365,14 +385,29 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
            )
            select $1,$2,'SOURCE','PENDING',$3,$4,$5,$6,$7
            from projects where id=$2 and status='READY'
-           on conflict(id) do update set updated_at=artifacts.updated_at
+           on conflict(id) do update set
+             status=case when artifacts.status in ('INVALID','DELETED') then 'PENDING' else artifacts.status end,
+             drive_file_id=case when artifacts.status in ('INVALID','DELETED') then excluded.drive_file_id else artifacts.drive_file_id end,
+             drive_parent_id=case when artifacts.status in ('INVALID','DELETED') then excluded.drive_parent_id else artifacts.drive_parent_id end,
+             display_name=case when artifacts.status in ('INVALID','DELETED') then excluded.display_name else artifacts.display_name end,
+             mime_type=case when artifacts.status in ('INVALID','DELETED') then excluded.mime_type else artifacts.mime_type end,
+             expected_size_bytes=case when artifacts.status in ('INVALID','DELETED') then excluded.expected_size_bytes else artifacts.expected_size_bytes end,
+             actual_size_bytes=case when artifacts.status in ('INVALID','DELETED') then null else artifacts.actual_size_bytes end,
+             checksum_sha256=case when artifacts.status in ('INVALID','DELETED') then null else artifacts.checksum_sha256 end,
+             verified_at=case when artifacts.status in ('INVALID','DELETED') then null else artifacts.verified_at end,
+             updated_at=case when artifacts.status in ('INVALID','DELETED') then now() else artifacts.updated_at end
            where artifacts.project_id=excluded.project_id
              and artifacts.kind='SOURCE'
-             and artifacts.drive_file_id=excluded.drive_file_id
-             and artifacts.drive_parent_id=excluded.drive_parent_id
-             and artifacts.display_name=excluded.display_name
-             and artifacts.mime_type=excluded.mime_type
-             and artifacts.expected_size_bytes=excluded.expected_size_bytes
+             and (
+               artifacts.status in ('INVALID','DELETED')
+               or (
+                 artifacts.drive_file_id=excluded.drive_file_id
+                 and artifacts.drive_parent_id=excluded.drive_parent_id
+                 and artifacts.display_name=excluded.display_name
+                 and artifacts.mime_type=excluded.mime_type
+                 and artifacts.expected_size_bytes=excluded.expected_size_bytes
+               )
+             )
            returning ${artifactColumns()}
          ), project_updated as (
            update projects set source_status='UPLOAD_PENDING',updated_at=now()

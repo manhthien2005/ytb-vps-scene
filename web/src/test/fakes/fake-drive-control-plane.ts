@@ -138,8 +138,27 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
   }
 
   async reserveSourceArtifact(input: SourceReservation): Promise<Artifact> {
+    const project = this.projects.get(input.projectId)?.project;
+    if (!project || project.status !== "READY") throw new Error("Project not ready or source already reserved");
     const existing = this.artifacts.get(input.artifactId);
     if (existing) {
+      if (existing.projectId === input.projectId && existing.kind === "SOURCE" && ["INVALID", "DELETED"].includes(existing.status)) {
+        const replacement: Artifact = {
+          id: input.artifactId,
+          projectId: input.projectId,
+          kind: "SOURCE",
+          status: "PENDING",
+          driveFileId: input.driveFileId,
+          driveParentId: input.driveParentId,
+          displayName: input.fileName,
+          mimeType: input.mimeType,
+          expectedSizeBytes: input.sizeBytes,
+          actualSizeBytes: null,
+        };
+        this.artifacts.set(replacement.id, replacement);
+        this.updateProject(input.projectId, { sourceStatus: "UPLOAD_PENDING" });
+        return structuredClone(replacement);
+      }
       if (
         existing.projectId !== input.projectId || existing.kind !== "SOURCE" ||
         existing.driveFileId !== input.driveFileId || existing.driveParentId !== input.driveParentId ||
@@ -148,8 +167,6 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       ) throw new Error("Artifact reservation mismatch");
       return structuredClone(existing);
     }
-    const project = this.projects.get(input.projectId)?.project;
-    if (!project || project.status !== "READY") throw new Error("Project not ready or source already reserved");
     const liveSource = [...this.artifacts.values()].some(
       (artifact) => artifact.projectId === input.projectId && artifact.kind === "SOURCE" && artifact.status !== "DELETED",
     );

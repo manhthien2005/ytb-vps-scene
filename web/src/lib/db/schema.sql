@@ -136,6 +136,10 @@ create table if not exists usage_guards (
     jsonb_typeof(reason_codes) = 'array'
     and pg_column_size(reason_codes) <= 2048
     and not jsonb_path_exists(reason_codes, '$[*] ? (@.type() != "string")')
+    and jsonb_path_query_array(
+      reason_codes,
+      '$[*] ? (@ like_regex "^[A-Z][A-Z0-9_]{0,79}$")'
+    ) = reason_codes
   ),
   observed_at timestamptz not null,
   updated_at timestamptz not null default now()

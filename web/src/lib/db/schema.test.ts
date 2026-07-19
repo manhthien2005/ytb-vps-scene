@@ -77,6 +77,12 @@ describe("control-plane schema", () => {
          ) values ('DRIVE',1,10,1,'READ_ONLY',$1::jsonb,now())`,
         [JSON.stringify(["x".repeat(2100)])],
       )).rejects.toThrow();
+      await expect(db.query(
+        `insert into usage_guards(
+           provider,used_bytes,limit_bytes,app_managed_bytes,mode,reason_codes,observed_at
+         ) values ('NEON',1,10,1,'READ_ONLY',$1::jsonb,now())`,
+        [JSON.stringify(["unstable reason"])],
+      )).rejects.toThrow();
     } finally {
       await db.close();
     }
