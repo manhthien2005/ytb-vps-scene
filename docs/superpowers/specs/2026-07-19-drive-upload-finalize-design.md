@@ -1,7 +1,7 @@
 # Drive Upload Metadata Finalization Design
 
 Date: 2026-07-19
-Status: approved in conversation; written specification pending final user review
+Status: approved by user in conversation on 2026-07-19
 Parent specification: `docs/superpowers/specs/2026-07-19-cp2-google-drive-design.md`
 Branch: `codex/cp2-google-drive`
 
