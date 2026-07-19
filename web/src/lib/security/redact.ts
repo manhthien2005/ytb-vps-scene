@@ -19,12 +19,10 @@ const SENSITIVE_EXACT_KEYS = new Set([
   "email",
   "emailaddress",
   "accountemail",
-  "providerbody",
-  "rawproviderbody",
-  "providerresponse",
-  "providerresponsebody",
   "responsebody",
 ]);
+const PROVIDER_KEY_PARTS = ["provider", "upstream", "google", "drive"] as const;
+const PROVIDER_CONTENT_PARTS = ["body", "response", "payload", "error"] as const;
 const SENSITIVE_VALUE_PATTERNS = [
   /bearer/i,
   /https:\/\/www\.googleapis\.com\/upload\//i,
@@ -37,7 +35,15 @@ const SENSITIVE_VALUE_PATTERNS = [
 
 function sensitiveKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const containsProviderContent = PROVIDER_CONTENT_PARTS.some(
+    (part) => normalized.includes(part),
+  );
+  const isRawProviderContent = normalized.includes("raw") && containsProviderContent;
+  const isNamedProviderContent =
+    PROVIDER_KEY_PARTS.some((part) => normalized.includes(part)) && containsProviderContent;
   return SENSITIVE_EXACT_KEYS.has(normalized) ||
+    isRawProviderContent ||
+    isNamedProviderContent ||
     SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));
 }
 

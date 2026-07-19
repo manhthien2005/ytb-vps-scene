@@ -137,4 +137,23 @@ describe("secret redaction", () => {
   ])("redacts an embedded upload capability representation", (value) => {
     expect(redactSecrets({ detail: value })).toEqual({ detail: "[REDACTED]" });
   });
+
+  it.each([
+    "rawProviderResponse",
+    "RAW_PROVIDER_RESPONSE",
+    "rawResponseBody",
+    "raw-response-body",
+    "providerErrorBody",
+    "PROVIDER_ERROR_BODY",
+    "upstreamResponsePayload",
+    "upstream-response-payload",
+    "googleApiResponse",
+    "GOOGLE_API_RESPONSE",
+    "driveErrorResponse",
+    "drive_error_response",
+  ])("compositionally redacts provider content under the %s key", (key) => {
+    expect(redactSecrets({ [key]: "arbitrary upstream response text" })).toEqual({
+      [key]: "[REDACTED]",
+    });
+  });
 });
