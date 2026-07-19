@@ -88,6 +88,7 @@ function validSessionUri(value: unknown): value is string {
   if (!boundedAscii(value, 1, 4_096)) return false;
   try {
     const uri = new URL(value);
+    const queryEntries = [...uri.searchParams.entries()];
     const uploadIds = uri.searchParams.getAll("upload_id");
     return (
       uri.protocol === "https:" &&
@@ -97,6 +98,8 @@ function validSessionUri(value: unknown): value is string {
       uri.password === "" &&
       uri.hash === "" &&
       /^\/upload\/drive\/v3\/files\/[^/]+$/.test(uri.pathname) &&
+      queryEntries.length === 1 &&
+      queryEntries[0]?.[0] === "upload_id" &&
       uploadIds.length === 1 &&
       boundedAscii(uploadIds[0], 1, 2_048)
     );

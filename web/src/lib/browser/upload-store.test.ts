@@ -105,6 +105,9 @@ describe("UploadSessionStore", () => {
     ["noncanonical artifact id", record({ artifactId: ARTIFACT_ID.toUpperCase() })],
     ["untrusted URI", record({ sessionUri: "http://www.googleapis.com/upload/drive/v3/files/source?upload_id=opaque" })],
     ["duplicated upload id", record({ sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=one&upload_id=two" })],
+    ["credential-shaped access token query", record({ sessionUri: `${record().sessionUri}&access_token=synthetic-token` })],
+    ["credential-shaped API key query", record({ sessionUri: `${record().sessionUri}&key=synthetic-key` })],
+    ["arbitrary query", record({ sessionUri: `${record().sessionUri}&unexpected=synthetic` })],
     ["wrong chunk size", record({ chunkBytes: 1 as 8_388_608 })],
     ["offset beyond file", record({ nextOffset: 16_777_217 })],
     ["noncanonical expiration", record({ expiresAt: "2026-07-26T00:00:00Z" })],
@@ -121,6 +124,18 @@ describe("UploadSessionStore", () => {
     ["offset beyond file", record({ nextOffset: 16_777_217 })],
     ["expired record", record({ expiresAt: "2026-07-18T00:00:00.000Z" })],
   ])("deletes malformed or expired record %#", async (_name, value) => {
+    await rawPut({ key: `${value.projectId}:${value.artifactId}`, ...value });
+
+    await expect(store.get(value.projectId, value.artifactId)).resolves.toBeNull();
+    await expect(store.list()).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["credential-shaped access token query", "access_token=synthetic-token"],
+    ["credential-shaped API key query", "key=synthetic-key"],
+    ["arbitrary query", "unexpected=synthetic"],
+  ])("deletes extra-query capability rows during get and list cleanup: %s", async (_name, extraQuery) => {
+    const value = record({ sessionUri: `${record().sessionUri}&${extraQuery}` });
     await rawPut({ key: `${value.projectId}:${value.artifactId}`, ...value });
 
     await expect(store.get(value.projectId, value.artifactId)).resolves.toBeNull();
