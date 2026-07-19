@@ -22,6 +22,13 @@ describe("HomePage", () => {
       ADMIN_KEY_HASH: "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       SESSION_SECRET: "s".repeat(64),
       APP_ORIGIN: "http://localhost:3000",
+      GOOGLE_OAUTH_CLIENT_ID: "example-client-id",
+      GOOGLE_OAUTH_CLIENT_SECRET: "example-client-secret",
+      DRIVE_TOKEN_KEY_V1: "A".repeat(43),
+      NEON_STORAGE_LIMIT_BYTES: "536870912",
+      DRIVE_UPLOAD_MAX_BYTES: "10737418240",
+      FREE_TIER_SOFT_PERCENT: "90",
+      QUOTA_STALE_AFTER_SECONDS: "900",
     });
     delete process.env.OPENAI_API_KEY;
     currentAdmin.mockResolvedValue(false);

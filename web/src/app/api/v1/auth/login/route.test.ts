@@ -27,6 +27,13 @@ describe("POST /api/v1/auth/login", () => {
       ADMIN_KEY_HASH: "scrypt$16384$8$1$AwMDAwMDAwMDAwMDAwMDAw$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       SESSION_SECRET: "s".repeat(64),
       APP_ORIGIN: "http://localhost:3000",
+      GOOGLE_OAUTH_CLIENT_ID: "example-client-id",
+      GOOGLE_OAUTH_CLIENT_SECRET: "example-client-secret",
+      DRIVE_TOKEN_KEY_V1: "A".repeat(43),
+      NEON_STORAGE_LIMIT_BYTES: "536870912",
+      DRIVE_UPLOAD_MAX_BYTES: "10737418240",
+      FREE_TIER_SOFT_PERCENT: "90",
+      QUOTA_STALE_AFTER_SECONDS: "900",
     });
     delete process.env.OPENAI_API_KEY;
     repository.consumeLoginAttempt.mockResolvedValue({ allowed: true, retryAfterSeconds: 0 });
@@ -36,6 +43,10 @@ describe("POST /api/v1/auth/login", () => {
 
   function request(origin: string, key: string) {
     return rawRequest(origin, JSON.stringify({ key }));
+  }
+
+  function validLoginRequest() {
+    return request("http://localhost:3000", "correct private key");
   }
 
   function rawRequest(origin: string, body: string, contentLength?: string) {
@@ -114,6 +125,11 @@ describe("POST /api/v1/auth/login", () => {
     expect(repository.clearLoginAttempts).toHaveBeenCalledOnce();
   });
 
+  it("sets SameSite=Lax for the OAuth top-level callback", async () => {
+    const response = await POST(validLoginRequest());
+    expect(response.headers.get("set-cookie")).toContain("SameSite=lax");
+  });
+
   it("sets every production session-cookie security attribute", async () => {
     Object.assign(process.env, {
       NODE_ENV: "production",
@@ -123,7 +139,7 @@ describe("POST /api/v1/auth/login", () => {
     const cookie = response.headers.get("set-cookie");
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("Secure");
-    expect(cookie).toContain("SameSite=strict");
+    expect(cookie).toContain("SameSite=lax");
     expect(cookie).toContain("Path=/");
     expect(cookie).toContain("Max-Age=43200");
   });
