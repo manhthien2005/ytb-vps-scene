@@ -85,6 +85,21 @@ describe("createGoogleOAuthAdapter", () => {
     expect(String(fetcher.mock.calls[0]![0])).not.toContain("one-use-secret-code");
   });
 
+  it("accepts bounded refresh-token expiry metadata returned for expiring grants", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(exchangeResponse({
+      refresh_token_expires_in: 604_800,
+    }));
+
+    await expect(adapter(fetcher).exchangeCode({
+      code: "one-use-secret-code",
+      redirectUri: CALLBACK,
+      timeoutMs: 5_000,
+    })).resolves.toEqual({
+      refreshToken: REFRESH_TOKEN,
+      grantedScopes: [DRIVE_FILE_SCOPE],
+    });
+  });
+
   it("returns a bounded exact granted-scope set for application validation", async () => {
     const broadScope = "https://www.googleapis.com/auth/drive";
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(exchangeResponse({
@@ -161,6 +176,19 @@ describe("createGoogleOAuthAdapter", () => {
       client_secret: CLIENT_SECRET,
       grant_type: "refresh_token",
     });
+  });
+
+  it("accepts bounded refresh-token expiry metadata when refreshing access", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      access_token: ACCESS_TOKEN,
+      expires_in: 3_599,
+      refresh_token_expires_in: 604_700,
+      scope: DRIVE_FILE_SCOPE,
+      token_type: "Bearer",
+    }));
+
+    await expect(adapter(fetcher).refreshAccessToken(REFRESH_TOKEN, 5_000))
+      .resolves.toBe(ACCESS_TOKEN);
   });
 
   it("maps invalid_grant during refresh to reauthentication without provider text", async () => {

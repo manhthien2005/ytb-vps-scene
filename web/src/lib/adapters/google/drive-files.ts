@@ -38,7 +38,7 @@ type ExpectedDriveFile = Readonly<{
   name: string;
   mimeType: string;
   parentId: string;
-  canonicalParentId?: string;
+  rootAliasParent?: boolean;
   appProperties: Readonly<Record<string, string>>;
   empty?: boolean;
 }>;
@@ -163,7 +163,7 @@ function validateExpectedFile(
     !file ||
     file.name !== expected.name ||
     file.mimeType !== expected.mimeType ||
-    file.parentIds[0] !== (expected.canonicalParentId ?? expected.parentId) ||
+    (!expected.rootAliasParent && file.parentIds[0] !== expected.parentId) ||
     file.trashed ||
     !sameProperties(file.appProperties, expected.appProperties) ||
     (expected.empty === true && file.sizeBytes !== 0)
@@ -390,19 +390,11 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
   }
 
   async function ensureRoot(accessToken: string): Promise<DriveFile> {
-    const rootEvidence = objectRecord(await driveJson<unknown>(
-      accessToken,
-      driveUrl("/files/root", { fields: "id" }),
-      { method: "GET" },
-    ));
-    if (!rootEvidence || !hasExactKeys(rootEvidence, ["id"]) || !boundedDriveId(rootEvidence.id)) {
-      throw remoteMismatch();
-    }
     return ensureExpected(accessToken, {
       name: "YTB-VPS",
       mimeType: FOLDER_MIME,
       parentId: "root",
-      canonicalParentId: rootEvidence.id,
+      rootAliasParent: true,
       appProperties: ROOT_PROPERTIES,
     });
   }

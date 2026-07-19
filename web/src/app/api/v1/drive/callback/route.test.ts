@@ -121,7 +121,7 @@ describe("GET /api/v1/drive/callback", () => {
 
   it("accepts only bounded allowed optional fields and redirects success to the app origin", async () => {
     const response = await GET(request(
-      "state=signed-state&code=one-use-code&scope=drive.file&authuser=0&prompt=consent",
+      "state=signed-state&code=one-use-code&scope=drive.file&authuser=0&prompt=consent&iss=https%3A%2F%2Faccounts.google.com",
       "https://attacker.test",
     ));
 
@@ -139,6 +139,16 @@ describe("GET /api/v1/drive/callback", () => {
       files: { kind: "files" },
       cipher: { kind: "cipher" },
     }));
+  });
+
+  it.each([
+    ["state=s&code=c&iss=https%3A%2F%2Fattacker.test"],
+    ["state=s&code=c&iss=https%3A%2F%2Faccounts.google.com&iss=https%3A%2F%2Faccounts.google.com"],
+  ])("rejects an unexpected or duplicate authorization issuer: %s", async (query) => {
+    const response = await GET(request(query));
+
+    expectRedirect(response, "/?drive_error=INVALID_REQUEST");
+    expect(completeDriveConnection).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -20,6 +20,7 @@ const ALLOWED_FIELDS = new Set([
   "scope",
   "authuser",
   "prompt",
+  "iss",
   "error_description",
   "error_uri",
 ]);
@@ -31,6 +32,7 @@ const FIELD_LIMITS: Readonly<Record<string, number>> = {
   scope: 2_048,
   authuser: 32,
   prompt: 64,
+  iss: 128,
   error_description: 1_024,
   error_uri: 2_048,
 };
@@ -58,7 +60,11 @@ function parseCallbackQuery(params: URLSearchParams): CallbackQuery {
   const state = params.get("state");
   const code = params.get("code");
   const providerError = params.get("error");
+  const issuer = params.get("iss");
   if (!state || (code === null) === (providerError === null)) {
+    throw new HttpError(400, "INVALID_REQUEST");
+  }
+  if (issuer !== null && issuer !== "https://accounts.google.com") {
     throw new HttpError(400, "INVALID_REQUEST");
   }
   const successOnly = ["scope", "authuser", "prompt"];

@@ -73,10 +73,9 @@ describe("createGoogleDriveFilesAdapter", () => {
       .rejects.toThrow("DRIVE_PROVIDER_REJECTED");
   });
 
-  it("queries by private root properties and creates one private root folder", async () => {
+  it("uses the root alias without reading My Drive and creates one private root folder", async () => {
     const properties = { ytbVpsRole: "root", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder(
         "drive-root-folder-001",
@@ -88,18 +87,14 @@ describe("createGoogleDriveFilesAdapter", () => {
     await expect(adapter(fetcher).ensureWorkspace(ACCESS_TOKEN))
       .resolves.toEqual({ rootFolderId: "drive-root-folder-001" });
 
-    const root = requestDetails(fetcher, 0);
-    expect(root.url.pathname).toBe("/drive/v3/files/root");
-    expect([...root.url.searchParams.entries()]).toEqual([["fields", "id"]]);
-
-    const list = requestDetails(fetcher, 1);
+    const list = requestDetails(fetcher, 0);
     expect(list.url.searchParams.get("fields")).toBe(`files(${FILE_FIELDS})`);
     expect(list.url.searchParams.get("pageSize")).toBe("2");
     expect(list.url.searchParams.get("q")).toContain("'root' in parents");
     expect(list.url.searchParams.get("q")).toContain("key='ytbVpsRole' and value='root'");
     expect(list.url.searchParams.get("q")).toContain("key='schema' and value='1'");
 
-    const create = requestDetails(fetcher, 2);
+    const create = requestDetails(fetcher, 1);
     expect(create.init.method).toBe("POST");
     expect(create.url.searchParams.get("fields")).toBe(FILE_FIELDS);
     expect(JSON.parse(String(create.init.body))).toEqual({
@@ -120,7 +115,6 @@ describe("createGoogleDriveFilesAdapter", () => {
       properties,
     );
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse({}, { status: 503 }))
       .mockResolvedValueOnce(jsonResponse({ files: [created] }));
@@ -128,9 +122,8 @@ describe("createGoogleDriveFilesAdapter", () => {
     await expect(adapter(fetcher).ensureWorkspace(ACCESS_TOKEN))
       .resolves.toEqual({ rootFolderId: created.id });
 
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(3);
     expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
-      "GET",
       "GET",
       "POST",
       "GET",
@@ -142,22 +135,19 @@ describe("createGoogleDriveFilesAdapter", () => {
     const properties = { ytbVpsRole: "root", schema: "1" };
     const valid = folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, properties);
     const reuseFetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({ files: [valid] }));
     await expect(adapter(reuseFetcher).ensureWorkspace(ACCESS_TOKEN))
       .resolves.toEqual({ rootFolderId: valid.id });
-    expect(reuseFetcher).toHaveBeenCalledTimes(2);
+    expect(reuseFetcher).toHaveBeenCalledTimes(1);
 
     const duplicateFetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({ files: [valid, valid] }));
     await expect(adapter(duplicateFetcher).ensureWorkspace(ACCESS_TOKEN))
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
 
     const mismatchFetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({
-        files: [{ ...valid, parents: ["wrong-parent"] }],
+        files: [{ ...valid, name: "wrong-name" }],
       }));
     await expect(adapter(mismatchFetcher).ensureWorkspace(ACCESS_TOKEN))
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
@@ -169,7 +159,6 @@ describe("createGoogleDriveFilesAdapter", () => {
     const projectProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "project", schema: "1" };
     const inputProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "input", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({
         files: [folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, rootProperties)],
       }))
@@ -184,8 +173,8 @@ describe("createGoogleDriveFilesAdapter", () => {
       inputFolderId: "drive-input-folder-001",
     });
 
-    const createdProjects = JSON.parse(String(fetcher.mock.calls[3]![1]?.body));
-    const createdProject = JSON.parse(String(fetcher.mock.calls[5]![1]?.body));
+    const createdProjects = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
+    const createdProject = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
     expect(createdProjects).toMatchObject({
       name: "projects",
       parents: ["drive-root-folder-001"],

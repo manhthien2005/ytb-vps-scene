@@ -14,6 +14,7 @@ const MAX_REFRESH_TOKEN_BYTES = 4_096;
 const MAX_ACCESS_TOKEN_BYTES = 8_192;
 const MAX_SCOPE_TEXT_BYTES = 2_048;
 const MAX_SCOPES = 16;
+const MAX_REFRESH_TOKEN_LIFETIME_SECONDS = 365 * 24 * 60 * 60;
 
 type GoogleOAuthOptions = Readonly<{
   clientId: string;
@@ -85,9 +86,21 @@ function validateExchangeResponse(value: unknown): Readonly<{
   const record = objectRecord(value);
   if (
     !record ||
-    !hasOnlyKeys(record, ["access_token", "expires_in", "refresh_token", "scope", "token_type"]) ||
+    !hasOnlyKeys(record, [
+      "access_token",
+      "expires_in",
+      "refresh_token",
+      "refresh_token_expires_in",
+      "scope",
+      "token_type",
+    ]) ||
     !boundedUtf8(record.access_token, 1, MAX_ACCESS_TOKEN_BYTES) ||
     !validTokenLifetime(record.expires_in) ||
+    (record.refresh_token_expires_in !== undefined && (
+      !Number.isSafeInteger(record.refresh_token_expires_in) ||
+      (record.refresh_token_expires_in as number) < 1 ||
+      (record.refresh_token_expires_in as number) > MAX_REFRESH_TOKEN_LIFETIME_SECONDS
+    )) ||
     record.token_type !== "Bearer"
   ) {
     throw oauthError("DRIVE_PROVIDER_REJECTED");
@@ -104,9 +117,20 @@ function validateRefreshResponse(value: unknown): string {
   const record = objectRecord(value);
   if (
     !record ||
-    !hasOnlyKeys(record, ["access_token", "expires_in", "scope", "token_type"]) ||
+    !hasOnlyKeys(record, [
+      "access_token",
+      "expires_in",
+      "refresh_token_expires_in",
+      "scope",
+      "token_type",
+    ]) ||
     !boundedUtf8(record.access_token, 1, MAX_ACCESS_TOKEN_BYTES) ||
     !validTokenLifetime(record.expires_in) ||
+    (record.refresh_token_expires_in !== undefined && (
+      !Number.isSafeInteger(record.refresh_token_expires_in) ||
+      (record.refresh_token_expires_in as number) < 1 ||
+      (record.refresh_token_expires_in as number) > MAX_REFRESH_TOKEN_LIFETIME_SECONDS
+    )) ||
     record.token_type !== "Bearer"
   ) {
     throw oauthError("DRIVE_PROVIDER_REJECTED");
