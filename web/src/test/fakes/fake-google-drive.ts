@@ -78,6 +78,9 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   };
   inspectAccountError: unknown = null;
   ensureWorkspaceError: unknown = null;
+  resumableSessionError: unknown = null;
+  inspectFileError: unknown = null;
+  deleteFileError: unknown = null;
   readonly inspectAccountCalls: string[] = [];
   readonly ensureWorkspaceCalls: string[] = [];
   readonly ensureProjectFoldersCalls: Array<Readonly<{ accessToken: string; projectId: string }>> = [];
@@ -113,15 +116,18 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     input: Parameters<DriveFilesPort["createResumableUpdateSession"]>[1],
   ) {
     this.resumableSessionCalls.push({ accessToken, input: structuredClone(input) });
+    if (this.resumableSessionError !== null) throw this.resumableSessionError;
     return structuredClone(this.resumableSession);
   }
 
   async inspectFile(accessToken: string, fileId: string) {
     this.inspectFileCalls.push({ accessToken, fileId });
+    if (this.inspectFileError !== null) throw this.inspectFileError;
     return structuredClone(this.file);
   }
 
   async deleteFile(accessToken: string, fileId: string) {
     this.deleteFileCalls.push({ accessToken, fileId });
+    if (this.deleteFileError !== null) throw this.deleteFileError;
   }
 }
