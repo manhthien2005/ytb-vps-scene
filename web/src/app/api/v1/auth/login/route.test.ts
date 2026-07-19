@@ -51,6 +51,13 @@ describe("POST /api/v1/auth/login", () => {
     const response = await POST(request("http://localhost:3000", "correct private key"));
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("900");
+    expect(repository.clearLoginAttempts).not.toHaveBeenCalled();
+  });
+
+  it("does not clear attempts after an invalid key", async () => {
+    const response = await POST(request("http://localhost:3000", "wrong private key"));
+    expect(response.status).toBe(401);
+    expect(repository.clearLoginAttempts).not.toHaveBeenCalled();
   });
 
   it("sets a private session and clears failed attempts after a valid key", async () => {
@@ -58,5 +65,19 @@ describe("POST /api/v1/auth/login", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("set-cookie")).toContain("HttpOnly");
     expect(repository.clearLoginAttempts).toHaveBeenCalledOnce();
+  });
+
+  it("sets every production session-cookie security attribute", async () => {
+    Object.assign(process.env, {
+      NODE_ENV: "production",
+      APP_ORIGIN: "https://example.vercel.app",
+    });
+    const response = await POST(request("https://example.vercel.app", "correct private key"));
+    const cookie = response.headers.get("set-cookie");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=strict");
+    expect(cookie).toContain("Path=/");
+    expect(cookie).toContain("Max-Age=43200");
   });
 });

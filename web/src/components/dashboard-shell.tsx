@@ -14,7 +14,12 @@ export function DashboardShell({
           <p className="eyebrow">Control plane cá nhân</p>
           <h1>YTB VPS Studio</h1>
         </div>
-        <button>Gắn VPS</button>
+        <div className="attach-control">
+          <button type="button" disabled aria-describedby="vps-availability-note">
+            Gắn VPS
+          </button>
+          <p id="vps-availability-note">Tính năng gắn VPS sẽ khả dụng ở giai đoạn sau.</p>
+        </div>
       </header>
       <section className="status-card" aria-label="Trạng thái worker">
         <strong>{workerOnline ? "GPU VPS đang sẵn sàng" : "Chưa gắn GPU VPS"}</strong>

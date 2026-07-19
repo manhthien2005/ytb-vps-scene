@@ -20,5 +20,11 @@ describe("DashboardShell", () => {
     );
     expect(screen.getByText("Chưa gắn GPU VPS")).toBeInTheDocument();
     expect(screen.getByText("Test 1")).toBeInTheDocument();
+    const attachButton = screen.getByRole("button", { name: "Gắn VPS" });
+    expect(attachButton).toBeDisabled();
+    expect(attachButton).toHaveAccessibleDescription(
+      "Tính năng gắn VPS sẽ khả dụng ở giai đoạn sau.",
+    );
+    expect(screen.getByText("Tính năng gắn VPS sẽ khả dụng ở giai đoạn sau.")).toBeVisible();
   });
 });

@@ -16,17 +16,22 @@ p { color: var(--muted); line-height: 1.6; }
 .status-pill { display: inline-flex; margin-top: 20px; padding: 10px 14px; border-radius: 999px; color: var(--accent); background: #13392f; }
 button, input { font: inherit; }
 button { border: 0; border-radius: 12px; padding: 12px 18px; color: #062119; background: var(--accent); font-weight: 700; cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
 button:focus-visible, input:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
 .auth-card { width: min(460px, 100%); display: grid; gap: 14px; padding: 32px; border: 1px solid #2b4563; border-radius: 22px; background: var(--panel); }
 .auth-card label { color: var(--muted); font-weight: 700; }
 .auth-card input { width: 100%; padding: 13px 14px; border: 1px solid #3b5674; border-radius: 12px; color: var(--text); background: #081524; }
 .dashboard { width: min(1100px, calc(100% - 40px)); margin: 0 auto; padding: 40px 0; }
 .dashboard > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.attach-control { display: grid; gap: 8px; justify-items: end; }
+.attach-control p { max-width: 260px; margin: 0; text-align: right; }
 .status-card { display: grid; gap: 8px; margin: 28px 0; padding: 22px; border: 1px solid #2b4563; border-radius: 18px; background: var(--panel); }
 .status-card span, li span { color: var(--muted); }
 .dashboard ul { display: grid; gap: 10px; padding: 0; list-style: none; }
 .dashboard li { display: flex; justify-content: space-between; gap: 18px; padding: 16px 18px; border: 1px solid #263d59; border-radius: 14px; background: #0d1a2b; }
 @media (max-width: 720px) {
   .dashboard > header, .dashboard li { align-items: stretch; flex-direction: column; }
+  .attach-control { justify-items: stretch; }
+  .attach-control p { max-width: none; text-align: left; }
   .hero-card, .auth-card { padding: 24px; }
 }
