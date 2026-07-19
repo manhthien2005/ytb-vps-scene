@@ -98,4 +98,43 @@ describe("secret redaction", () => {
     expect(output.__proto__).toEqual({ safe: "value" });
     expect(Object.getPrototypeOf(output)).toBe(Object.prototype);
   });
+
+  it.each([
+    "email",
+    "EMAIL_ADDRESS",
+    "account-email",
+  ])("redacts an email identity under the %s key", (key) => {
+    expect(redactSecrets({ [key]: "admin@example.test" })).toEqual({
+      [key]: "[REDACTED]",
+    });
+  });
+
+  it("redacts a complete email address in text but preserves an already-masked hint", () => {
+    expect(redactSecrets({ detail: "Account admin@example.test is connected" })).toEqual({
+      detail: "[REDACTED]",
+    });
+    expect(redactSecrets({ emailHint: "a***@example.test" })).toEqual({
+      emailHint: "a***@example.test",
+    });
+  });
+
+  it.each([
+    "providerBody",
+    "raw_provider_body",
+    "PROVIDER-RESPONSE",
+    "providerResponseBody",
+    "response_body",
+  ])("redacts arbitrary provider content under the %s key", (key) => {
+    expect(redactSecrets({ [key]: "arbitrary upstream response text" })).toEqual({
+      [key]: "[REDACTED]",
+    });
+  });
+
+  it.each([
+    '{"uploadId":"capability-value"}',
+    '{"UPLOAD_ID":"capability-value"}',
+    "prefix upload-id=capability-value suffix",
+  ])("redacts an embedded upload capability representation", (value) => {
+    expect(redactSecrets({ detail: value })).toEqual({ detail: "[REDACTED]" });
+  });
 });

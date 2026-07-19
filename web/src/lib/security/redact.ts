@@ -15,18 +15,30 @@ const SENSITIVE_KEY_PARTS = [
   "clientsecret",
   "encryptionkey",
 ] as const;
+const SENSITIVE_EXACT_KEYS = new Set([
+  "email",
+  "emailaddress",
+  "accountemail",
+  "providerbody",
+  "rawproviderbody",
+  "providerresponse",
+  "providerresponsebody",
+  "responsebody",
+]);
 const SENSITIVE_VALUE_PATTERNS = [
   /bearer/i,
   /https:\/\/www\.googleapis\.com\/upload\//i,
-  /upload_id\s*=/i,
+  /upload[_-]?id["']?\s*[:=]/i,
   /(?:access|refresh|id)[_-]?token["']?\s*[:=]/i,
   /client[_-]?(?:secret|assertion)["']?\s*[:=]/i,
   /(?:oauth[_-]?token|code(?:[_-]?(?:verifier|challenge))?|state)["']?\s*[:=]/i,
+  /[a-z0-9][a-z0-9._%+-]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+/i,
 ] as const;
 
 function sensitiveKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-  return SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));
+  return SENSITIVE_EXACT_KEYS.has(normalized) ||
+    SENSITIVE_KEY_PARTS.some((part) => normalized.includes(part));
 }
 
 function redactString(value: string): string {
