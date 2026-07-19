@@ -21,5 +21,16 @@ python -m unittest discover -s tests_v2 -t . -v
 ytb-vps-v2 version
 ```
 
+## Control-plane verification
+
+From `web` with the required local environment variables set, run:
+
+```powershell
+npm test
+npm run typecheck
+npm run lint
+npm run build
+```
+
 The public `ytb-vps` command remains legacy until the dedicated cutover commit.
 Use only `ytb-vps-v2` for v2 development before cutover.

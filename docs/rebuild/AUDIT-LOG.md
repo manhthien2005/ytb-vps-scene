@@ -685,3 +685,35 @@ historical evidence.
   behavior, mitigated by the Windows pinned-handle and WSL POSIX race suites;
   Python 3.10 and POSIX FFmpeg remain unexecuted risks. No public CLI, network,
   credential, cleanup, push, merge, PR, or binary fixture changes were made.
+
+## 2026-07-19T07:46:47+07:00 — Phase 8 control-plane foundation
+
+- Objective: establish a protected metadata-only dashboard with a reproducible
+  local runbook and independent Python and web CI gates.
+- Contract/invariant: the control plane never accepts video bytes or runs the
+  media pipeline; CI preserves the existing Python 3.10 job and adds an
+  independent Node 22 job for the web application.
+- Changed files: `.github/workflows/v2-ci.yml`, `.gitignore`,
+  `docs/rebuild/DEVELOPMENT.md`, `docs/rebuild/00-MASTER-PLAN.md`, this audit
+  log, and `web/README.md`.
+- Fresh gates: `python -m compileall -q src tests_v2` passed; full Python
+  discovery passed with 322 tests and 12 skips in 151.175s. After `npm ci`,
+  the full Vitest suite passed with 43 tests in 15 files. Typecheck, lint, and
+  the Next.js production build each passed.
+- Security and behavior evidence: migration idempotency, authentication
+  tamper/expiry handling, login rate limiting, free-tier fail-closed behavior,
+  and the secret scan each passed. The Windows PGlite probe messages during
+  Vitest are documented non-failing harness noise.
+- Task commits: `a35e0964e18f54363c435815a9639303d3dfd5a1`,
+  `e81c0ff06e73adedb6cb40acf093e7d316b4cea9`,
+  `316586290387e283206b2b15192b9badf2fa4691`,
+  `545dd5aca1e9088e8c65560f85c3d301598e95fc`,
+  `797cba2fc03ae194a43821a21173fc07b9942a01`,
+  `e9c01f008efcd5c7f5e69c3f6b65ff1e14a42df8`, and
+  `e0cc2f4c9827bccb4802967324faffe9f84e4f5b`.
+- Remaining risk: the local host uses Node 24 and emitted the expected engine
+  warning; GitHub Actions uses the required Node 22. No Drive, GPU worker,
+  video route, provider credential, billing key, or local environment file is
+  included in this phase gate.
+- Next step: run the independent Node 22 CI job in an authorized GitHub Actions
+  workflow before treating hosted execution as verified.

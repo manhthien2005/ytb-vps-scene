@@ -176,6 +176,12 @@ cleanup. Preserve the documented rollback path.
 
 Gate: G8.
 
+## Control-plane phase gate
+
+| Phase | Gate |
+|---|---|
+| Phase 8 control-plane foundation | Protected metadata-only dashboard with Python and web CI both green. |
+
 ## Phase completion record
 
 A phase is complete only when its tests and gates pass, the full diff and staged
