@@ -761,3 +761,11 @@ historical evidence.
 - This is local Node 24 evidence with the expected Node 22 engine warning. The
   project and CI pins remain Node 22; this entry does not claim that hosted
   GitHub Actions executed.
+
+## 2026-07-19T19:53:00Z — Metadata-only Drive finalization gate
+
+- Production hostname: `ytb-vps-scene.vercel.app`.
+- firstStatus: 308; rangeReadable: true; finalReadableStatus: CORS_HIDDEN;
+  completionStatus: 200; exactVerifiedSize: 524288; cleanupStatus: 200.
+- Vercel-media-body absence: request evidence contained zero serverless PUT
+  requests, confirming neither 262144-byte media body reached a function.
