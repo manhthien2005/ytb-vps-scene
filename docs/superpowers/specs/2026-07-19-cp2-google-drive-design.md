@@ -210,6 +210,13 @@ OAuth errors use stable non-secret codes and redirect to
 `/?drive_error=<stable_code>`. Raw provider descriptions are never returned to
 the browser.
 
+CP-2 changes the admin cookie from `SameSite=Strict` to `SameSite=Lax` so it is
+sent on Google's top-level HTTPS redirect back to the callback. The cookie
+remains `HttpOnly`, `Secure` in production, path `/`, and 12-hour bounded. The
+callback still requires the signed one-use state, while every state-changing
+POST continues to require an exact Origin match; no mutation is authorized by
+the Lax cookie alone.
+
 ### 7.3 Disconnect and reconnect
 
 `POST /api/v1/drive/disconnect` attempts Google token revocation first. If
