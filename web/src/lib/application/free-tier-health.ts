@@ -108,6 +108,12 @@ function connectionReason(error: unknown): string | null {
   return null;
 }
 
+function retryableInspectionError(error: unknown): boolean {
+  return error instanceof AppError && (
+    error.code === "DRIVE_RATE_LIMITED" || error.code === "DRIVE_TEMPORARILY_UNAVAILABLE"
+  );
+}
+
 function decisionError(reason: string): AppError {
   if (reason === "DRIVE_STORAGE_HIGH" || reason === "NEON_STORAGE_HIGH") {
     return new AppError(reason, 409);
@@ -164,7 +170,13 @@ export function createFreeTierHealthService(
     let account: Awaited<ReturnType<DriveFilesPort["inspectAccount"]>>;
     try {
       account = await dependencies.files.inspectAccount(accessToken);
-    } catch {
+    } catch (error) {
+      const driveConnection = connectionFrom(error);
+      const reason = connectionReason(error);
+      if (reason !== null) return { snapshot: null, reason, driveConnection };
+      if (!retryableInspectionError(error)) {
+        return { snapshot: null, reason: "QUOTA_INVALID", driveConnection };
+      }
       return {
         ...await loadFallbackSnapshot(
           dependencies.repository,

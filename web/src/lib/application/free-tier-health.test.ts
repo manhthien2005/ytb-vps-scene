@@ -343,6 +343,70 @@ describe("FreeTierHealthService", () => {
     });
   });
 
+  it("does not use saved quota after Drive inspection requires reauthentication", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_REAUTH_REQUIRED", 401);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.getHealth(NOW)).resolves.toMatchObject({
+      mode: "READ_ONLY",
+      reasons: ["DRIVE_REAUTH_REQUIRED"],
+      driveConnection: "REAUTH_REQUIRED",
+      drive: null,
+    });
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "DRIVE_REAUTH_REQUIRED",
+    });
+  });
+
+  it.each([
+    [new AppError("DRIVE_PROVIDER_REJECTED", 502), "provider rejection"],
+    [new Error("upstream diagnostic must not escape"), "unknown inspection error"],
+  ])("fails closed without saved fallback on %s", async (error) => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = error;
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+      message: "QUOTA_INVALID",
+    });
+  });
+
   it.each([
     [new AppError("DRIVE_NOT_CONNECTED", 409), "DISCONNECTED", "DRIVE_NOT_CONNECTED"],
     [new AppError("DRIVE_REAUTH_REQUIRED", 401), "REAUTH_REQUIRED", "DRIVE_REAUTH_REQUIRED"],
