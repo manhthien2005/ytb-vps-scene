@@ -6,6 +6,7 @@ export type GoogleJsonOptions = Readonly<{
   timeoutMs: number;
   maxResponseBytes: number;
   attempts: number;
+  acceptInvalidTokenAsRevoked?: boolean;
 }>;
 
 const MAX_PROVIDER_TIMEOUT_MS = 5_000;
@@ -32,7 +33,11 @@ function validOptions(options: GoogleJsonOptions): boolean {
     options.maxResponseBytes <= MAX_PROVIDER_RESPONSE_BYTES &&
     Number.isSafeInteger(options.attempts) &&
     options.attempts >= 1 &&
-    options.attempts <= MAX_PROVIDER_ATTEMPTS
+    options.attempts <= MAX_PROVIDER_ATTEMPTS &&
+    (
+      options.acceptInvalidTokenAsRevoked === undefined ||
+      typeof options.acceptInvalidTokenAsRevoked === "boolean"
+    )
   );
 }
 
@@ -101,12 +106,31 @@ function parseJson(bytes: Uint8Array): unknown {
   }
 }
 
-function isInvalidGrant(value: unknown): boolean {
+function isProviderError(value: unknown, code: string): boolean {
   return (
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    (value as Record<string, unknown>).error === "invalid_grant"
+    (value as Record<string, unknown>).error === code
+  );
+}
+
+function isValidInvalidTokenEvidence(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    record.error !== "invalid_token" ||
+    keys.some((key) => key !== "error" && key !== "error_description")
+  ) {
+    return false;
+  }
+  return (
+    record.error_description === undefined ||
+    (
+      typeof record.error_description === "string" &&
+      new TextEncoder().encode(record.error_description).byteLength <= 2_048
+    )
   );
 }
 
@@ -139,7 +163,14 @@ export async function googleJson<T>(
 
       const value = parseJson(await readBoundedBytes(response, options.maxResponseBytes));
       if (response.ok) return value as T;
-      if (isInvalidGrant(value)) throw providerError("DRIVE_REAUTH_REQUIRED");
+      if (isProviderError(value, "invalid_grant")) throw providerError("DRIVE_REAUTH_REQUIRED");
+      if (
+        response.status === 400 &&
+        options.acceptInvalidTokenAsRevoked === true &&
+        isValidInvalidTokenEvidence(value)
+      ) {
+        return null as T;
+      }
       throw providerError("DRIVE_PROVIDER_REJECTED");
     } catch (error) {
       if (error instanceof AppError) throw error;

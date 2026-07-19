@@ -6,6 +6,7 @@ import { createCredentialCipher } from "@/lib/security/credential-cipher";
 import { issueOAuthState } from "@/lib/security/oauth-state";
 import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control-plane";
 import { FakeGoogleDriveFiles, FakeGoogleDriveOAuth } from "@/test/fakes/fake-google-drive";
+import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
 import {
   beginDriveConnection,
   completeDriveConnection,
@@ -215,6 +216,31 @@ describe("completeDriveConnection", () => {
     expect(deps.files.ensureWorkspaceCalls).toHaveLength(0);
   });
 
+  it("does not replace an existing workspace when the same account resolves a different root", async () => {
+    const deps = dependencies();
+    await deps.repository.saveConnectedCredential({
+      status: "CONNECTED",
+      envelope: deps.cipher.encrypt("1", DRIVE_FILE_SCOPE, "old-refresh-token"),
+      accountPermissionIdHash: sha256("fake-permission-id"),
+      accountHint: "f***@example.test",
+      rootFolderId: "old-root-folder-001",
+    });
+    await seedContent(deps.repository);
+    const before = await deps.repository.getCredential();
+    const state = await callbackState(deps.repository);
+
+    await expect(completeDriveConnection({
+      state,
+      code: "one-use-code",
+      redirectUri: CALLBACK,
+      stateSecret: STATE_SECRET,
+      now: NOW,
+      softPercent: 90,
+    }, deps)).rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
+    await expect(deps.repository.getCredential()).resolves.toEqual(before);
+    expect(deps.files.ensureWorkspaceCalls).toHaveLength(1);
+  });
+
   it("permits explicit account replacement only when no Drive content exists", async () => {
     const deps = dependencies();
     await deps.repository.saveConnectedCredential({
@@ -308,6 +334,30 @@ describe("disconnectDrive", () => {
     expect(deps.oauth.revokeCalls).toEqual([{ refreshToken: "fake-refresh-token", timeoutMs: 5_000 }]);
     expect(deps.files.deleteFileCalls).toHaveLength(0);
     expect(deps.repository.auditEvents.at(-1)?.eventType).toBe("DRIVE_DISCONNECTED");
+  });
+
+  it("clears ciphertext when Google reports the refresh token is already invalid", async () => {
+    const deps = await connected();
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      error: "invalid_token",
+      error_description: "private invalid-token provider diagnostic",
+    }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    }));
+    const oauth = createGoogleOAuthAdapter({
+      clientId: "google-client-id.apps.googleusercontent.com",
+      clientSecret: "private-client-secret",
+      fetcher,
+    });
+
+    await expect(disconnectDrive({ now: NOW }, { ...deps, oauth }))
+      .resolves.toEqual({ status: "DISCONNECTED" });
+    await expect(deps.repository.getCredential()).resolves.toMatchObject({
+      status: "DISCONNECTED",
+      envelope: null,
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("retains ciphertext only for retryable revocation", async () => {

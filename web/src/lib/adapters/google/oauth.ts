@@ -201,6 +201,7 @@ export function createGoogleOAuthAdapter(options: GoogleOAuthOptions): DriveOAut
           timeoutMs,
           maxResponseBytes: OAUTH_RESPONSE_BYTES,
           attempts: OAUTH_ATTEMPTS,
+          acceptInvalidTokenAsRevoked: true,
         });
         return "REVOKED";
       } catch (error) {

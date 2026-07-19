@@ -34,6 +34,15 @@ type DriveFile = Readonly<{
   appProperties: Readonly<Record<string, string>>;
 }>;
 
+type ExpectedDriveFile = Readonly<{
+  name: string;
+  mimeType: string;
+  parentId: string;
+  canonicalParentId?: string;
+  appProperties: Readonly<Record<string, string>>;
+  empty?: boolean;
+}>;
+
 function stableError(code: PublicCode, status = 502): AppError {
   return new AppError(code, status);
 }
@@ -147,20 +156,14 @@ function sameProperties(
 
 function validateExpectedFile(
   value: unknown,
-  expected: Readonly<{
-    name: string;
-    mimeType: string;
-    parentId: string;
-    appProperties: Readonly<Record<string, string>>;
-    empty?: boolean;
-  }>,
+  expected: ExpectedDriveFile,
 ): DriveFile {
   const file = parseDriveFile(value);
   if (
     !file ||
     file.name !== expected.name ||
     file.mimeType !== expected.mimeType ||
-    file.parentIds[0] !== expected.parentId ||
+    file.parentIds[0] !== (expected.canonicalParentId ?? expected.parentId) ||
     file.trashed ||
     !sameProperties(file.appProperties, expected.appProperties) ||
     (expected.empty === true && file.sizeBytes !== 0)
@@ -321,6 +324,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     accessToken: string,
     url: string,
     init: RequestInit = {},
+    attempts = DRIVE_ATTEMPTS,
   ): Promise<T> {
     return googleJson(fetcher, url, {
       ...init,
@@ -328,19 +332,13 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     }, {
       timeoutMs: DRIVE_TIMEOUT_MS,
       maxResponseBytes: DRIVE_RESPONSE_BYTES,
-      attempts: DRIVE_ATTEMPTS,
+      attempts,
     });
   }
 
   async function listExpected(
     accessToken: string,
-    expected: Readonly<{
-      name: string;
-      mimeType: string;
-      parentId: string;
-      appProperties: Readonly<Record<string, string>>;
-      empty?: boolean;
-    }>,
+    expected: ExpectedDriveFile,
   ): Promise<DriveFile | null> {
     const url = driveUrl("/files", {
       q: queryFor(expected.parentId, expected.appProperties),
@@ -355,45 +353,56 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
 
   async function createExpected(
     accessToken: string,
-    expected: Readonly<{
-      name: string;
-      mimeType: string;
-      parentId: string;
-      appProperties: Readonly<Record<string, string>>;
-      empty?: boolean;
-    }>,
+    expected: ExpectedDriveFile,
   ): Promise<DriveFile> {
-    const value = await driveJson(accessToken, driveUrl("/files", { fields: FILE_FIELDS }), {
-      method: "POST",
-      headers: headers(accessToken, true),
-      body: JSON.stringify({
-        name: expected.name,
-        mimeType: expected.mimeType,
-        parents: [expected.parentId],
-        appProperties: expected.appProperties,
-      }),
-    });
+    const value = await driveJson(
+      accessToken,
+      driveUrl("/files", { fields: FILE_FIELDS }),
+      {
+        method: "POST",
+        headers: headers(accessToken, true),
+        body: JSON.stringify({
+          name: expected.name,
+          mimeType: expected.mimeType,
+          parents: [expected.parentId],
+          appProperties: expected.appProperties,
+        }),
+      },
+      1,
+    );
     return validateExpectedFile(value, expected);
   }
 
   async function ensureExpected(
     accessToken: string,
-    expected: Readonly<{
-      name: string;
-      mimeType: string;
-      parentId: string;
-      appProperties: Readonly<Record<string, string>>;
-      empty?: boolean;
-    }>,
+    expected: ExpectedDriveFile,
   ): Promise<DriveFile> {
-    return (await listExpected(accessToken, expected)) ?? createExpected(accessToken, expected);
+    const existing = await listExpected(accessToken, expected);
+    if (existing) return existing;
+    try {
+      return await createExpected(accessToken, expected);
+    } catch (error) {
+      if (!(error instanceof AppError)) throw error;
+      const reconciled = await listExpected(accessToken, expected);
+      if (reconciled) return reconciled;
+      throw error;
+    }
   }
 
   async function ensureRoot(accessToken: string): Promise<DriveFile> {
+    const rootEvidence = objectRecord(await driveJson<unknown>(
+      accessToken,
+      driveUrl("/files/root", { fields: "id" }),
+      { method: "GET" },
+    ));
+    if (!rootEvidence || !hasExactKeys(rootEvidence, ["id"]) || !boundedDriveId(rootEvidence.id)) {
+      throw remoteMismatch();
+    }
     return ensureExpected(accessToken, {
       name: "YTB-VPS",
       mimeType: FOLDER_MIME,
       parentId: "root",
+      canonicalParentId: rootEvidence.id,
       appProperties: ROOT_PROPERTIES,
     });
   }

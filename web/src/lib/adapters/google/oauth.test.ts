@@ -176,12 +176,52 @@ describe("createGoogleOAuthAdapter", () => {
     expect(JSON.stringify(error)).not.toContain(providerText);
   });
 
+  it("keeps invalid_token during code exchange classified as provider rejected", async () => {
+    const providerText = "private invalid-token provider diagnostic";
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: "invalid_token",
+      error_description: providerText,
+    }, { status: 400 }));
+
+    const error = await adapter(fetcher).exchangeCode({
+      code: "one-use-secret-code",
+      redirectUri: CALLBACK,
+      timeoutMs: 5_000,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
+    expect(JSON.stringify(error)).not.toContain(providerText);
+  });
+
   it("revokes with a form body and accepts Google's empty success response", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
 
     await expect(adapter(fetcher).revokeRefreshToken(REFRESH_TOKEN, 5_000))
       .resolves.toBe("REVOKED");
     expect(Object.fromEntries(postedForm(fetcher))).toEqual({ token: REFRESH_TOKEN });
+  });
+
+  it("treats invalid_token during revocation as effectively revoked", async () => {
+    const providerText = "private invalid-token provider diagnostic";
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: "invalid_token",
+      error_description: providerText,
+    }, { status: 400 }));
+
+    await expect(adapter(fetcher).revokeRefreshToken(REFRESH_TOKEN, 5_000))
+      .resolves.toBe("REVOKED");
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [{ error: "invalid_token", unexpected: true }],
+    [{ error: "invalid_token", error_description: 42 }],
+    [{ error: "invalid_token", error_description: "x".repeat(2_049) }],
+  ])("rejects malformed invalid_token revocation evidence %#", async (body) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(body, { status: 400 }));
+
+    await expect(adapter(fetcher).revokeRefreshToken(REFRESH_TOKEN, 5_000))
+      .rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
   });
 
   it.each([429, 503])("maps retryable revoke HTTP %i to RETRYABLE", async (status) => {

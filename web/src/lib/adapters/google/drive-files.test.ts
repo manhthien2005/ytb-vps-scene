@@ -8,6 +8,7 @@ const NOW = new Date("2026-07-19T00:00:00.000Z");
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 const ARTIFACT_ID = "10000000-0000-4000-8000-000000000001";
+const MY_DRIVE_ROOT_ID = "opaque-my-drive-root-id";
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -75,20 +76,30 @@ describe("createGoogleDriveFilesAdapter", () => {
   it("queries by private root properties and creates one private root folder", async () => {
     const properties = { ytbVpsRole: "root", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
-      .mockResolvedValueOnce(jsonResponse(folder("drive-root-folder-001", "YTB-VPS", "root", properties)));
+      .mockResolvedValueOnce(jsonResponse(folder(
+        "drive-root-folder-001",
+        "YTB-VPS",
+        MY_DRIVE_ROOT_ID,
+        properties,
+      )));
 
     await expect(adapter(fetcher).ensureWorkspace(ACCESS_TOKEN))
       .resolves.toEqual({ rootFolderId: "drive-root-folder-001" });
 
-    const list = requestDetails(fetcher, 0);
+    const root = requestDetails(fetcher, 0);
+    expect(root.url.pathname).toBe("/drive/v3/files/root");
+    expect([...root.url.searchParams.entries()]).toEqual([["fields", "id"]]);
+
+    const list = requestDetails(fetcher, 1);
     expect(list.url.searchParams.get("fields")).toBe(`files(${FILE_FIELDS})`);
     expect(list.url.searchParams.get("pageSize")).toBe("2");
     expect(list.url.searchParams.get("q")).toContain("'root' in parents");
     expect(list.url.searchParams.get("q")).toContain("key='ytbVpsRole' and value='root'");
     expect(list.url.searchParams.get("q")).toContain("key='schema' and value='1'");
 
-    const create = requestDetails(fetcher, 1);
+    const create = requestDetails(fetcher, 2);
     expect(create.init.method).toBe("POST");
     expect(create.url.searchParams.get("fields")).toBe(FILE_FIELDS);
     expect(JSON.parse(String(create.init.body))).toEqual({
@@ -100,21 +111,54 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(fetcher.mock.calls.every(([input]) => !String(input).includes("permissions"))).toBe(true);
   });
 
+  it("reconciles an ambiguous root create without issuing a second POST", async () => {
+    const properties = { ytbVpsRole: "root", schema: "1" };
+    const created = folder(
+      "drive-root-folder-001",
+      "YTB-VPS",
+      MY_DRIVE_ROOT_ID,
+      properties,
+    );
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse({}, { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({ files: [created] }));
+
+    await expect(adapter(fetcher).ensureWorkspace(ACCESS_TOKEN))
+      .resolves.toEqual({ rootFolderId: created.id });
+
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "GET",
+      "GET",
+      "POST",
+      "GET",
+    ]);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
   it("reuses exactly one valid root and rejects duplicates or mismatches", async () => {
     const properties = { ytbVpsRole: "root", schema: "1" };
-    const valid = folder("drive-root-folder-001", "YTB-VPS", "root", properties);
-    const reuseFetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ files: [valid] }));
+    const valid = folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, properties);
+    const reuseFetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
+      .mockResolvedValueOnce(jsonResponse({ files: [valid] }));
     await expect(adapter(reuseFetcher).ensureWorkspace(ACCESS_TOKEN))
       .resolves.toEqual({ rootFolderId: valid.id });
-    expect(reuseFetcher).toHaveBeenCalledOnce();
+    expect(reuseFetcher).toHaveBeenCalledTimes(2);
 
-    const duplicateFetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ files: [valid, valid] }));
+    const duplicateFetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
+      .mockResolvedValueOnce(jsonResponse({ files: [valid, valid] }));
     await expect(adapter(duplicateFetcher).ensureWorkspace(ACCESS_TOKEN))
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
 
-    const mismatchFetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
-      files: [{ ...valid, parents: ["wrong-parent"] }],
-    }));
+    const mismatchFetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [{ ...valid, parents: ["wrong-parent"] }],
+      }));
     await expect(adapter(mismatchFetcher).ensureWorkspace(ACCESS_TOKEN))
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
   });
@@ -125,7 +169,10 @@ describe("createGoogleDriveFilesAdapter", () => {
     const projectProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "project", schema: "1" };
     const inputProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "input", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ files: [folder("drive-root-folder-001", "YTB-VPS", "root", rootProperties)] }))
+      .mockResolvedValueOnce(jsonResponse({ id: MY_DRIVE_ROOT_ID }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, rootProperties)],
+      }))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder("drive-projects-folder-001", "projects", "drive-root-folder-001", projectsProperties)))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
@@ -137,8 +184,8 @@ describe("createGoogleDriveFilesAdapter", () => {
       inputFolderId: "drive-input-folder-001",
     });
 
-    const createdProjects = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
-    const createdProject = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
+    const createdProjects = JSON.parse(String(fetcher.mock.calls[3]![1]?.body));
+    const createdProject = JSON.parse(String(fetcher.mock.calls[5]![1]?.body));
     expect(createdProjects).toMatchObject({
       name: "projects",
       parents: ["drive-root-folder-001"],
@@ -218,6 +265,71 @@ describe("createGoogleDriveFilesAdapter", () => {
     const created = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
     expect(created.name).toBe("source.webm");
     expect(JSON.stringify(created)).not.toContain("private-display-name.webm");
+  });
+
+  it.each([
+    ["malformed success JSON", () => new Response("{", { status: 200 })],
+    ["a failed success stream", () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"id":"part'));
+        controller.error(new Error("private provider stream failure"));
+      },
+    }), { status: 200 })],
+  ])("reconciles %s after one source create", async (_case, ambiguousResponse) => {
+    const properties = {
+      ytbVpsProjectId: PROJECT_ID,
+      ytbVpsArtifactId: ARTIFACT_ID,
+      ytbVpsRole: "source",
+      schema: "1",
+    };
+    const created = {
+      id: "drive-source-file-001",
+      name: "source.webm",
+      mimeType: "video/webm",
+      size: "0",
+      parents: ["drive-input-folder-001"],
+      trashed: false,
+      appProperties: properties,
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(ambiguousResponse())
+      .mockResolvedValueOnce(jsonResponse({ files: [created] }));
+
+    await expect(adapter(fetcher).ensureSourceFile(ACCESS_TOKEN, {
+      projectId: PROJECT_ID,
+      artifactId: ARTIFACT_ID,
+      parentId: "drive-input-folder-001",
+      fileName: "private-display-name.webm",
+      mimeType: "video/webm",
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "webm",
+    })).resolves.toBe(created.id);
+
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "POST", "GET"]);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("re-lists once without repeating a definitively rejected source create", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse({ error: "invalid" }, { status: 400 }))
+      .mockResolvedValueOnce(jsonResponse({ files: [] }));
+
+    await expect(adapter(fetcher).ensureSourceFile(ACCESS_TOKEN, {
+      projectId: PROJECT_ID,
+      artifactId: ARTIFACT_ID,
+      parentId: "drive-input-folder-001",
+      fileName: "private-display-name.webm",
+      mimeType: "video/webm",
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "webm",
+    })).rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
+
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "POST", "GET"]);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 
   it("creates a bounded resumable PATCH update session with a trusted URI", async () => {

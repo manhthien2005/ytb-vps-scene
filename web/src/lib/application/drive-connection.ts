@@ -175,8 +175,9 @@ export async function completeDriveConnection(
   }
   const permissionHash = hashText(account.permissionId);
   const existing = await dependencies.repository.getCredential();
+  const hasDriveContent = await dependencies.repository.hasDriveContent();
   if (
-    await dependencies.repository.hasDriveContent() &&
+    hasDriveContent &&
     existing?.accountPermissionIdHash !== permissionHash
   ) {
     throw new AppError("DRIVE_ACCOUNT_MISMATCH", 409);
@@ -184,6 +185,9 @@ export async function completeDriveConnection(
 
   const workspace = await providerCall(() => dependencies.files.ensureWorkspace(accessToken));
   if (!validBoundedText(workspace.rootFolderId, 10, 256)) throw providerRejected();
+  if (hasDriveContent && existing?.rootFolderId !== workspace.rootFolderId) {
+    throw new AppError("DRIVE_REMOTE_MISMATCH", 502);
+  }
   const appManagedBytes = await dependencies.repository.appManagedDriveBytes();
   if (!Number.isSafeInteger(appManagedBytes) || appManagedBytes < 0) throw providerRejected();
 
