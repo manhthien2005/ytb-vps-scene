@@ -12,6 +12,9 @@ const SESSION_URI =
   "https://www.googleapis.com/upload/drive/v3/files/source-file?upload_id=synthetic-capability";
 const RENEWED_SESSION_URI =
   "https://www.googleapis.com/upload/drive/v3/files/source-file?upload_id=renewed-synthetic-capability";
+const ALTERNATE_SESSION_URI =
+  "https://www.googleapis.com/upload/drive/v3/files/source-file?upload_id=alternate-synthetic-capability";
+const ALTERNATE_ARTIFACT_ID = "c0000000-0000-4000-8000-000000000003";
 const HOSTILE_SESSION_URI =
   "https://app.example/api/private-upload?capability=hostile-mutation-marker";
 const EXPIRES_AT = "2026-07-26T00:00:00.000Z";
@@ -1182,26 +1185,105 @@ describe("ResumableUploader", () => {
     },
   );
 
-  it("revalidates a renewed destination after persistence and before media fetch", async () => {
+  it("snapshots each valid renewal field once before validation and use", async () => {
     const file = fileOfSize();
     const session = sessionFor(file);
     const store = new MemoryUploadSessionStore();
     const fetcher = queuedFetcher(response(404), response(201));
     const api = controlPlaneApi();
-    let sessionUriReads = 0;
+    const reads = {
+      artifactId: 0,
+      sessionUri: 0,
+      chunkBytes: 0,
+      expiresAt: 0,
+    };
     vi.mocked(api.renewSession).mockResolvedValue({
-      artifactId: session.artifactId,
-      get sessionUri() {
-        sessionUriReads += 1;
-        return sessionUriReads === 1 ? RENEWED_SESSION_URI : HOSTILE_SESSION_URI;
+      get artifactId() {
+        reads.artifactId += 1;
+        return reads.artifactId === 1 ? session.artifactId : ALTERNATE_ARTIFACT_ID;
       },
-      chunkBytes: 8_388_608,
-      expiresAt: RENEWED_EXPIRES_AT,
-    });
+      get sessionUri() {
+        reads.sessionUri += 1;
+        return reads.sessionUri === 1 ? RENEWED_SESSION_URI : ALTERNATE_SESSION_URI;
+      },
+      get chunkBytes() {
+        reads.chunkBytes += 1;
+        return reads.chunkBytes === 1 ? 8_388_608 : 16_777_216;
+      },
+      get expiresAt() {
+        reads.expiresAt += 1;
+        return reads.expiresAt === 1 ? RENEWED_EXPIRES_AT : "1999-01-01T00:00:00.000Z";
+      },
+    } as unknown as Awaited<ReturnType<UploadControlPlaneApi["renewSession"]>>);
     vi.mocked(api.complete).mockResolvedValue({
       status: "SOURCE_READY",
       actualSizeBytes: file.size,
     });
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await uploader.start(file, session);
+
+    expect(reads).toEqual({
+      artifactId: 1,
+      sessionUri: 1,
+      chunkBytes: 1,
+      expiresAt: 1,
+    });
+    expect(fetcher.requests.map((request) => request.url)).toEqual([
+      SESSION_URI,
+      RENEWED_SESSION_URI,
+    ]);
+    expect(store.puts[1]).toEqual({
+      ...session,
+      sessionUri: RENEWED_SESSION_URI,
+      nextOffset: 0,
+      chunkBytes: 8_388_608,
+      expiresAt: RENEWED_EXPIRES_AT,
+    });
+    expect(store.puts.some((record) => (
+      record.artifactId === ALTERNATE_ARTIFACT_ID ||
+      record.sessionUri === ALTERNATE_SESSION_URI
+    ))).toBe(false);
+    expect(api.complete).toHaveBeenCalledWith(session.projectId, session.artifactId);
+  });
+
+  it("reads every renewal field once and fails closed on an invalid first value", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const store = new MemoryUploadSessionStore();
+    const fetcher = queuedFetcher(response(404), response(201));
+    const api = controlPlaneApi();
+    const reads = {
+      artifactId: 0,
+      sessionUri: 0,
+      chunkBytes: 0,
+      expiresAt: 0,
+    };
+    vi.mocked(api.renewSession).mockResolvedValue({
+      get artifactId() {
+        reads.artifactId += 1;
+        return reads.artifactId === 1 ? session.artifactId : ALTERNATE_ARTIFACT_ID;
+      },
+      get sessionUri() {
+        reads.sessionUri += 1;
+        return reads.sessionUri === 1 ? HOSTILE_SESSION_URI : ALTERNATE_SESSION_URI;
+      },
+      get chunkBytes() {
+        reads.chunkBytes += 1;
+        return reads.chunkBytes === 1 ? 8_388_608 : 16_777_216;
+      },
+      get expiresAt() {
+        reads.expiresAt += 1;
+        return reads.expiresAt === 1 ? RENEWED_EXPIRES_AT : "1999-01-01T00:00:00.000Z";
+      },
+    } as unknown as Awaited<ReturnType<UploadControlPlaneApi["renewSession"]>>);
     const uploader = createResumableUploader({
       fetcher: fetcher.fetcher,
       store,
@@ -1216,9 +1298,18 @@ describe("ResumableUploader", () => {
     });
 
     expect(api.renewSession).toHaveBeenCalledOnce();
+    expect(reads).toEqual({
+      artifactId: 1,
+      sessionUri: 1,
+      chunkBytes: 1,
+      expiresAt: 1,
+    });
     expect(fetcher.requests).toHaveLength(1);
     expect(fetcher.requests[0]!.url).toBe(SESSION_URI);
-    expect(JSON.stringify(uploader.snapshot())).not.toContain(HOSTILE_SESSION_URI);
+    expect(store.puts).toEqual([session]);
+    expect(JSON.stringify({ snapshot: uploader.snapshot(), store: store.puts })).not.toContain(
+      ALTERNATE_SESSION_URI,
+    );
   });
 
   it("isolates the accepted file identity from renewal API mutation", async () => {

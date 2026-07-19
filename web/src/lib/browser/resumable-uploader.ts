@@ -360,22 +360,28 @@ export function createResumableUploader(
           continue;
         }
         if (cancelRequested) return;
+        const renewedSnapshot = Object.freeze({
+          artifactId: renewed.artifactId,
+          sessionUri: renewed.sessionUri,
+          chunkBytes: renewed.chunkBytes,
+          expiresAt: renewed.expiresAt,
+        });
         if (
-          renewed.artifactId !== record.artifactId ||
-          renewed.chunkBytes !== 8_388_608 ||
-          !validDriveSessionUri(renewed.sessionUri) ||
-          !validFutureExpiration(renewed.expiresAt, dependencies.now())
+          renewedSnapshot.artifactId !== record.artifactId ||
+          renewedSnapshot.chunkBytes !== 8_388_608 ||
+          !validDriveSessionUri(renewedSnapshot.sessionUri) ||
+          !validFutureExpiration(renewedSnapshot.expiresAt, dependencies.now())
         ) {
           throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
         }
         record = {
           projectId: record.projectId,
-          artifactId: renewed.artifactId,
-          sessionUri: renewed.sessionUri,
+          artifactId: renewedSnapshot.artifactId,
+          sessionUri: renewedSnapshot.sessionUri,
           fileIdentity: record.fileIdentity,
           nextOffset: 0,
-          chunkBytes: renewed.chunkBytes,
-          expiresAt: renewed.expiresAt,
+          chunkBytes: renewedSnapshot.chunkBytes,
+          expiresAt: renewedSnapshot.expiresAt,
         };
         await persist(record);
         if (disposed || cancelRequested) return;
