@@ -325,11 +325,19 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         }
 
         await dependencies.repository.markArtifactUploading(artifactId, claimToken);
-        const session = await dependencies.files.createResumableUpdateSession(accessToken, {
-          fileId: selected.driveFileId,
-          mimeType: selected.mimeType,
-          sizeBytes: selected.expectedSizeBytes,
-        });
+        let session: Awaited<ReturnType<DriveFilesPort["createResumableUpdateSession"]>>;
+        try {
+          session = await dependencies.files.createResumableUpdateSession(accessToken, {
+            fileId: selected.driveFileId,
+            mimeType: selected.mimeType,
+            sizeBytes: selected.expectedSizeBytes,
+          });
+        } catch (error) {
+          if (error instanceof AppError && error.code === "DRIVE_PROVIDER_REJECTED") {
+            await dependencies.repository.markSourceInvalid(artifactId);
+          }
+          throw error;
+        }
         if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
           throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
         }

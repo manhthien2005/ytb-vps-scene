@@ -527,8 +527,10 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
           url.searchParams.set("uploadType", "resumable");
           const response = await fetcher(url.toString(), {
             method: "PATCH",
+            body: "",
             headers: {
               ...headers(accessToken),
+              "content-length": "0",
               "x-upload-content-length": String(input.sizeBytes),
               "x-upload-content-type": input.mimeType,
             },

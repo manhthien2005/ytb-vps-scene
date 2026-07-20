@@ -302,6 +302,15 @@ describe("UploadService sessions", () => {
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
+  it("invalidates a source placeholder when Drive rejects session initiation", async () => {
+    files.resumableSessionError = new AppError("DRIVE_PROVIDER_REJECTED", 502);
+
+    await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
+      .rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
+
+    expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID);
+  });
+
   it("does not expose a provider session created after its source claim is taken over", async () => {
     repository.renewProvisioning
       .mockResolvedValueOnce(true)

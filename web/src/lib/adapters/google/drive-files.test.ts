@@ -419,7 +419,9 @@ describe("createGoogleDriveFilesAdapter", () => {
     );
     expect(url.searchParams.get("uploadType")).toBe("resumable");
     expect(init.method).toBe("PATCH");
+    expect(init.body).toBe("");
     const headers = new Headers(init.headers);
+    expect(headers.get("content-length")).toBe("0");
     expect(headers.get("x-upload-content-length")).toBe("8388608");
     expect(headers.get("x-upload-content-type")).toBe("video/mp4");
   });
