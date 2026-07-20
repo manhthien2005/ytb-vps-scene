@@ -541,7 +541,6 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
           url.searchParams.set("uploadType", "resumable");
           const response = await fetcher(url.toString(), {
             method: "PATCH",
-            body: "",
             headers: {
               ...headers(accessToken),
               "content-length": "0",
@@ -560,7 +559,13 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
             continue;
           }
           await readAndDiscardBounded(response);
-          if (!response.ok) throw stableError("DRIVE_PROVIDER_REJECTED");
+          if (!response.ok) {
+            console.warn("[drive-upload] session-init-rejected", {
+              stage: "provider-response",
+              status: response.status,
+            });
+            throw stableError("DRIVE_PROVIDER_REJECTED");
+          }
           const sessionUri = validateSessionUri(response.headers.get("location"));
           const issuedAt = now();
           if (!Number.isFinite(issuedAt.getTime())) throw stableError("DRIVE_PROVIDER_REJECTED");

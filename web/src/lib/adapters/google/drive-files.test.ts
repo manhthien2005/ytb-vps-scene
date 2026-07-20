@@ -426,11 +426,39 @@ describe("createGoogleDriveFilesAdapter", () => {
     );
     expect(url.searchParams.get("uploadType")).toBe("resumable");
     expect(init.method).toBe("PATCH");
-    expect(init.body).toBe("");
-    const headers = new Headers(init.headers);
-    expect(headers.get("content-length")).toBe("0");
-    expect(headers.get("x-upload-content-length")).toBe("8388608");
-    expect(headers.get("x-upload-content-type")).toBe("video/mp4");
+    expect(init.body).toBeUndefined();
+    const { signal: _signal, ...requestInit } = init;
+    const request = new Request(url, requestInit);
+    expect(request.headers.get("content-type")).toBeNull();
+    expect(request.headers.get("content-length")).toBe("0");
+    expect(request.headers.get("x-upload-content-length")).toBe("8388608");
+    expect(request.headers.get("x-upload-content-type")).toBe("video/mp4");
+  });
+
+  it("logs only a safe stage and status when Drive rejects session initiation", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(
+      { error: { message: "private provider detail" } },
+      { status: 400 },
+    ));
+
+    try {
+      await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, {
+        fileId: "drive-source-file-001",
+        mimeType: "video/mp4",
+        sizeBytes: 8_388_608,
+      })).rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
+
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        "[drive-upload] session-init-rejected",
+        { stage: "provider-response", status: 400 },
+      );
+      expect(JSON.stringify(warning.mock.calls)).not.toContain(ACCESS_TOKEN);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("drive-source-file-001");
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("private provider detail");
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("creates one private app-owned output file with exact fenced metadata", async () => {
