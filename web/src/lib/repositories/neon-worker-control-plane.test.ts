@@ -78,6 +78,16 @@ describe("worker control plane repository", () => {
          'video/mp4',100,100,$3)`,
       ["30000000-0000-4000-8000-000000000001", projectId, NOW.toISOString()],
     );
+    await db.query(
+      `insert into project_scene_settings(project_id,settings,updated_at)
+       values ($1,$2::jsonb,$3)`,
+      [projectId, JSON.stringify({
+        sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
+        logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
+        voice: "vi-VN-HoaiMyNeural",
+        rate: 1,
+      }), NOW.toISOString()],
+    );
     return projectId;
   }
 
@@ -144,6 +154,22 @@ describe("worker control plane repository", () => {
     const first = await repository.claimJob(workerA.id, NOW, "bridge-v1");
     const second = await repository.claimJob(workerB.id, AFTER_EXPIRY, "bridge-v1");
     expect(first?.lease.fencingToken).toBe(1);
+    expect(first?.execution).toEqual({
+      projectId,
+      source: {
+        driveFileId: "drive-source-001",
+        fileName: "source.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 100,
+      },
+      outputParentId: "drive-project-001",
+      sceneSettings: {
+        sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
+        logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
+        voice: "vi-VN-HoaiMyNeural",
+        rate: 1,
+      },
+    });
     expect(second?.lease.fencingToken).toBe(2);
     await expect(repository.updateJobProgress({
       workerId: workerA.id,

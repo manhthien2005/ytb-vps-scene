@@ -1,5 +1,5 @@
 import { JOB_STATES, WORKER_STATES, type JobState, type JobSummary, type WorkerState } from "@/lib/domain/control-plane";
-import { parseWorkerCapabilities, parseWorkerDoctorReport, type WorkerLease, type WorkerView } from "@/lib/domain/worker";
+import { parseMediaExecutionDescriptor, parseWorkerCapabilities, parseWorkerDoctorReport, type WorkerLease, type WorkerView } from "@/lib/domain/worker";
 import { createSql } from "@/lib/db/client";
 import type {
   EnrollmentReservation,
@@ -96,6 +96,20 @@ function parseLeaseRow(row: Record<string, unknown>): WorkerLease {
     workerId: String(row.worker_id),
     fencingToken,
     expiresAt: asIso(row.expires_at, "lease expiry"),
+  });
+}
+
+function parseExecutionRow(row: Record<string, unknown>) {
+  return parseMediaExecutionDescriptor({
+    projectId: row.project_id,
+    source: {
+      driveFileId: row.source_drive_file_id,
+      fileName: row.source_file_name,
+      mimeType: row.source_mime_type,
+      sizeBytes: Number(row.source_size_bytes),
+    },
+    outputParentId: row.output_parent_id,
+    sceneSettings: asJson(row.scene_settings, "scene settings"),
   });
 }
 
@@ -196,6 +210,7 @@ export function createWorkerControlPlaneRepository(
                select 1 from artifacts a
                where a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
              )
+             and exists (select 1 from project_scene_settings s where s.project_id=p.id)
              and not exists (select 1 from existing)
            on conflict(request_key_digest) do nothing
            returning id,project_name,state,progress_percent,updated_at
@@ -246,7 +261,7 @@ export function createWorkerControlPlaneRepository(
          ), updated_job as (
            update jobs j set state='CLAIMED',active_stage='CLAIMED',updated_at=$2
            from leased l where j.id=l.job_id
-           returning j.id,j.project_name,j.state,j.progress_percent,j.updated_at
+           returning j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at
          ), busy as (
            update workers w set state='BUSY',updated_at=$2
            from leased l where w.id=l.worker_id
@@ -256,13 +271,28 @@ export function createWorkerControlPlaneRepository(
            select l.job_id,l.worker_id,l.fencing_token,$2 from leased l, busy
            returning id
          )
-         select j.id,j.project_name,j.state,j.progress_percent,j.updated_at,
-                l.job_id,l.worker_id,l.fencing_token,l.expires_at
-         from updated_job j join leased l on l.job_id=j.id, attempt`,
+         select j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at,
+                l.job_id,l.worker_id,l.fencing_token,l.expires_at,
+                a.drive_file_id as source_drive_file_id,
+                a.display_name as source_file_name,
+                a.mime_type as source_mime_type,
+                a.actual_size_bytes as source_size_bytes,
+                p.drive_project_folder_id as output_parent_id,
+                s.settings as scene_settings
+         from updated_job j
+         join leased l on l.job_id=j.id
+         join projects p on p.id=j.project_id
+         join artifacts a on a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
+         join project_scene_settings s on s.project_id=p.id,
+         attempt`,
         [workerId, now.toISOString(), bridgeVersion],
       );
       const row = result.rows[0];
-      return row ? Object.freeze({ job: parseJobRow(row), lease: parseLeaseRow(row) }) : null;
+      return row ? Object.freeze({
+        job: parseJobRow(row),
+        lease: parseLeaseRow(row),
+        execution: parseExecutionRow(row),
+      }) : null;
     },
 
     async renewLease(input: RenewLease): Promise<WorkerLease | null> {

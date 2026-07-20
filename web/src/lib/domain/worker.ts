@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { WorkerState } from "./control-plane";
+import { parseSceneSettings, type SceneSettings } from "./scene-settings";
 
 const bridgeVersion = z.string().min(1).max(80).regex(/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/);
 
@@ -50,6 +51,30 @@ export type WorkerLease = Readonly<{
   expiresAt: string;
 }>;
 
+const mediaExecutionSchema = z.object({
+  projectId: z.string().uuid(),
+  source: z.object({
+    driveFileId: z.string().min(10).max(256).regex(/^\S+$/),
+    fileName: z.string().trim().min(1).max(255),
+    mimeType: z.enum(["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"]),
+    sizeBytes: z.number().int().safe().min(1).max(1_099_511_627_776),
+  }).strict(),
+  outputParentId: z.string().min(10).max(256).regex(/^\S+$/),
+  sceneSettings: z.unknown(),
+}).strict();
+
+export type MediaExecutionDescriptor = Readonly<{
+  projectId: string;
+  source: Readonly<{
+    driveFileId: string;
+    fileName: string;
+    mimeType: "video/mp4" | "video/quicktime" | "video/x-matroska" | "video/webm";
+    sizeBytes: number;
+  }>;
+  outputParentId: string;
+  sceneSettings: SceneSettings;
+}>;
+
 export function parseWorkerCapabilities(value: unknown): WorkerCapabilities {
   return Object.freeze(capabilitiesSchema.parse(value));
 }
@@ -57,4 +82,14 @@ export function parseWorkerCapabilities(value: unknown): WorkerCapabilities {
 export function parseWorkerDoctorReport(value: unknown): WorkerDoctorReport {
   const report = doctorReportSchema.parse(value);
   return Object.freeze({ ...report, reasonCodes: Object.freeze([...report.reasonCodes]) });
+}
+
+export function parseMediaExecutionDescriptor(value: unknown): MediaExecutionDescriptor {
+  const descriptor = mediaExecutionSchema.parse(value);
+  return Object.freeze({
+    projectId: descriptor.projectId,
+    source: Object.freeze({ ...descriptor.source }),
+    outputParentId: descriptor.outputParentId,
+    sceneSettings: Object.freeze(parseSceneSettings(descriptor.sceneSettings)),
+  });
 }

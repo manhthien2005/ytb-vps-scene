@@ -1,5 +1,5 @@
 import type { JobState, JobSummary } from "@/lib/domain/control-plane";
-import type { WorkerCapabilities, WorkerDoctorReport, WorkerLease, WorkerView } from "@/lib/domain/worker";
+import type { MediaExecutionDescriptor, WorkerCapabilities, WorkerDoctorReport, WorkerLease, WorkerView } from "@/lib/domain/worker";
 import type { WorkerSessionRepository } from "@/lib/http/worker-auth";
 
 export type EnrollmentReservation = Readonly<{
@@ -37,7 +37,11 @@ export type QueueProjectJob = Readonly<{
   now: Date;
 }>;
 
-export type JobAssignment = Readonly<{ job: JobSummary; lease: WorkerLease }>;
+export type JobAssignment = Readonly<{
+  job: JobSummary;
+  lease: WorkerLease;
+  execution: MediaExecutionDescriptor;
+}>;
 
 export type RenewLease = Readonly<{
   workerId: string;
