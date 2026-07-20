@@ -83,7 +83,7 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     WORKER_AUTH_KEY_V1: "A".repeat(43),
     WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
     WORKER_RELEASE_COMMIT: "0".repeat(40),
-    WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
+    WORKER_PIPELINE_BRIDGE_VERSION: "cp4-media-v1",
   };
   const cp2 = cp2Schema.parse({
     GOOGLE_OAUTH_CLIENT_ID: source.GOOGLE_OAUTH_CLIENT_ID,

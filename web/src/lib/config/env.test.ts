@@ -17,7 +17,7 @@ const cp2Valid = {
   WORKER_AUTH_KEY_V1: "A".repeat(43),
   WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
   WORKER_RELEASE_COMMIT: "a".repeat(40),
-  WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
+  WORKER_PIPELINE_BRIDGE_VERSION: "cp4-media-v1",
 };
 
 describe("parseServerEnv", () => {
@@ -36,7 +36,7 @@ describe("parseServerEnv", () => {
     expect(env.workerAuthKeyV1).toHaveLength(43);
     expect(env.workerReleaseRepository).toBe("https://github.com/Vanvuong2005827/REUP-RENDER.git");
     expect(env.workerReleaseCommit).toHaveLength(40);
-    expect(env.workerPipelineBridgeVersion).toBe("cp3-control-only");
+    expect(env.workerPipelineBridgeVersion).toBe("cp4-media-v1");
   });
 
   it("rejects an OpenAI API key to prevent separate billing", () => {

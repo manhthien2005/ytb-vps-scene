@@ -147,3 +147,9 @@ class ControlPlaneClient:
 
     def progress(self, job_id: str, update: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", f"/api/v1/worker/jobs/{job_id}/progress", update)
+
+    def output_session(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/worker/jobs/{job_id}/output-session", request)
+
+    def complete(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/worker/jobs/{job_id}/complete", request)

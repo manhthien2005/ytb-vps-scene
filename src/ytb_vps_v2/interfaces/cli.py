@@ -81,7 +81,7 @@ def _evidence() -> tuple[dict[str, Any], dict[str, Any]]:
         status = "FAIL"
     capabilities = {
         "protocolVersion": 1,
-        "pipelineBridgeVersion": "cp3-control-only",
+        "pipelineBridgeVersion": os.environ.get("YTB_VPS_PIPELINE_BRIDGE_VERSION", "cp4-media-v1"),
         "os": "ubuntu-22.04" if platform.system() == "Linux" else "ubuntu-22.04",
         "arch": "x86_64" if platform.machine().lower() in {"x86_64", "amd64"} else "x86_64",
         "gpuName": gpu_name,
@@ -219,7 +219,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         credential = WorkerCredentialStore(path).load()
         capabilities, doctor = _evidence()
         client = ControlPlaneClient(str(credential["origin"]), str(credential["sessionSecret"]))
-        loop = WorkerLoop(client, capabilities, doctor)
+        from ytb_vps_v2.application.media_job import MediaJobExecutor
+
+        workspace_root = Path(os.environ.get("YTB_VPS_WORK_ROOT", "/var/lib/ytb-vps/runs"))
+        loop = WorkerLoop(client, capabilities, doctor, executor=MediaJobExecutor(client), workspace_root=workspace_root)
         while True:
             loop.run_once()
             if arguments.once:

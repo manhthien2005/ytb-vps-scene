@@ -140,7 +140,7 @@ class DriveMediaTransfer:
         query = parse_qs(parsed.query, keep_blank_values=True)
         if (
             parsed.scheme != "https" or parsed.hostname != "www.googleapis.com" or
-            parsed.path != "/upload/drive/v3/files/file-001" and not parsed.path.startswith("/upload/drive/v3/files/") or
+            not parsed.path.startswith("/upload/drive/v3/files/") or
             set(query) != {"uploadType", "upload_id"} or query.get("uploadType") != ["resumable"] or
             not query.get("upload_id") or not isinstance(source, Path) or not source.is_file() or
             not isinstance(expected_size, int) or expected_size < 1 or not isinstance(expected_sha256, str) or len(expected_sha256) != 64

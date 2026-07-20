@@ -27,6 +27,21 @@ class FakeClient:
         return None
 
 
+class MediaClient(FakeClient):
+    def claim(self) -> dict[str, object] | None:
+        self.claims += 1
+        return {"job": {"id": "job-1"}}
+
+
+class FakeExecutor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], Path]] = []
+
+    def execute(self, assignment: dict[str, object], workspace_root: Path) -> str:
+        self.calls.append((assignment, workspace_root))
+        return "COMPLETED"
+
+
 class WorkerTests(unittest.TestCase):
     def test_credential_store_uses_0700_directory_and_0600_file(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -53,6 +68,20 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(loop.run_once(), "HEARTBEAT_ONLY")
         self.assertEqual(client.heartbeats, 1)
         self.assertEqual(client.claims, 0)
+
+    def test_media_worker_claims_and_executes_assignment(self) -> None:
+        client = MediaClient()
+        executor = FakeExecutor()
+        with tempfile.TemporaryDirectory() as root:
+            loop = WorkerLoop(
+                client=client,
+                capabilities={"pipelineBridgeVersion": "cp4-media-v1"},
+                doctor={"status": "PASS"},
+                executor=executor,
+                workspace_root=Path(root),
+            )
+            self.assertEqual(loop.run_once(), "MEDIA_COMPLETE")
+            self.assertEqual(executor.calls[0][1], Path(root))
 
 
 if __name__ == "__main__":

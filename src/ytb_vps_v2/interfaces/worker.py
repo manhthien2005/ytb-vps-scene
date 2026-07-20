@@ -61,17 +61,38 @@ class WorkerCredentialStore:
 class WorkerClient(Protocol):
     def heartbeat(self, evidence: dict[str, Any]) -> dict[str, Any]: ...
     def claim(self) -> dict[str, Any] | None: ...
+    def renew(self, job_id: str, fencing_token: int) -> dict[str, Any]: ...
+    def progress(self, job_id: str, update: dict[str, Any]) -> dict[str, Any]: ...
+    def output_session(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]: ...
+    def complete(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]: ...
+
+
+class WorkerExecutor(Protocol):
+    def execute(self, assignment: dict[str, Any], workspace_root: Path) -> str: ...
 
 
 class WorkerLoop:
-    def __init__(self, client: WorkerClient, capabilities: dict[str, Any], doctor: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        client: WorkerClient,
+        capabilities: dict[str, Any],
+        doctor: dict[str, Any],
+        *,
+        executor: WorkerExecutor | None = None,
+        workspace_root: Path | None = None,
+    ) -> None:
         self.client = client
         self.capabilities = capabilities
         self.doctor = doctor
+        self.executor = executor
+        self.workspace_root = workspace_root or Path("/var/lib/ytb-vps/runs")
 
     def run_once(self) -> str:
         self.client.heartbeat({"capabilities": self.capabilities, "doctor": self.doctor})
         if self.capabilities.get("pipelineBridgeVersion") == "cp3-control-only":
             return "HEARTBEAT_ONLY"
-        self.client.claim()
-        return "POLL_COMPLETE"
+        assignment = self.client.claim()
+        if assignment is None or self.executor is None:
+            return "POLL_COMPLETE"
+        self.executor.execute(assignment, self.workspace_root)
+        return "MEDIA_COMPLETE"

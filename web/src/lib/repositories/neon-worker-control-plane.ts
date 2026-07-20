@@ -107,6 +107,7 @@ function parseExecutionRow(row: Record<string, unknown>) {
       fileName: row.source_file_name,
       mimeType: row.source_mime_type,
       sizeBytes: Number(row.source_size_bytes),
+      sha256: row.source_sha256,
     },
     outputParentId: row.output_parent_id,
     sceneSettings: asJson(row.scene_settings, "scene settings"),
@@ -277,6 +278,7 @@ export function createWorkerControlPlaneRepository(
                 a.display_name as source_file_name,
                 a.mime_type as source_mime_type,
                 a.actual_size_bytes as source_size_bytes,
+                a.checksum_sha256 as source_sha256,
                 p.drive_project_folder_id as output_parent_id,
                 s.settings as scene_settings
          from updated_job j
@@ -324,6 +326,7 @@ export function createWorkerControlPlaneRepository(
                 a.display_name as source_file_name,
                 a.mime_type as source_mime_type,
                 a.actual_size_bytes as source_size_bytes,
+                a.checksum_sha256 as source_sha256,
                 p.drive_project_folder_id as output_parent_id,
                 s.settings as scene_settings
          from job_leases l

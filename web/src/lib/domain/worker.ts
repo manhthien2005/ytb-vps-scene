@@ -58,6 +58,7 @@ const mediaExecutionSchema = z.object({
     fileName: z.string().trim().min(1).max(255),
     mimeType: z.enum(["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"]),
     sizeBytes: z.number().int().safe().min(1).max(1_099_511_627_776),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
   }).strict(),
   outputParentId: z.string().min(10).max(256).regex(/^\S+$/),
   sceneSettings: z.unknown(),
@@ -70,6 +71,7 @@ export type MediaExecutionDescriptor = Readonly<{
     fileName: string;
     mimeType: "video/mp4" | "video/quicktime" | "video/x-matroska" | "video/webm";
     sizeBytes: number;
+    sha256: string;
   }>;
   outputParentId: string;
   sceneSettings: SceneSettings;

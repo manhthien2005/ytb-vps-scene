@@ -73,10 +73,10 @@ describe("worker control plane repository", () => {
     await db.query(
       `insert into artifacts(
          id,project_id,kind,status,drive_file_id,drive_parent_id,display_name,mime_type,
-         expected_size_bytes,actual_size_bytes,verified_at
+         expected_size_bytes,actual_size_bytes,checksum_sha256,verified_at
        ) values ($1,$2,'SOURCE','READY','drive-source-001','drive-input-0001','source.mp4',
-         'video/mp4',100,100,$3)`,
-      ["30000000-0000-4000-8000-000000000001", projectId, NOW.toISOString()],
+         'video/mp4',100,100,$3,$4)`,
+      ["30000000-0000-4000-8000-000000000001", projectId, "a".repeat(64), NOW.toISOString()],
     );
     await db.query(
       `insert into project_scene_settings(project_id,settings,updated_at)
@@ -161,6 +161,7 @@ describe("worker control plane repository", () => {
         fileName: "source.mp4",
         mimeType: "video/mp4",
         sizeBytes: 100,
+        sha256: "a".repeat(64),
       },
       outputParentId: "drive-project-001",
       sceneSettings: {

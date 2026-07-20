@@ -75,6 +75,14 @@ class ControlPlaneHttpTests(unittest.TestCase):
         self.assertEqual(result["sessionSecret"], "B" * 43)
         self.assertNotIn("Authorization", self.transport.last_headers)
 
+    def test_media_lifecycle_calls_use_fenced_job_paths(self) -> None:
+        self.transport.response = HttpResponse(200, b'{"sessionUri":"https://www.googleapis.com/upload/drive/v3/files/file-001?uploadType=resumable&upload_id=x"}', {})
+        client = ControlPlaneClient("https://app.example", "A" * 43, transport=self.transport, sleep=lambda _: None)
+        client.output_session("job-001", {"fencingToken": 1, "sizeBytes": 10, "checksumSha256": "a" * 64})
+        self.assertEqual(self.transport.last_url, "https://app.example/api/v1/worker/jobs/job-001/output-session")
+        client.complete("job-001", {"artifactId": "artifact-001", "driveFileId": "file-001", "fencingToken": 1, "sizeBytes": 10})
+        self.assertEqual(self.transport.last_url, "https://app.example/api/v1/worker/jobs/job-001/complete")
+
 
 if __name__ == "__main__":
     unittest.main()
