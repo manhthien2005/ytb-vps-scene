@@ -18,3 +18,7 @@ This directory is the short-request metadata control plane. It never accepts vid
 12. Run `npm run dev` and open `http://localhost:3000`.
 
 The control plane stores only metadata in Neon. Source video chunks travel directly from the signed-in browser to the private Google Drive resumable endpoint; Vercel never receives video bytes. GPU VPS attachment remains a safe empty state until its owning phase.
+
+## Deployment
+
+The production Vercel project is connected to the private `manhthien2005/ytb-vps-scene` repository with `web` as its root directory. Keep runtime secrets in Vercel Environment Variables; never commit `.env.local` or generated credentials.
