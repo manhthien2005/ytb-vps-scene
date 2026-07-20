@@ -436,7 +436,7 @@ describe("createGoogleDriveFilesAdapter", () => {
   });
 
   it("logs only a safe stage and status when Drive rejects session initiation", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(
       { error: { message: "private provider detail" } },
       { status: 400 },
@@ -449,15 +449,15 @@ describe("createGoogleDriveFilesAdapter", () => {
         sizeBytes: 8_388_608,
       })).rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
 
-      expect(warning).toHaveBeenCalledExactlyOnceWith(
+      expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
         "[drive-upload] session-init-rejected",
         { stage: "provider-response", status: 400 },
       );
-      expect(JSON.stringify(warning.mock.calls)).not.toContain(ACCESS_TOKEN);
-      expect(JSON.stringify(warning.mock.calls)).not.toContain("drive-source-file-001");
-      expect(JSON.stringify(warning.mock.calls)).not.toContain("private provider detail");
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain(ACCESS_TOKEN);
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("drive-source-file-001");
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("private provider detail");
     } finally {
-      warning.mockRestore();
+      diagnostic.mockRestore();
     }
   });
 

@@ -560,7 +560,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
           }
           await readAndDiscardBounded(response);
           if (!response.ok) {
-            console.warn("[drive-upload] session-init-rejected", {
+            console.error("[drive-upload] session-init-rejected", {
               stage: "provider-response",
               status: response.status,
             });
