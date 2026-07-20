@@ -6,6 +6,7 @@ import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-
 import { createJobQueueService } from "@/lib/application/job-queue";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createConfiguredFreeTierHealthService } from "@/lib/application/configured-health";
+import { createConfiguredDrive } from "@/lib/application/configured-drive";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -23,7 +24,8 @@ export async function POST(request: NextRequest) {
       generateId: () => crypto.randomUUID(),
     });
     const result = await service.claim(worker, new Date());
-    return NextResponse.json(result, { headers: HEADERS });
+    const driveAccessToken = await createConfiguredDrive(env, driveRepository).access.getAccessToken();
+    return NextResponse.json({ ...result, driveAccessToken }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) {
       if (error.status === 204) return new NextResponse(null, { status: 204, headers: HEADERS });
