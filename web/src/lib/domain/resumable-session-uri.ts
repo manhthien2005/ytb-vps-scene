@@ -31,16 +31,27 @@ export function parseDriveResumableSessionUri(value: unknown): string | null {
     const entries = [...uri.searchParams.entries()];
     const uploadIds = uri.searchParams.getAll("upload_id");
     const uploadTypes = uri.searchParams.getAll("uploadType");
+    const sessionCredentials = uri.searchParams.getAll("session_crd");
     const queryShapeIsValid = (
       entries.length === 1 &&
       entries[0]?.[0] === "upload_id" &&
-      uploadTypes.length === 0
+      uploadTypes.length === 0 &&
+      sessionCredentials.length === 0
     ) || (
       entries.length === 2 &&
       uploadIds.length === 1 &&
       uploadTypes.length === 1 &&
+      sessionCredentials.length === 0 &&
       uploadTypes[0] === "resumable" &&
       entries.every(([key]) => key === "upload_id" || key === "uploadType")
+    ) || (
+      entries.length === 3 &&
+      uploadIds.length === 1 &&
+      uploadTypes.length === 1 &&
+      sessionCredentials.length === 1 &&
+      uploadTypes[0] === "resumable" &&
+      boundedAscii(sessionCredentials[0], UPLOAD_ID_MAX_BYTES) &&
+      entries.every(([key]) => key === "upload_id" || key === "uploadType" || key === "session_crd")
     );
     const uploadId = uploadIds[0];
     if (
