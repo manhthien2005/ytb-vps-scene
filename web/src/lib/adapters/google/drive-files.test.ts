@@ -169,37 +169,44 @@ describe("createGoogleDriveFilesAdapter", () => {
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
   });
 
-  it("ensures the projects/project/input hierarchy by IDs and appProperties", async () => {
+  it("ensures only root input/output and one film folder under output", async () => {
     const rootProperties = { ytbVpsRole: "root", schema: "1" };
-    const projectsProperties = { ytbVpsRole: "projects", schema: "1" };
-    const projectProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "project", schema: "1" };
-    const inputProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "input", schema: "1" };
+    const inputProperties = { ytbVpsRole: "input", schema: "1" };
+    const outputProperties = { ytbVpsRole: "output", schema: "1" };
+    const filmProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "film", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
         files: [folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, rootProperties)],
       }))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
-      .mockResolvedValueOnce(jsonResponse(folder("drive-projects-folder-001", "projects", "drive-root-folder-001", projectsProperties)))
+      .mockResolvedValueOnce(jsonResponse(folder("drive-input-folder-001", "input", "drive-root-folder-001", inputProperties)))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
-      .mockResolvedValueOnce(jsonResponse(folder("drive-project-folder-001", PROJECT_ID, "drive-projects-folder-001", projectProperties)))
-      .mockResolvedValueOnce(jsonResponse({ files: [folder("drive-input-folder-001", "input", "drive-project-folder-001", inputProperties)] }));
+      .mockResolvedValueOnce(jsonResponse(folder("drive-output-folder-001", "output", "drive-root-folder-001", outputProperties)))
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse(folder("drive-film-folder-001", PROJECT_ID, "drive-output-folder-001", filmProperties)));
 
     await expect(adapter(fetcher).ensureProjectFolders(ACCESS_TOKEN, PROJECT_ID)).resolves.toEqual({
-      projectFolderId: "drive-project-folder-001",
+      projectFolderId: "drive-film-folder-001",
       inputFolderId: "drive-input-folder-001",
     });
 
-    const createdProjects = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
-    const createdProject = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
-    expect(createdProjects).toMatchObject({
-      name: "projects",
+    const createdInput = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
+    const createdOutput = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
+    const createdFilm = JSON.parse(String(fetcher.mock.calls[6]![1]?.body));
+    expect(createdInput).toMatchObject({
+      name: "input",
       parents: ["drive-root-folder-001"],
-      appProperties: projectsProperties,
+      appProperties: inputProperties,
     });
-    expect(createdProject).toMatchObject({
+    expect(createdOutput).toMatchObject({
+      name: "output",
+      parents: ["drive-root-folder-001"],
+      appProperties: outputProperties,
+    });
+    expect(createdFilm).toMatchObject({
       name: PROJECT_ID,
-      parents: ["drive-projects-folder-001"],
-      appProperties: projectProperties,
+      parents: ["drive-output-folder-001"],
+      appProperties: filmProperties,
     });
   });
 

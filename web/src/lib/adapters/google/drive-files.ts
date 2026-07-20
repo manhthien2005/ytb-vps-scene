@@ -19,7 +19,8 @@ const DRIVE_ATTEMPTS = 3;
 const SESSION_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ROOT_PROPERTIES = Object.freeze({ ytbVpsRole: "root", schema: "1" });
-const PROJECTS_PROPERTIES = Object.freeze({ ytbVpsRole: "projects", schema: "1" });
+const INPUT_PROPERTIES = Object.freeze({ ytbVpsRole: "input", schema: "1" });
+const OUTPUT_PROPERTIES = Object.freeze({ ytbVpsRole: "output", schema: "1" });
 
 type GoogleDriveFilesOptions = Readonly<{
   fetcher?: typeof fetch;
@@ -456,25 +457,25 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     async ensureProjectFolders(accessToken, projectId) {
       validateProjectId(projectId);
       const root = await ensureRoot(accessToken);
-      const projects = await ensureExpected(accessToken, {
-        name: "projects",
-        mimeType: FOLDER_MIME,
-        parentId: root.id,
-        appProperties: PROJECTS_PROPERTIES,
-      });
-      const project = await ensureExpected(accessToken, {
-        name: projectId,
-        mimeType: FOLDER_MIME,
-        parentId: projects.id,
-        appProperties: projectProperties(projectId, "project"),
-      });
       const input = await ensureExpected(accessToken, {
         name: "input",
         mimeType: FOLDER_MIME,
-        parentId: project.id,
-        appProperties: projectProperties(projectId, "input"),
+        parentId: root.id,
+        appProperties: INPUT_PROPERTIES,
       });
-      return { projectFolderId: project.id, inputFolderId: input.id };
+      const output = await ensureExpected(accessToken, {
+        name: "output",
+        mimeType: FOLDER_MIME,
+        parentId: root.id,
+        appProperties: OUTPUT_PROPERTIES,
+      });
+      const film = await ensureExpected(accessToken, {
+        name: projectId,
+        mimeType: FOLDER_MIME,
+        parentId: output.id,
+        appProperties: projectProperties(projectId, "film"),
+      });
+      return { projectFolderId: film.id, inputFolderId: input.id };
     },
 
     async ensureSourceFile(accessToken, input) {
