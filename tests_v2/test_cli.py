@@ -36,6 +36,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "ytb-vps-v2 0.1.0.dev0")
 
+    def test_parser_exposes_native_worker_commands(self) -> None:
+        from ytb_vps_v2.interfaces.cli import build_parser
+
+        parser = build_parser()
+        command_arguments = {
+            "worker-enroll": ["--origin", "https://app.example", "--token", "A" * 43],
+            "worker-run": ["--once"],
+            "worker-status": [],
+            "worker-detach": [],
+        }
+        for command, arguments_list in command_arguments.items():
+            arguments = parser.parse_args([command, *arguments_list])
+            self.assertEqual(arguments.command, command)
+
 
 if __name__ == "__main__":
     unittest.main()
