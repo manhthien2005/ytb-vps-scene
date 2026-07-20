@@ -125,6 +125,11 @@ export function ProjectUpload({
     : health.driveConnection !== "CONNECTED" ? stableMessage("DRIVE_NOT_CONNECTED") : null;
   const workDisabled = readOnlyReason !== null;
   const recovery = matchingRecovery(recoveries, selectedProjectId, file);
+  const uploadActive = [
+    "UPLOADING", "PAUSED", "PAUSED_ERROR", "VERIFYING", "PAUSED_VERIFYING",
+  ].includes(snapshot.phase);
+  const sourceReady = snapshot.phase === "READY" ||
+    projects.find((project) => project.id === selectedProjectId)?.sourceStatus === "SOURCE_READY";
 
   useEffect(() => {
     let active = true;
@@ -250,21 +255,21 @@ export function ProjectUpload({
       {readOnlyReason && <p id="work-disabled-reason" className="warning-copy">{readOnlyReason}</p>}
       <div className="project-create-row">
         <label htmlFor="project-name">Tên dự án</label>
-        <input id="project-name" value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={160} disabled={workDisabled || busy} />
-        <button type="button" onClick={createProject} disabled={workDisabled || busy || projectName.trim() === ""} aria-describedby={workDisabled ? "work-disabled-reason" : undefined}>Tạo dự án</button>
+        <input id="project-name" value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={160} disabled={workDisabled || busy || uploadActive} />
+        <button type="button" onClick={createProject} disabled={workDisabled || busy || uploadActive || projectName.trim() === ""} aria-describedby={workDisabled ? "work-disabled-reason" : undefined}>Tạo dự án</button>
       </div>
 
       {projects.length > 0 && (
         <div className="upload-controls">
           <label htmlFor="project-select">Dự án</label>
-          <select id="project-select" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)} disabled={busy}>
+          <select id="project-select" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)} disabled={busy || uploadActive}>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
           <label htmlFor="source-video">Video nguồn</label>
-          <input id="source-video" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} disabled={workDisabled || busy} />
+          <input id="source-video" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} disabled={workDisabled || busy || uploadActive || sourceReady} />
           <p className="field-note">MP4, MOV, MKV hoặc WEBM · tối đa 10 GiB</p>
           <div className="button-row">
-            <button type="button" onClick={startUpload} disabled={workDisabled || busy || file === null}>
+            <button type="button" onClick={startUpload} disabled={workDisabled || busy || uploadActive || sourceReady || file === null}>
               {recovery === null ? "Tải lên" : "Tiếp tục tải dở"}
             </button>
             {snapshot.phase === "UPLOADING" && <button type="button" className="button-secondary" onClick={() => uploaderRef.current?.pause()}>Tạm dừng</button>}

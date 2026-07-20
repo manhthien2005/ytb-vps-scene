@@ -62,6 +62,9 @@ describe("ProjectUpload", () => {
     fireEvent.change(screen.getByLabelText("Video nguồn"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "Tải lên" }));
     expect(await screen.findByText("50%")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Tải lên" })).toBeDisabled();
+    expect(screen.getByLabelText("Dự án")).toBeDisabled();
+    expect(screen.getByLabelText("Video nguồn")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Tạm dừng" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục" })).toBeEnabled());
   });
