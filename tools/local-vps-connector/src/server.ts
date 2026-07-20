@@ -73,7 +73,7 @@ export function createSsh2Transport(): SetupTransport {
 export function createConnectorServer(options: ConnectorOptions = {}) {
   const transport = options.transport ?? createSsh2Transport();
   const execute = options.runSetup ?? defaultRunSetup;
-  const allowedOrigin = options.allowedOrigin ?? "http://localhost:55870";
+  const allowedOrigin = options.allowedOrigin ?? process.env.YTB_VPS_APP_ORIGIN ?? "https://ytb-vps-scene.vercel.app";
   const jobs = new Map<string, Job>();
 
   async function startJob(jobId: string, target: SshTarget, password: string, bootstrapCommand: string) {
