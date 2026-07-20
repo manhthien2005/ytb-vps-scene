@@ -40,7 +40,7 @@ from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
-from ytb_vps_v2.domain.models import Part
+from ytb_vps_v2.domain.models import BlurRegion, BoundingBox, Part, RegionKind
 from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.pipeline import (
     CHECKPOINT_ARTIFACT_PATH,
@@ -211,6 +211,13 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             verification_observed_at=100,
             proof_checkpoint_id="offline-proof-v1",
             final_checkpoint_id="offline-final-v1",
+            blur_regions=(
+                BlurRegion(
+                    RegionKind.STATIC,
+                    FrameInterval(0, 900),
+                    BoundingBox(8, 8, 64, 64),
+                ),
+            ),
         )
         runner = OfflineSliceRunner(
             state,
@@ -273,6 +280,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         render_plan = parse_render_plan_document_bytes(
             self.workspace.joinpath(*render_artifact.relative_path.parts).read_bytes()
         )
+        self.assertTrue(any(region.kind is RegionKind.STATIC for region in render_plan.blur_regions))
         render_request = RenderRequest(
             *(
                 getattr(render_plan, field)

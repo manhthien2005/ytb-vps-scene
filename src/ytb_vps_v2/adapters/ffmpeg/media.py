@@ -1042,7 +1042,7 @@ class FfmpegMediaAdapter:
                     "-map",
                     "0:v:0",
                     "-vf",
-                    "fps=30,scale=320:180:flags=bicubic,format=yuv420p",
+                    f"fps=30,scale={plan.width}:{plan.height}:flags=bicubic,format=yuv420p",
                     "-frames:v",
                     "900",
                     "-fps_mode",

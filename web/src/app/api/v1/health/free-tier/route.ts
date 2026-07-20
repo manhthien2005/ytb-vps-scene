@@ -1,12 +1,61 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { createGoogleDriveFilesAdapter } from "@/lib/adapters/google/drive-files";
+import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
+import { createDriveAccessProvider } from "@/lib/application/drive-access";
+import { createFreeTierHealthService } from "@/lib/application/free-tier-health";
+import { parseServerEnv } from "@/lib/config/env";
+import { AppError } from "@/lib/domain/errors";
+import { requireAdmin } from "@/lib/http/requests";
+import type { UsageSnapshot } from "@/lib/ports/drive";
+import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
+import { createCredentialCipher } from "@/lib/security/credential-cipher";
 
-export async function GET() {
-  return NextResponse.json(
-    {
-      service: "ytb-vps-control-plane",
-      mode: "READ_ONLY",
-      reasons: ["DRIVE_NOT_CONNECTED"],
-    },
-    { headers: { "cache-control": "no-store" } },
-  );
+export const runtime = "nodejs";
+const HEADERS = { "cache-control": "no-store" } as const;
+
+function usageView(snapshot: UsageSnapshot | null) {
+  return snapshot === null ? null : {
+    usedBytes: snapshot.usedBytes,
+    limitBytes: snapshot.limitBytes,
+    appManagedBytes: snapshot.appManagedBytes,
+    observedAt: snapshot.observedAt,
+  };
+}
+
+export async function GET(request: NextRequest) {
+  const env = parseServerEnv(process.env);
+  try {
+    await requireAdmin(request, env.sessionSecret);
+    const repository = createNeonDriveControlPlaneRepository(env.databaseUrl);
+    const oauth = createGoogleOAuthAdapter({
+      clientId: env.googleOAuthClientId,
+      clientSecret: env.googleOAuthClientSecret,
+    });
+    const access = createDriveAccessProvider({
+      repository,
+      oauth,
+      cipher: createCredentialCipher(env.driveTokenKeyV1),
+    });
+    const health = await createFreeTierHealthService({
+      repository,
+      access,
+      files: createGoogleDriveFilesAdapter(),
+      neonLimitBytes: env.neonStorageLimitBytes,
+      softPercent: env.freeTierSoftPercent,
+      staleAfterSeconds: env.quotaStaleAfterSeconds,
+    }).getHealth(new Date());
+
+    return NextResponse.json({
+      mode: health.mode,
+      reasons: health.reasons,
+      driveConnection: health.driveConnection,
+      drive: usageView(health.drive),
+      neon: usageView(health.neon),
+    }, { headers: HEADERS });
+  } catch (error) {
+    if (error instanceof AppError) {
+      return NextResponse.json({ code: error.code }, { status: error.status, headers: HEADERS });
+    }
+    return NextResponse.json({ code: "HEALTH_UNAVAILABLE" }, { status: 503, headers: HEADERS });
+  }
 }

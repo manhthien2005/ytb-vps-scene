@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
   response.cookies.set(ADMIN_COOKIE, issueSession(env.sessionSecret), {
     httpOnly: true,
     secure: env.nodeEnv === "production",
-    sameSite: "strict",
+    sameSite: "lax",
     path: "/",
     maxAge: 12 * 60 * 60,
   });

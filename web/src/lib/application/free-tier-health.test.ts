@@ -1,0 +1,490 @@
+import { describe, expect, it, vi } from "vitest";
+import { createFreeTierHealthService } from "./free-tier-health";
+import { AppError } from "@/lib/domain/errors";
+import { FakeGoogleDriveFiles } from "@/test/fakes/fake-google-drive";
+import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control-plane";
+
+const NOW = new Date("2026-07-19T00:00:00.000Z");
+
+describe("FreeTierHealthService", () => {
+  it("returns the newer snapshot retained after an out-of-order refresh completes", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const retained = {
+      provider: "DRIVE" as const,
+      usedBytes: 200,
+      limitBytes: 1_000,
+      appManagedBytes: 0,
+      mode: "READ_WRITE" as const,
+      reasonCodes: [] as const,
+      observedAt: "2026-07-19T00:00:02.000Z",
+    };
+    await repository.saveUsage(retained);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    const result = await service.getHealth(new Date("2026-07-19T00:00:01.000Z"));
+
+    expect(result.drive).toEqual(retained);
+  });
+
+  it("allows a projection strictly below 90 percent", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: 899, limitBytes: 1_000 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).resolves.toBeUndefined();
+  });
+
+  it("rejects a projection exactly at 90 percent", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: 899, limitBytes: 1_000 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(1, NOW)).rejects.toMatchObject({
+      code: "DRIVE_STORAGE_HIGH",
+    });
+  });
+
+  it("fails closed when quota evidence is older than 900 seconds", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: "2026-07-19T00:00:00.000Z",
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(1, new Date("2026-07-19T00:15:01.000Z")))
+      .rejects.toMatchObject({ code: "DRIVE_QUOTA_STALE" });
+  });
+
+  it("uses provider fallback evidence only through the inclusive freshness boundary", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: "2026-07-19T00:00:00.000Z",
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(1, new Date("2026-07-19T00:15:00.000Z")))
+      .resolves.toBeUndefined();
+  });
+
+  it("rejects when Neon usage is exactly at 90 percent", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 900);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "NEON_STORAGE_HIGH",
+    });
+  });
+
+  it("fails closed on malformed or non-safe quota evidence", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: Number.MAX_SAFE_INTEGER + 1 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("does not replace malformed provider evidence with a saved snapshot", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = null as never;
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("does not replace fresh high Drive evidence when snapshot persistence fails", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    vi.spyOn(repository, "saveUsage").mockImplementation(async (snapshot) => {
+      if (snapshot.provider === "DRIVE") throw new Error("write unavailable");
+      return snapshot;
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: 900, limitBytes: 1_000 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "DRIVE_STORAGE_HIGH",
+    });
+  });
+
+  it("fails closed when app-managed bytes fail after a fresh high Drive observation", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    vi.spyOn(repository, "appManagedDriveBytes").mockRejectedValue(new Error("database unavailable"));
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: 900, limitBytes: 1_000 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("rejects contradictory fresh Drive artifact usage", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    vi.spyOn(repository, "appManagedDriveBytes").mockResolvedValue(101);
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, usedBytes: 100, limitBytes: 1_000 };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("converts initial usage-read failures into a stable quota error", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    vi.spyOn(repository, "getUsage").mockRejectedValue(new Error("database unavailable"));
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("converts provider-fallback read failures into a stable quota error", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    let reads = 0;
+    vi.spyOn(repository, "getUsage").mockImplementation(async () => {
+      reads += 1;
+      if (reads > 2) throw new Error("database unavailable");
+      return null;
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("converts database metric failures into a stable quota error without saved fallback", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    vi.spyOn(repository, "databaseUsedBytes").mockRejectedValue(new Error("database unavailable"));
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("rejects future saved Drive evidence instead of using provider fallback", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: "2026-07-19T00:00:00.001Z",
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "DRIVE_QUOTA_STALE",
+    });
+  });
+
+  it("rejects contradictory saved Drive artifact usage", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 101,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+    });
+  });
+
+  it("does not use saved quota after Drive inspection requires reauthentication", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = new AppError("DRIVE_REAUTH_REQUIRED", 401);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.getHealth(NOW)).resolves.toMatchObject({
+      mode: "READ_ONLY",
+      reasons: ["DRIVE_REAUTH_REQUIRED"],
+      driveConnection: "REAUTH_REQUIRED",
+      drive: null,
+    });
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "DRIVE_REAUTH_REQUIRED",
+    });
+  });
+
+  it.each([
+    [new AppError("DRIVE_PROVIDER_REJECTED", 502), "provider rejection"],
+    [new Error("upstream diagnostic must not escape"), "unknown inspection error"],
+  ])("fails closed without saved fallback on %s", async (error) => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.inspectAccountError = error;
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.assertUploadAllowed(0, NOW)).rejects.toMatchObject({
+      code: "QUOTA_INVALID",
+      message: "QUOTA_INVALID",
+    });
+  });
+
+  it.each([
+    [new AppError("DRIVE_NOT_CONNECTED", 409), "DISCONNECTED", "DRIVE_NOT_CONNECTED"],
+    [new AppError("DRIVE_REAUTH_REQUIRED", 401), "REAUTH_REQUIRED", "DRIVE_REAUTH_REQUIRED"],
+  ] as const)("reports %s Drive access as read only", async (error, driveConnection, reason) => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => { throw error; } },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await expect(service.getHealth(NOW)).resolves.toMatchObject({
+      mode: "READ_ONLY",
+      reasons: [reason],
+      driveConnection,
+      drive: null,
+    });
+  });
+
+  it("audits a free-tier mode change without account identity", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 900);
+    await repository.saveUsage({
+      provider: "NEON",
+      usedBytes: 100,
+      limitBytes: 1_000,
+      appManagedBytes: 0,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: NOW.toISOString(),
+    });
+    const drive = new FakeGoogleDriveFiles();
+    drive.account = { ...drive.account, accountHint: "identity@example.test", permissionId: "identity-id" };
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: drive,
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    await service.getHealth(NOW);
+
+    expect(repository.auditEvents).toContainEqual(expect.objectContaining({
+      eventType: "FREE_TIER_MODE_CHANGED",
+      payload: { mode: "READ_ONLY", reasonCode: "NEON_STORAGE_HIGH" },
+    }));
+    expect(JSON.stringify(repository.auditEvents)).not.toContain("identity@example.test");
+    expect(JSON.stringify(repository.auditEvents)).not.toContain("identity-id");
+  });
+});

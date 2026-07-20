@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import subprocess
 import struct
+import tempfile
 import wave
 from dataclasses import replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.models import BoundingBox, Cue
@@ -139,6 +141,85 @@ class DeterministicWaveTtsProvider:
             writer.setcomptype("NONE", "not compressed")
             writer.writeframes(self._pcm_bytes(translation))
         audio_bytes = output.getvalue()
+        document = TtsDocument(
+            translation.schema_version,
+            translation.job_id,
+            translation.media_digest,
+            translation.frame_count,
+            translation.width,
+            translation.height,
+            TRANSLATION_ARTIFACT_PATH,
+            _dependency(translation),
+            translation.cues,
+            self.audio_path,
+            _digest(audio_bytes),
+        )
+        return TtsSynthesis(document, audio_bytes)
+
+
+class EdgeTtsProvider:
+    """Small native bridge to the free ``edge-tts`` CLI used on the VPS.
+
+    The command is intentionally invoked with argv (never a shell) and the
+    generated file is converted to the canonical WAV artifact before it enters
+    the v2 pipeline.  Tests can continue using the deterministic provider.
+    """
+
+    def __init__(
+        self,
+        *,
+        voice: str = "vi-VN-HoaiMyNeural",
+        rate: float = 1.0,
+        command: str = "edge-tts",
+        ffmpeg: str = "ffmpeg",
+        audio_path: PurePosixPath = DEFAULT_TTS_AUDIO_PATH,
+    ) -> None:
+        if not isinstance(voice, str) or not voice.strip() or len(voice) > 80:
+            raise ProviderError("Edge TTS voice is invalid")
+        if not isinstance(rate, (int, float)) or not 0.8 <= rate <= 1.2:
+            raise ProviderError("Edge TTS rate is invalid")
+        if not isinstance(command, str) or not command.strip() or not isinstance(ffmpeg, str) or not ffmpeg.strip():
+            raise ProviderError("Edge TTS executable is invalid")
+        if type(audio_path) is not PurePosixPath:
+            raise ProviderError("TTS audio path must use portable POSIX format")
+        self.voice = voice.strip()
+        self.rate = float(rate)
+        self.command = command
+        self.ffmpeg = ffmpeg
+        self.audio_path = audio_path
+
+    def synthesize(self, translation: TranslationDocument) -> TtsSynthesis:
+        if type(translation) is not TranslationDocument:
+            raise ProviderError("TTS input must be a TranslationDocument")
+        text = " ".join((cue.target_text or cue.source_text).strip() for cue in translation.cues).strip()
+        if not text:
+            raise ProviderError("Edge TTS input is empty")
+        rate_percent = round((self.rate - 1.0) * 100)
+        rate_flag = f"{rate_percent:+d}%"
+        with tempfile.TemporaryDirectory(prefix="ytb-edge-tts-") as directory:
+            mp3 = Path(directory) / "voice.mp3"
+            wav = Path(directory) / "voice.wav"
+            try:
+                subprocess.run(
+                    [self.command, "--voice", self.voice, "--rate", rate_flag, "--text", text, "--write-media", str(mp3)],
+                    check=True,
+                    capture_output=True,
+                    timeout=180,
+                )
+                subprocess.run(
+                    [self.ffmpeg, "-y", "-v", "error", "-i", str(mp3), "-ac", "1", "-ar", "24000", str(wav)],
+                    check=True,
+                    capture_output=True,
+                    timeout=180,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                raise ProviderError("Edge TTS synthesis failed") from error
+            try:
+                audio_bytes = wav.read_bytes()
+            except OSError as error:
+                raise ProviderError("Edge TTS output is missing") from error
+        if not audio_bytes:
+            raise ProviderError("Edge TTS output is empty")
         document = TtsDocument(
             translation.schema_version,
             translation.job_id,

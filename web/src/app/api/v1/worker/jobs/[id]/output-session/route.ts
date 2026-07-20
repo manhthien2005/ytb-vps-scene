@@ -1,0 +1,64 @@
+import { NextResponse, type NextRequest } from "next/server";
+import { z } from "zod";
+import { parseServerEnv } from "@/lib/config/env";
+import { AppError, publicErrorBody } from "@/lib/domain/errors";
+import { readStrictJson } from "@/lib/http/requests";
+import { requireWorkerSession } from "@/lib/http/worker-auth";
+import { createConfiguredDrive } from "@/lib/application/configured-drive";
+import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
+import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
+
+export const runtime = "nodejs";
+const HEADERS = { "cache-control": "no-store" } as const;
+const schema = z.object({
+  fencingToken: z.number().int().positive(),
+  sizeBytes: z.number().int().safe().min(1).max(1_099_511_627_776),
+  checksumSha256: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
+
+export async function POST(request: NextRequest, context: Context) {
+  try {
+    const env = parseServerEnv(process.env);
+    const repository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
+    const worker = await requireWorkerSession(request, repository, env.workerAuthKeyV1, new Date());
+    const body = await readStrictJson(request, schema, 2_048);
+    const { id: jobId } = await context.params;
+    const execution = await repository.getFencedExecution(worker.id, jobId, body.fencingToken, new Date());
+    if (execution === null) throw new AppError("LEASE_LOST", 409);
+    const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
+    const drive = createConfiguredDrive(env, driveRepository);
+    const accessToken = await drive.access.getAccessToken();
+    const artifactId = crypto.randomUUID();
+    const driveFileId = await drive.files.ensureOutputFile(accessToken, {
+      projectId: execution.projectId,
+      jobId,
+      artifactId,
+      parentId: execution.outputParentId,
+    });
+    const session = await drive.files.createResumableUpdateSession(accessToken, {
+      fileId: driveFileId,
+      mimeType: "video/mp4",
+      sizeBytes: body.sizeBytes,
+    });
+    const outcome = await repository.reserveOutput({
+      artifactId,
+      jobId,
+      workerId: worker.id,
+      fencingToken: body.fencingToken,
+      driveFileId,
+      driveParentId: execution.outputParentId,
+      sizeBytes: body.sizeBytes,
+      checksumSha256: body.checksumSha256,
+      now: new Date(),
+    });
+    if (outcome === "LEASE_LOST") {
+      await drive.files.deleteFile(accessToken, driveFileId).catch(() => undefined);
+      throw new AppError("LEASE_LOST", 409);
+    }
+    return NextResponse.json({ artifactId, driveFileId, ...session }, { headers: HEADERS });
+  } catch (error) {
+    if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
+  }
+}

@@ -761,3 +761,40 @@ historical evidence.
 - This is local Node 24 evidence with the expected Node 22 engine warning. The
   project and CI pins remain Node 22; this entry does not claim that hosted
   GitHub Actions executed.
+
+## 2026-07-19T19:53:00Z — Metadata-only Drive finalization gate
+
+- Production hostname: `ytb-vps-scene.vercel.app`.
+- firstStatus: 308; rangeReadable: true; finalReadableStatus: CORS_HIDDEN;
+  completionStatus: 200; exactVerifiedSize: 524288; cleanupStatus: 200.
+- Vercel-media-body absence: request evidence contained zero serverless PUT
+  requests, confirming neither 262144-byte media body reached a function.
+
+## 2026-07-20T17:00:00+07:00 — CP-2 local implementation gate
+
+- Objective: complete the private Google Drive control plane, direct resumable
+  browser upload dashboard, fail-closed free-tier health, and reproducible free
+  operator/CI configuration without routing media through Vercel.
+- Contract/invariants: React receives sanitized connection, quota, and project
+  views only; Drive folder identifiers and credential envelopes remain
+  server-side; the resumable session capability stays in IndexedDB; reload
+  recovery requires the operator to reselect the exact matching local file.
+- Fresh local evidence: Python discovery passed 324 tests with 12 skips in
+  126.498 seconds. Vitest passed 643 tests in 46 files. Typecheck, ESLint, and
+  the Next.js 16.2.10 production build exited zero. `npm audit
+  --audit-level=low` reported zero vulnerabilities.
+- Security scans: the secret/session scan matched only synthetic test
+  capabilities and OAuth protocol field names; tracked environment,
+  `.superpowers`, resource, and media paths had zero matches; API video body
+  method scan had zero matches; `git diff --check` was clean.
+- Implementation milestone: `1556ca1` (`feat(web): add direct Drive upload
+  dashboard`). The CI/runbook commit is recorded by the following entry or
+  correction after it exists.
+- Not yet claimed: the local checkout contains no PostgreSQL `DATABASE_URL`, so
+  the two live Neon migration invocations were not executed in this gate. The
+  new branch has not been pushed or deployed, GitHub Node 22/Python 3.10 jobs
+  have not run for it, and the full Test 1 upload/reload/resume/privacy flow has
+  not been repeated against the new production UI.
+- Next step: after explicit push/deploy authorization, run both additive Neon
+  migrations, hosted CI, and the live Test 1 acceptance checklist before
+  declaring CP-2 complete.

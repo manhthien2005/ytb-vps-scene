@@ -1,6 +1,6 @@
 # V2 Rebuild Master Plan
 
-Status: Phase 8 v2 worker image/stdout contract complete; target GPU/Docker smoke next
+Status: CP-2 direct Drive control plane implemented locally; final CI and live Test 1 acceptance pending
 Branch: `rebuild/v2`
 Legacy baseline: `ba1ad85fe73330376ceb4ba048d9b6fd8392ba38`
 Legacy rollback tag: `legacy-audited-baseline-2026-07-16`
@@ -181,6 +181,7 @@ Gate: G8.
 | Phase | Gate |
 |---|---|
 | Phase 8 control-plane foundation | Protected metadata-only dashboard with Python and web CI both green. |
+| CP-2 Google Drive control plane | Private Drive OAuth, direct resumable browser upload, fail-closed free-tier health, and operator dashboard; complete only after final CI and live Test 1 evidence. |
 
 ## Phase completion record
 

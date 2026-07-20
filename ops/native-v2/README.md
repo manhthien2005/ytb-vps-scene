@@ -11,6 +11,23 @@ bash ops/native-v2/bootstrap.sh
 bash ops/native-v2/provider-smoke.sh
 ```
 
+For a real media smoke test after the VPS is attached, run the native pipeline
+against a local source file. The command writes a verified rendered MP4 and a
+canonical WAV TTS artifact under the workspace; `--blur` accepts source-pixel
+rectangles in `xmin:ymin:xmax:ymax` form:
+
+```bash
+python -m ytb_vps_v2 media-run \
+  --source /var/lib/ytb-vps/input/source.mp4 \
+  --workspace /var/lib/ytb-vps/runs/test-1 \
+  --blur 20:20:320:160 \
+  --tts-provider edge \
+  --voice vi-VN-HoaiMyNeural
+```
+
+The next control-plane bridge will supply the source and saved scene settings
+to this same command; it is deliberately not a second renderer.
+
 The smoke check must report `CUDAExecutionProvider` first for both RapidOCR
 detector and recognizer sessions. To run the bounded worker directly:
 
