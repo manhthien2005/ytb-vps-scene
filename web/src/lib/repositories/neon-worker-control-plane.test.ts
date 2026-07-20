@@ -149,6 +149,7 @@ describe("worker control plane repository", () => {
       workerId: workerA.id,
       jobId: job!.id,
       fencingToken: 1,
+      fromState: "CLAIMED",
       state: "OCR",
       progressPercent: 20,
       now: AFTER_EXPIRY,
