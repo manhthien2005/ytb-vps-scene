@@ -23,7 +23,7 @@ if [[ ! "$repository" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.g
 if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "invalid release commit" >&2; exit 64; fi
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git python3.10 python3.10-venv
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git ffmpeg python3.10 python3.10-venv
 
 id -u ytb-vps >/dev/null 2>&1 || useradd --system --home-dir /var/lib/ytb-vps --create-home --shell /usr/sbin/nologin ytb-vps
 install -d -o ytb-vps -g ytb-vps -m 0700 /var/lib/ytb-vps
@@ -43,6 +43,8 @@ fi
 
 python3.10 -m venv "$release/.venv"
 "$release/.venv/bin/pip" install --no-deps --no-build-isolation "$release"
+# Edge TTS is a free outbound provider; it keeps audio synthesis off Vercel.
+"$release/.venv/bin/pip" install --no-cache-dir edge-tts
 "$release/.venv/bin/python" -m ytb_vps_v2 worker-enroll \
   --origin "$app_origin" \
   --token "$enrollment_token" \
