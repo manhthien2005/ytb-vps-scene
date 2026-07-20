@@ -461,6 +461,41 @@ describe("createGoogleDriveFilesAdapter", () => {
     }
   });
 
+  it("logs only the safe shape of a rejected session Location", async () => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, {
+      status: 200,
+      headers: {
+        location: "https://www.googleapis.com/upload/drive/v3/files/private-file-id?uploadType=resumable&upload_protocol=resumable&upload_id=private-capability",
+      },
+    }));
+
+    try {
+      await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, {
+        fileId: "drive-source-file-001",
+        mimeType: "video/mp4",
+        sizeBytes: 8_388_608,
+      })).rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
+
+      expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+        "[drive-upload] session-location-rejected",
+        {
+          stage: "provider-location",
+          hostAllowed: true,
+          pathAllowed: true,
+          queryKeys: ["uploadType", "upload_id", "upload_protocol"],
+          uploadIdCount: 1,
+          uploadIdLength: 18,
+          uploadIdTokenSafe: true,
+        },
+      );
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("private-file-id");
+      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain("private-capability");
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
   it("creates one private app-owned output file with exact fenced metadata", async () => {
     const jobId = "40000000-0000-4000-8000-000000000001";
     const properties = {

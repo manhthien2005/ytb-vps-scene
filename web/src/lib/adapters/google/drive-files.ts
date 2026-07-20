@@ -322,7 +322,45 @@ async function cancelResponse(response: Response): Promise<void> {
 
 function validateSessionUri(value: string | null): string {
   const parsed = parseDriveResumableSessionUri(value);
-  if (parsed === null) throw stableError("DRIVE_PROVIDER_REJECTED");
+  if (parsed === null) {
+    let hostAllowed = false;
+    let pathAllowed = false;
+    let queryKeys: string[] = [];
+    let uploadIdCount = 0;
+    let uploadIdLength = 0;
+    let uploadIdTokenSafe = false;
+    try {
+      const uri = new URL(value ?? "");
+      const pathPrefix = "/upload/drive/v3/files/";
+      hostAllowed = uri.protocol === "https:" &&
+        uri.hostname === "www.googleapis.com" &&
+        uri.port === "" && uri.username === "" && uri.password === "" && uri.hash === "";
+      const fileSegment = uri.pathname.slice(pathPrefix.length);
+      pathAllowed = uri.pathname.startsWith(pathPrefix) &&
+        boundedAscii(fileSegment, 1, 512) && /^[A-Za-z0-9._~-]+$/.test(fileSegment);
+      queryKeys = [...new Set([...uri.searchParams.keys()].slice(0, 8).map((key) => (
+        /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key) ? key : "[unsafe]"
+      )))].sort();
+      const uploadIds = uri.searchParams.getAll("upload_id");
+      uploadIdCount = uploadIds.length;
+      uploadIdLength = uploadIds[0]?.length ?? 0;
+      uploadIdTokenSafe = uploadIds.length === 1 &&
+        boundedAscii(uploadIds[0], 1, 2_048) &&
+        /^[A-Za-z0-9._~-]+$/.test(uploadIds[0]);
+    } catch {
+      // The bounded structural summary remains false/empty for malformed URLs.
+    }
+    console.error("[drive-upload] session-location-rejected", {
+      stage: "provider-location",
+      hostAllowed,
+      pathAllowed,
+      queryKeys,
+      uploadIdCount,
+      uploadIdLength,
+      uploadIdTokenSafe,
+    });
+    throw stableError("DRIVE_PROVIDER_REJECTED");
+  }
   return parsed;
 }
 
