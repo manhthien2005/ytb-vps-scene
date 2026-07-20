@@ -34,17 +34,15 @@ describe("DashboardShell", () => {
             updatedAt: "2026-07-19T00:00:00Z",
           },
         ]}
+        workers={[]}
       />,
     );
     expect(screen.getByText("Chưa gắn GPU VPS")).toBeInTheDocument();
     expect(screen.getByText("Test 1")).toBeInTheDocument();
     expect(screen.getByText("Đã kết nối")).toBeVisible();
     expect(screen.getByLabelText("Video nguồn")).toBeEnabled();
-    const attachButton = screen.getByRole("button", { name: "Gắn VPS" });
-    expect(attachButton).toBeDisabled();
-    expect(attachButton).toHaveAccessibleDescription(
-      "Tính năng gắn VPS sẽ khả dụng ở giai đoạn sau.",
-    );
-    expect(screen.getByText("Tính năng gắn VPS sẽ khả dụng ở giai đoạn sau.")).toBeVisible();
+    const attachButton = screen.getByRole("button", { name: "Tạo lệnh gắn VPS" });
+    expect(attachButton).toBeEnabled();
+    expect(screen.getByText("Anh có thể tạo lệnh gắn VPS bất cứ lúc nào.")).toBeVisible();
   });
 });

@@ -1,4 +1,5 @@
 import type { DriveConnectionStatus } from "@/lib/domain/drive";
+import type { WorkerView } from "@/lib/domain/worker";
 
 export type DriveConnectionView = Readonly<{
   status: DriveConnectionStatus;
@@ -29,3 +30,5 @@ export type PublicProject = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
+
+export type WorkerViewModel = WorkerView;

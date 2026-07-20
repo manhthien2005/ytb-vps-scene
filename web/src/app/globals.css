@@ -60,6 +60,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .recent-jobs { margin-top: 30px; }
 .dashboard ul { display: grid; gap: 10px; padding: 0; list-style: none; }
 .dashboard li { display: flex; justify-content: space-between; gap: 18px; padding: 16px 18px; border: 1px solid #263d59; border-radius: 14px; background: #0d1a2b; }
+.worker-card { grid-column: 1 / -1; }
+.worker-command { display: grid; gap: 10px; margin-top: 18px; padding: 14px; border: 1px solid #466789; border-radius: 14px; background: var(--surface); }
+.worker-command p { margin: 0; }
+.worker-command code { display: block; overflow-x: auto; padding: 12px; border-radius: 10px; color: var(--accent); background: #06101c; white-space: nowrap; }
+.worker-list { margin: 18px 0 0; }
+.worker-list li { align-items: center; }
+.worker-list li > div { display: grid; gap: 4px; }
+.worker-list li span { font-size: .9rem; }
+.queue-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
 @media (max-width: 720px) {
   .dashboard > header, .dashboard li { align-items: stretch; flex-direction: column; }
   .dashboard { width: min(100% - 28px, 1100px); padding: 24px 0; }

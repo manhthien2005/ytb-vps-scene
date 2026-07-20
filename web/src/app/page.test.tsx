@@ -9,6 +9,9 @@ const {
   getCredential,
   listProjects,
   getHealth,
+  createWorkerRepository,
+  listWorkers,
+  expireWorkersAndLeases,
 } = vi.hoisted(() => ({
   currentAdmin: vi.fn(),
   createRepository: vi.fn(),
@@ -17,6 +20,9 @@ const {
   getCredential: vi.fn(),
   listProjects: vi.fn(),
   getHealth: vi.fn(),
+  createWorkerRepository: vi.fn(),
+  listWorkers: vi.fn(),
+  expireWorkersAndLeases: vi.fn(),
 }));
 vi.mock("@/lib/auth/current-admin", () => ({ currentAdmin }));
 vi.mock("@/lib/repositories/neon-control-plane", () => ({
@@ -24,6 +30,9 @@ vi.mock("@/lib/repositories/neon-control-plane", () => ({
 }));
 vi.mock("@/lib/repositories/neon-drive-control-plane", () => ({
   createNeonDriveControlPlaneRepository: createDriveRepository,
+}));
+vi.mock("@/lib/repositories/neon-worker-control-plane", () => ({
+  createNeonWorkerControlPlaneRepository: createWorkerRepository,
 }));
 vi.mock("@/lib/adapters/google/oauth", () => ({ createGoogleOAuthAdapter: () => ({ kind: "oauth" }) }));
 vi.mock("@/lib/adapters/google/drive-files", () => ({ createGoogleDriveFilesAdapter: () => ({ kind: "files" }) }));
@@ -51,11 +60,18 @@ describe("HomePage", () => {
       DRIVE_UPLOAD_MAX_BYTES: "10737418240",
       FREE_TIER_SOFT_PERCENT: "90",
       QUOTA_STALE_AFTER_SECONDS: "900",
+      WORKER_AUTH_KEY_V1: "A".repeat(43),
+      WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+      WORKER_RELEASE_COMMIT: "a".repeat(40),
+      WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
     });
     delete process.env.OPENAI_API_KEY;
     currentAdmin.mockResolvedValue(false);
     createRepository.mockReturnValue({ listJobs });
     createDriveRepository.mockReturnValue({ getCredential, listProjects });
+    createWorkerRepository.mockReturnValue({ listWorkers, expireWorkersAndLeases });
+    listWorkers.mockResolvedValue([]);
+    expireWorkersAndLeases.mockResolvedValue(undefined);
     listJobs.mockResolvedValue([]);
     getCredential.mockResolvedValue(null);
     listProjects.mockResolvedValue([]);

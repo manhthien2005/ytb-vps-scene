@@ -11,6 +11,7 @@ import type { Project } from "@/lib/domain/drive";
 import type { UsageSnapshot } from "@/lib/ports/drive";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
+import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
 import { createCredentialCipher } from "@/lib/security/credential-cipher";
 
 export const dynamic = "force-dynamic";
@@ -63,12 +64,16 @@ export default async function HomePage() {
     softPercent: env.freeTierSoftPercent,
     staleAfterSeconds: env.quotaStaleAfterSeconds,
   });
+  const workerRepository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
+  const now = new Date();
+  await workerRepository.expireWorkersAndLeases(now);
   const [jobs, credential, health, projects] = await Promise.all([
     createNeonControlPlaneRepository(env.databaseUrl).listJobs(),
     repository.getCredential(),
     healthService.getHealth(new Date()),
     repository.listProjects(),
   ]);
+  const workers = await workerRepository.listWorkers(now);
   const healthView: FreeTierHealthView = {
     mode: health.mode,
     reasons: [...health.reasons],
@@ -89,6 +94,7 @@ export default async function HomePage() {
       drive={drive}
       health={healthView}
       projects={projects.map(publicProject)}
+      workers={workers}
     />
   );
 }
