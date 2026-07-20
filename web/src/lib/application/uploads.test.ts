@@ -445,8 +445,9 @@ describe("UploadService sessions", () => {
       }),
       expect.any(String),
     );
-    expect(files.resumableSessionCalls[0]?.input.fileId)
-      .toBe("replacement-source-file-001");
+    expect(files.resumableSessionCalls[0]?.input).toMatchObject({
+      fileId: "replacement-source-file-001",
+    });
   });
 
   it("rejects conclusive remote mismatch when renewing the exact stored file", async () => {

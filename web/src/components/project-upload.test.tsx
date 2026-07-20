@@ -13,6 +13,11 @@ const PROJECT: PublicProject = {
   createdAt: "2026-07-19T00:00:00.000Z",
   updatedAt: "2026-07-19T00:00:00.000Z",
 };
+const FAILED_PROJECT: PublicProject = {
+  ...PROJECT,
+  name: "Video lỗi",
+  sourceStatus: "UPLOAD_FAILED",
+};
 const HEALTHY: FreeTierHealthView = {
   mode: "READ_WRITE",
   reasons: [],
@@ -34,8 +39,58 @@ function memoryStore(initial: StoredUploadSession | null = null): UploadSessionS
 describe("ProjectUpload", () => {
   it("disables new work when quota evidence is stale", () => {
     render(<ProjectUpload health={{ ...HEALTHY, mode: "READ_ONLY", reasons: ["DRIVE_QUOTA_STALE"] }} projects={[]} />);
-    expect(screen.getByRole("button", { name: "Tạo dự án" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Tạo dự án" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Tải video lên" })).toBeDisabled();
     expect(screen.getByText("Chưa xác minh được dung lượng Google Drive.")).toBeVisible();
+  });
+
+  it("creates the internal project automatically from the selected video", async () => {
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const snapshot: UploadSnapshot = { phase: "UPLOADING", committedBytes: 50, totalBytes: 100, bytesPerSecond: 25, publicCode: null };
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => { listener?.(snapshot); }),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ project: PROJECT }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        artifactId: PROJECT.id,
+        sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
+        chunkBytes: 8_388_608,
+        expiresAt: "2026-07-26T00:00:00.000Z",
+      }), { status: 200, headers: { "content-type": "application/json" } }));
+    const onProjectsChange = vi.fn();
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} onProjectsChange={onProjectsChange} />);
+    const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
+
+    expect(screen.queryByRole("button", { name: "Tạo dự án" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Video")).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Tải video lên" }));
+
+    expect(await screen.findByText("50%")).toBeVisible();
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ name: "Phim thử nghiệm" }),
+      }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      `/api/v1/projects/${PROJECT.id}/upload-session`,
+      expect.any(Object),
+    );
+    expect(onProjectsChange).toHaveBeenCalledWith([PROJECT]);
   });
 
   it("uploads through the coordinator and supports pause/resume controls", async () => {
@@ -59,14 +114,48 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[PROJECT]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("Video nguồn"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Tải lên" }));
+    fireEvent.change(screen.getByLabelText("Video"), { target: { value: PROJECT.id } });
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Tải video lên" }));
     expect(await screen.findByText("50%")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Tải lên" })).toBeDisabled();
-    expect(screen.getByLabelText("Dự án")).toBeDisabled();
-    expect(screen.getByLabelText("Video nguồn")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Tải video lên" })).toBeDisabled();
+    expect(screen.getByLabelText("Video")).toBeDisabled();
+    expect(screen.getByLabelText("File video")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Tạm dừng" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục" })).toBeEnabled());
+  });
+
+  it("retries a failed video without creating another internal project", async () => {
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const snapshot: UploadSnapshot = { phase: "UPLOADING", committedBytes: 50, totalBytes: 100, bytesPerSecond: 25, publicCode: null };
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => { listener?.(snapshot); }),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      artifactId: FAILED_PROJECT.id,
+      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
+      chunkBytes: 8_388_608,
+      expiresAt: "2026-07-26T00:00:00.000Z",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    render(<ProjectUpload health={HEALTHY} projects={[FAILED_PROJECT]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("Video"), { target: { value: FAILED_PROJECT.id } });
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Chọn lại file và thử lại" }));
+
+    expect(await screen.findByText("50%")).toBeVisible();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/v1/projects/${FAILED_PROJECT.id}/upload-session`,
+      expect.any(Object),
+    );
   });
 
   it("resumes a matching persisted session without creating a second provider session", async () => {
@@ -105,7 +194,8 @@ describe("ProjectUpload", () => {
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
     expect(await screen.findByText(/Có phiên tải dở/)).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Video nguồn"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Video"), { target: { value: PROJECT.id } });
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "Tiếp tục tải dở" }));
 
     await waitFor(() => expect(uploader.resume).toHaveBeenCalledWith(file, persisted));

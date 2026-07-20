@@ -13,7 +13,10 @@ import {
   type StoredUploadSession,
   type UploadSessionStore,
 } from "@/lib/browser/upload-store";
-import { canonicalUploadFileName } from "@/lib/domain/upload-filename";
+import {
+  canonicalUploadFileName,
+  videoTitleFromFileName,
+} from "@/lib/domain/upload-filename";
 import type { FreeTierHealthView, PublicProject } from "./dashboard-types";
 
 const VI_MESSAGES: Readonly<Record<string, string>> = {
@@ -101,19 +104,21 @@ export function ProjectUpload({
   fetcher = globalThis.fetch,
   store: providedStore,
   uploaderFactory = createResumableUploader,
+  onProjectsChange = () => undefined,
 }: Readonly<{
   health: FreeTierHealthView;
   projects: readonly PublicProject[];
   fetcher?: typeof fetch;
   store?: UploadSessionStore;
   uploaderFactory?: (dependencies: ResumableUploaderDependencies) => ResumableUploader;
+  onProjectsChange?: (projects: readonly PublicProject[]) => void;
 }>) {
   const [store] = useState<UploadSessionStore | null>(() => (
     providedStore ?? (typeof indexedDB === "undefined" ? null : createUploadSessionStore())
   ));
   const [projects, setProjects] = useState([...initialProjects]);
-  const [selectedProjectId, setSelectedProjectId] = useState(initialProjects[0]?.id ?? "");
-  const [projectName, setProjectName] = useState("");
+  const projectsRef = useRef([...initialProjects]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [artifactId, setArtifactId] = useState<string | null>(null);
@@ -128,11 +133,12 @@ export function ProjectUpload({
     : health.driveConnection !== "CONNECTED" ? stableMessage("DRIVE_NOT_CONNECTED") : null;
   const workDisabled = readOnlyReason !== null;
   const recovery = matchingRecovery(recoveries, selectedProjectId, file);
+  const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const uploadActive = [
     "UPLOADING", "PAUSED", "PAUSED_ERROR", "VERIFYING", "PAUSED_VERIFYING",
   ].includes(snapshot.phase);
   const sourceReady = snapshot.phase === "READY" ||
-    projects.find((project) => project.id === selectedProjectId)?.sourceStatus === "SOURCE_READY";
+    selectedProject?.sourceStatus === "SOURCE_READY";
 
   useEffect(() => {
     let active = true;
@@ -152,7 +158,22 @@ export function ProjectUpload({
     uploaderRef.current?.dispose();
   }, []);
 
-  function attachUploader(): ResumableUploader {
+  function publishProjects(next: readonly PublicProject[]): void {
+    const snapshot = [...next];
+    projectsRef.current = snapshot;
+    setProjects(snapshot);
+    onProjectsChange(snapshot);
+  }
+
+  function updateProjectSource(projectId: string, sourceStatus: PublicProject["sourceStatus"]): void {
+    publishProjects(projectsRef.current.map((project) => (
+      project.id === projectId
+        ? { ...project, sourceStatus, updatedAt: new Date().toISOString() }
+        : project
+    )));
+  }
+
+  function attachUploader(projectId: string): ResumableUploader {
     unsubscribeRef.current?.();
     uploaderRef.current?.dispose();
     if (store === null) throw new Error("INDEXEDDB_UNAVAILABLE");
@@ -164,42 +185,44 @@ export function ProjectUpload({
       random: Math.random,
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     });
-    unsubscribeRef.current = uploader.subscribe(setSnapshot);
+    unsubscribeRef.current = uploader.subscribe((next) => {
+      setSnapshot(next);
+      if (next.phase === "READY") updateProjectSource(projectId, "SOURCE_READY");
+    });
     uploaderRef.current = uploader;
     return uploader;
   }
 
-  async function createProject() {
-    if (workDisabled || projectName.trim() === "") return;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const body = await jsonRequest(fetcher, "/api/v1/projects", { name: projectName.trim() }, {
-        "idempotency-key": idempotencyKey(),
-      });
-      const project = body.project as PublicProject;
-      setProjects((current) => [...current.filter((item) => item.id !== project.id), project]);
-      setSelectedProjectId(project.id);
-      setProjectName("");
-    } catch (error) {
-      setMessage(stableMessage(error instanceof Error ? error.message : null));
-    } finally {
-      setBusy(false);
-    }
+  async function ensureVideoProject(selectedFile: File): Promise<PublicProject> {
+    const existing = projectsRef.current.find((project) => project.id === selectedProjectId);
+    if (existing !== undefined) return existing;
+    const name = videoTitleFromFileName(selectedFile.name);
+    if (name === null) throw new Error("INVALID_REQUEST");
+    const body = await jsonRequest(fetcher, "/api/v1/projects", { name }, {
+      "idempotency-key": idempotencyKey(),
+    });
+    const project = body.project as PublicProject;
+    publishProjects([...projectsRef.current.filter((item) => item.id !== project.id), project]);
+    setSelectedProjectId(project.id);
+    return project;
   }
 
   async function startUpload() {
     const canonicalName = canonicalUploadFileName(file?.name);
-    if (workDisabled || file === null || canonicalName === null || selectedProjectId === "" || store === null) return;
+    if (workDisabled || file === null || canonicalName === null || store === null) return;
     setBusy(true);
     setMessage(null);
+    let activeProjectId = selectedProjectId;
     try {
-      if (recovery !== null) {
-        setArtifactId(recovery.artifactId);
-        await attachUploader().resume(file, recovery);
+      const project = await ensureVideoProject(file);
+      activeProjectId = project.id;
+      const activeRecovery = matchingRecovery(recoveries, project.id, file);
+      if (activeRecovery !== null) {
+        setArtifactId(activeRecovery.artifactId);
+        await attachUploader(project.id).resume(file, activeRecovery);
         return;
       }
-      const body = await jsonRequest(fetcher, `/api/v1/projects/${selectedProjectId}/upload-session`, {
+      const body = await jsonRequest(fetcher, `/api/v1/projects/${project.id}/upload-session`, {
         fileName: canonicalName,
         mimeType: file.type,
         sizeBytes: file.size,
@@ -207,6 +230,7 @@ export function ProjectUpload({
       });
       if (body.status === "SOURCE_READY") {
         setSnapshot({ phase: "READY", committedBytes: file.size, totalBytes: file.size, bytesPerSecond: 0, publicCode: null });
+        updateProjectSource(project.id, "SOURCE_READY");
         return;
       }
       if (
@@ -214,7 +238,7 @@ export function ProjectUpload({
         body.chunkBytes !== 8_388_608 || typeof body.expiresAt !== "string"
       ) throw new Error("UPLOAD_REMOTE_MISMATCH");
       const record: StoredUploadSession = {
-        projectId: selectedProjectId,
+        projectId: project.id,
         artifactId: body.artifactId,
         sessionUri: body.sessionUri,
         fileIdentity: { displayName: canonicalName, sizeBytes: file.size, mimeType: file.type, lastModified: file.lastModified },
@@ -224,9 +248,13 @@ export function ProjectUpload({
       };
       await store.put(record);
       setArtifactId(record.artifactId);
-      await attachUploader().start(file, record);
+      await attachUploader(project.id).start(file, record);
     } catch (error) {
-      setMessage(stableMessage(error instanceof Error ? error.message : null));
+      const code = error instanceof Error ? error.message : null;
+      if (activeProjectId !== "" && code === "DRIVE_PROVIDER_REJECTED") {
+        updateProjectSource(activeProjectId, "UPLOAD_FAILED");
+      }
+      setMessage(stableMessage(code));
     } finally {
       setBusy(false);
     }
@@ -248,39 +276,37 @@ export function ProjectUpload({
   }
 
   const percent = snapshot.totalBytes > 0 ? Math.floor(snapshot.committedBytes * 100 / snapshot.totalBytes) : 0;
+  const uploadLabel = recovery !== null
+    ? "Tiếp tục tải dở"
+    : selectedProject?.sourceStatus === "UPLOAD_FAILED"
+      ? "Chọn lại file và thử lại"
+      : "Tải video lên";
   return (
     <section className="workspace-card project-upload" aria-labelledby="project-upload-title">
       <div className="card-heading">
-        <div><p className="eyebrow">Chuẩn bị video</p><h2 id="project-upload-title">Dự án & tải lên</h2></div>
+        <div><p className="eyebrow">Chuẩn bị video</p><h2 id="project-upload-title">Video & tải lên</h2></div>
         <span className={`mode-badge mode-${health.mode.toLowerCase()}`}>{health.mode === "READ_WRITE" ? "Sẵn sàng" : "Chỉ đọc"}</span>
       </div>
 
       {readOnlyReason && <p id="work-disabled-reason" className="warning-copy">{readOnlyReason}</p>}
-      <div className="project-create-row">
-        <label htmlFor="project-name">Tên dự án</label>
-        <input id="project-name" value={projectName} onChange={(event) => setProjectName(event.target.value)} maxLength={160} disabled={workDisabled || busy || uploadActive} />
-        <button type="button" onClick={createProject} disabled={workDisabled || busy || uploadActive || projectName.trim() === ""} aria-describedby={workDisabled ? "work-disabled-reason" : undefined}>Tạo dự án</button>
-      </div>
-
-      {projects.length > 0 && (
-        <div className="upload-controls">
-          <label htmlFor="project-select">Dự án</label>
+      <div className="upload-controls">
+          <label htmlFor="project-select">Video</label>
           <select id="project-select" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)} disabled={busy || uploadActive}>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            <option value="">Tải video mới</option>
+            {projects.map((project) => <option key={project.id} value={project.id}>{project.name} · {project.sourceStatus === "SOURCE_READY" ? "Sẵn sàng" : project.sourceStatus === "UPLOAD_FAILED" ? "Tải lỗi" : project.sourceStatus === "UPLOAD_PENDING" ? "Đang tải" : "Chưa tải"}</option>)}
           </select>
-          <label htmlFor="source-video">Video nguồn</label>
+          <label htmlFor="source-video">File video</label>
           <input id="source-video" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} disabled={workDisabled || busy || uploadActive || sourceReady} />
           <p className="field-note">MP4, MOV, MKV hoặc WEBM · tối đa 10 GiB</p>
           <div className="button-row">
             <button type="button" onClick={startUpload} disabled={workDisabled || busy || uploadActive || sourceReady || file === null}>
-              {recovery === null ? "Tải lên" : "Tiếp tục tải dở"}
+              {uploadLabel}
             </button>
             {snapshot.phase === "UPLOADING" && <button type="button" className="button-secondary" onClick={() => uploaderRef.current?.pause()}>Tạm dừng</button>}
             {(snapshot.phase === "PAUSED" || snapshot.phase === "PAUSED_ERROR" || snapshot.phase === "PAUSED_VERIFYING") && <button type="button" className="button-secondary" onClick={resumeUpload}>Tiếp tục</button>}
             {artifactId && !["READY", "CANCELLED"].includes(snapshot.phase) && <button type="button" className="button-danger" onClick={cancelUpload}>Hủy tải lên</button>}
           </div>
-        </div>
-      )}
+      </div>
 
       {recoveries.length > 0 && snapshot.phase === "IDLE" && <p className="recovery-note">Có phiên tải dở. Hãy chọn lại đúng file để tiếp tục từ phần đã xác nhận.</p>}
       <div className="upload-progress" role="status" aria-live="polite">

@@ -17,8 +17,9 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
   projects: readonly PublicProject[];
   workers: readonly WorkerViewModel[];
 }) {
+  const [videoItems, setVideoItems] = useState<readonly PublicProject[]>(projects);
   const connected = workerOnline || workers.some((worker) => worker.state !== "REVOKED");
-  const sourceReady = projects.some((project) => project.sourceStatus === "SOURCE_READY");
+  const sourceReady = videoItems.some((project) => project.sourceStatus === "SOURCE_READY");
   const vpsReady = workerOnline || workers.some((worker) => worker.state === "READY");
   const outputReady = jobs.some((job) => job.state === "COMPLETED");
   const [activeStep, setActiveStep] = useState<"drive" | "vps" | "review" | "render">("drive");
@@ -28,7 +29,7 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
     { id: "review" as const, label: "3. Review", done: sourceReady, disabled: !sourceReady },
     { id: "render" as const, label: "4. Render", done: outputReady, disabled: !sourceReady || !vpsReady },
   ];
-  const sourceProject = projects.find((project) => project.sourceStatus === "SOURCE_READY");
+  const sourceProject = videoItems.find((project) => project.sourceStatus === "SOURCE_READY");
 
   return (
     <main className="dashboard">
@@ -46,7 +47,7 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
       <div className="workflow-panels">
         <section className={`workflow-panel ${activeStep === "drive" ? "workflow-panel-active" : ""}`} aria-labelledby="workflow-drive-title">
           <div className="workflow-panel-heading"><p className="eyebrow">Bước 1</p><h2 id="workflow-drive-title">Drive · Nguồn và thư mục output</h2></div>
-          <div className="workspace-grid"><DriveCard value={drive} health={health} /><ProjectUpload health={health} projects={projects} /></div>
+          <div className="workspace-grid"><DriveCard value={drive} health={health} /><ProjectUpload health={health} projects={videoItems} onProjectsChange={setVideoItems} /></div>
         </section>
         <section className={`workflow-panel ${activeStep === "vps" ? "workflow-panel-active" : ""}`} aria-labelledby="workflow-vps-title">
           <div className="workflow-panel-heading"><p className="eyebrow">Bước 2</p><h2 id="workflow-vps-title">VPS · Setup và kiểm tra GPU</h2></div><WorkerCard workers={workers} />
@@ -55,7 +56,7 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
           <div className="workflow-panel-heading"><p className="eyebrow">Bước 3</p><h2 id="workflow-review-title">Review · Blur hình chữ nhật và voice TTS</h2></div><SceneEditor projectId={sourceProject?.id ?? null} />
         </section>
         <section className={`workflow-panel ${activeStep === "render" ? "workflow-panel-active" : ""}`} aria-labelledby="workflow-render-title">
-          <div className="workflow-panel-heading"><p className="eyebrow">Bước 4</p><h2 id="workflow-render-title">Render · Theo dõi output</h2></div><JobList jobs={jobs} projects={projects} />
+          <div className="workflow-panel-heading"><p className="eyebrow">Bước 4</p><h2 id="workflow-render-title">Render · Theo dõi output</h2></div><JobList jobs={jobs} projects={videoItems} />
         </section>
       </div>
     </main>
