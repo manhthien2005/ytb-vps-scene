@@ -93,7 +93,7 @@ class MediaJobTests(unittest.TestCase):
         invalid = assignment("a" * 64)
         invalid["execution"]["source"].pop("sha256")  # type: ignore[index]
         with self.assertRaises(MediaJobError):
-            MediaJobExecutor(FakeClient()).execute(invalid, Path(tempfile.gettempdir()))
+            MediaJobExecutor(FakeClient(), transfer_factory=FakeTransfer, pipeline=lambda *_args: Path("missing.mp4")).execute(invalid, Path(tempfile.gettempdir()))
 
 
 if __name__ == "__main__":

@@ -219,10 +219,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         credential = WorkerCredentialStore(path).load()
         capabilities, doctor = _evidence()
         client = ControlPlaneClient(str(credential["origin"]), str(credential["sessionSecret"]))
-        from ytb_vps_v2.application.media_job import MediaJobExecutor
+        from ytb_vps_v2.adapters.native_media_job import create_native_media_executor
 
         workspace_root = Path(os.environ.get("YTB_VPS_WORK_ROOT", "/var/lib/ytb-vps/runs"))
-        loop = WorkerLoop(client, capabilities, doctor, executor=MediaJobExecutor(client), workspace_root=workspace_root)
+        loop = WorkerLoop(client, capabilities, doctor, executor=create_native_media_executor(client), workspace_root=workspace_root)
         while True:
             loop.run_once()
             if arguments.once:
