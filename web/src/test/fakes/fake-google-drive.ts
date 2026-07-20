@@ -63,6 +63,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     inputFolderId: "fake-input-folder-001",
   };
   sourceFileId = "fake-source-file-001";
+  outputFileId = "fake-output-file-001";
   resumableSession = {
     sessionUri: "https://www.googleapis.com/upload/drive/v3/files/fake-source-file-001?upload_id=fake",
     expiresAt: "2026-07-26T00:00:00.000Z",
@@ -85,6 +86,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   readonly ensureWorkspaceCalls: string[] = [];
   readonly ensureProjectFoldersCalls: Array<Readonly<{ accessToken: string; projectId: string }>> = [];
   readonly ensureSourceFileCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
+  readonly ensureOutputFileCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly resumableSessionCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly inspectFileCalls: Array<Readonly<{ accessToken: string; fileId: string }>> = [];
   readonly deleteFileCalls: Array<Readonly<{ accessToken: string; fileId: string }>> = [];
@@ -109,6 +111,11 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   async ensureSourceFile(accessToken: string, input: Parameters<DriveFilesPort["ensureSourceFile"]>[1]) {
     this.ensureSourceFileCalls.push({ accessToken, input: structuredClone(input) });
     return this.sourceFileId;
+  }
+
+  async ensureOutputFile(accessToken: string, input: Parameters<DriveFilesPort["ensureOutputFile"]>[1]) {
+    this.ensureOutputFileCalls.push({ accessToken, input: structuredClone(input) });
+    return this.outputFileId;
   }
 
   async createResumableUpdateSession(

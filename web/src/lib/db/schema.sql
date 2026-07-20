@@ -454,3 +454,9 @@ create table if not exists project_scene_settings (
   updated_at timestamptz not null default now()
 );
 insert into schema_migrations(version) values (8) on conflict (version) do nothing;
+
+-- migration v9: one fenced output artifact per media job
+alter table artifacts add column if not exists job_id text references jobs(id);
+create unique index if not exists artifacts_one_live_output_per_job_idx
+  on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
+insert into schema_migrations(version) values (9) on conflict (version) do nothing;

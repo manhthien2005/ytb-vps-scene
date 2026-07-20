@@ -216,6 +216,20 @@ function sourceProperties(projectId: string, artifactId: string): Readonly<Recor
   };
 }
 
+function outputProperties(
+  projectId: string,
+  jobId: string,
+  artifactId: string,
+): Readonly<Record<string, string>> {
+  return {
+    ytbVpsProjectId: projectId,
+    ytbVpsArtifactId: artifactId,
+    ytbVpsJobId: jobId,
+    ytbVpsRole: "output",
+    schema: "1",
+  };
+}
+
 function headers(accessToken: string, json = false): HeadersInit {
   if (!boundedHeaderToken(accessToken)) throw stableError("DRIVE_REAUTH_REQUIRED", 401);
   return {
@@ -477,6 +491,21 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         empty: true,
       });
       return source.id;
+    },
+
+    async ensureOutputFile(accessToken, input) {
+      validateProjectId(input.projectId);
+      validateProjectId(input.jobId);
+      validateProjectId(input.artifactId);
+      if (!boundedDriveId(input.parentId)) throw stableError("DRIVE_PROVIDER_REJECTED");
+      const output = await ensureExpected(accessToken, {
+        name: "Part_01_of_01.mp4",
+        mimeType: "video/mp4",
+        parentId: input.parentId,
+        appProperties: outputProperties(input.projectId, input.jobId, input.artifactId),
+        empty: true,
+      });
+      return output.id;
     },
 
     async createResumableUpdateSession(accessToken, input) {

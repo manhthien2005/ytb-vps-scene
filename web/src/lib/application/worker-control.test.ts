@@ -41,6 +41,9 @@ function repository(): WorkerControlPlaneRepository {
     claimJob: vi.fn(),
     renewLease: vi.fn(),
     updateJobProgress: vi.fn(),
+    getFencedExecution: vi.fn(),
+    reserveOutput: vi.fn(),
+    completeOutput: vi.fn(),
     expireWorkersAndLeases: vi.fn(),
   };
 }

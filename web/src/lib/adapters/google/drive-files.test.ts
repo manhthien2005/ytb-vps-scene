@@ -424,6 +424,45 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(headers.get("x-upload-content-type")).toBe("video/mp4");
   });
 
+  it("creates one private app-owned output file with exact fenced metadata", async () => {
+    const jobId = "40000000-0000-4000-8000-000000000001";
+    const properties = {
+      ytbVpsProjectId: PROJECT_ID,
+      ytbVpsArtifactId: ARTIFACT_ID,
+      ytbVpsJobId: jobId,
+      ytbVpsRole: "output",
+      schema: "1",
+    };
+    const output = {
+      id: "drive-output-file-001",
+      name: "Part_01_of_01.mp4",
+      mimeType: "video/mp4",
+      size: "0",
+      parents: ["drive-project-folder-001"],
+      trashed: false,
+      appProperties: properties,
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse(output));
+
+    await expect(adapter(fetcher).ensureOutputFile(ACCESS_TOKEN, {
+      projectId: PROJECT_ID,
+      jobId,
+      artifactId: ARTIFACT_ID,
+      parentId: "drive-project-folder-001",
+    })).resolves.toBe("drive-output-file-001");
+
+    const create = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
+    expect(create).toEqual({
+      name: "Part_01_of_01.mp4",
+      mimeType: "video/mp4",
+      parents: ["drive-project-folder-001"],
+      appProperties: properties,
+    });
+    expect(JSON.stringify(create)).not.toContain("permission");
+  });
+
   it.each([
     ["http://www.googleapis.com/upload/drive/v3/files/file?upload_id=x"],
     ["https://evil.example/upload/drive/v3/files/file?upload_id=x"],

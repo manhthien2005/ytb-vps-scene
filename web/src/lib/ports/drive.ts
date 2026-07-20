@@ -26,6 +26,12 @@ export interface DriveFilesPort {
   ensureSourceFile(accessToken: string, input: UploadIntent & Readonly<{
     projectId: string; artifactId: string; parentId: string;
   }>): Promise<string>;
+  ensureOutputFile(accessToken: string, input: Readonly<{
+    projectId: string;
+    jobId: string;
+    artifactId: string;
+    parentId: string;
+  }>): Promise<string>;
   createResumableUpdateSession(accessToken: string, input: Readonly<{
     fileId: string; mimeType: string; sizeBytes: number;
   }>): Promise<Readonly<{ sessionUri: string; expiresAt: string }>>;

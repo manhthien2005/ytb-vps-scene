@@ -193,4 +193,52 @@ describe("worker control plane repository", () => {
     });
     await expect(repository.claimJob(worker.id, NOW, "bridge-v2")).resolves.toBeNull();
   });
+
+  it("reserves and completes one output only under the active fence", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "2".repeat(64),
+      now: NOW,
+    });
+    const assignment = await repository.claimJob(worker.id, NOW, "bridge-v1");
+    expect(job).not.toBeNull();
+    expect(assignment).not.toBeNull();
+    await expect(repository.getFencedExecution(worker.id, job!.id, 1, NOW))
+      .resolves.toEqual(assignment!.execution);
+
+    const reservation = {
+      artifactId: "50000000-0000-4000-8000-000000000001",
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveFileId: "drive-output-001",
+      driveParentId: "drive-project-001",
+      sizeBytes: 1234,
+      checksumSha256: "a".repeat(64),
+      now: NOW,
+    };
+    await expect(repository.reserveOutput(reservation)).resolves.toBe("RESERVED");
+    await expect(repository.reserveOutput(reservation)).resolves.toBe("REPLAY");
+    await expect(repository.completeOutput({
+      artifactId: reservation.artifactId,
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveFileId: "drive-output-001",
+      sizeBytes: 1234,
+      now: NOW,
+    })).resolves.toBe("COMPLETED");
+    await expect(repository.completeOutput({
+      artifactId: reservation.artifactId,
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveFileId: "drive-output-001",
+      sizeBytes: 1234,
+      now: NOW,
+    })).resolves.toBe("REPLAY");
+  });
 });

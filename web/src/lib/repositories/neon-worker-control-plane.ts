@@ -317,6 +317,114 @@ export function createWorkerControlPlaneRepository(
       return result.rows.length === 1 ? "UPDATED" : "LEASE_LOST";
     },
 
+    async getFencedExecution(workerId, jobId, fencingToken, now) {
+      const result = await sql.query(
+        `select p.id as project_id,
+                a.drive_file_id as source_drive_file_id,
+                a.display_name as source_file_name,
+                a.mime_type as source_mime_type,
+                a.actual_size_bytes as source_size_bytes,
+                p.drive_project_folder_id as output_parent_id,
+                s.settings as scene_settings
+         from job_leases l
+         join jobs j on j.id=l.job_id
+         join projects p on p.id=j.project_id
+         join artifacts a on a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
+         join project_scene_settings s on s.project_id=p.id
+         where l.job_id=$1 and l.worker_id=$2 and l.fencing_token=$3 and l.expires_at>$4`,
+        [jobId, workerId, fencingToken, now.toISOString()],
+      );
+      return result.rows[0] ? parseExecutionRow(result.rows[0]) : null;
+    },
+
+    async reserveOutput(input) {
+      const result = await sql.query(
+        `with eligible as materialized (
+           select j.project_id
+           from job_leases l join jobs j on j.id=l.job_id
+           where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$9
+         ), existing as materialized (
+           select id from artifacts
+           where job_id=$2 and kind='OUTPUT' and status<>'DELETED'
+             and id=$1 and drive_file_id=$5 and drive_parent_id=$6
+             and expected_size_bytes=$7 and checksum_sha256=$8
+         ), inserted as (
+           insert into artifacts(
+             id,project_id,job_id,kind,status,drive_file_id,drive_parent_id,
+             display_name,mime_type,expected_size_bytes,checksum_sha256,created_at,updated_at
+           )
+           select $1,e.project_id,$2,'OUTPUT','PENDING',$5,$6,
+                  'Part_01_of_01.mp4','video/mp4',$7,$8,$9,$9
+           from eligible e where not exists(select 1 from existing)
+           on conflict do nothing returning id
+         )
+         select 'REPLAY' as outcome from existing
+         union all select 'RESERVED' as outcome from inserted limit 1`,
+        [
+          input.artifactId,
+          input.jobId,
+          input.workerId,
+          input.fencingToken,
+          input.driveFileId,
+          input.driveParentId,
+          input.sizeBytes,
+          input.checksumSha256,
+          input.now.toISOString(),
+        ],
+      );
+      const outcome = result.rows[0]?.outcome;
+      return outcome === "RESERVED" || outcome === "REPLAY" ? outcome : "LEASE_LOST";
+    },
+
+    async completeOutput(input) {
+      const replay = await sql.query(
+        `select id from artifacts
+         where id=$1 and job_id=$2 and kind='OUTPUT' and status='READY'
+           and drive_file_id=$3 and actual_size_bytes=$4`,
+        [input.artifactId, input.jobId, input.driveFileId, input.sizeBytes],
+      );
+      if (replay.rows.length === 1) return "REPLAY";
+      const result = await sql.query(
+        `with eligible as materialized (
+           select l.job_id,l.worker_id,l.fencing_token
+           from job_leases l
+           where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$7
+         ), artifact_done as (
+           update artifacts a set status='READY',actual_size_bytes=$6,verified_at=$7,updated_at=$7
+           from eligible e
+           where a.id=$1 and a.job_id=e.job_id and a.kind='OUTPUT' and a.status='PENDING'
+             and a.drive_file_id=$5 and a.expected_size_bytes=$6
+           returning a.id
+         ), job_done as (
+           update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,updated_at=$7
+           from eligible e, artifact_done a where j.id=e.job_id returning j.id
+         ), worker_ready as (
+           update workers w set state='READY',updated_at=$7
+           from eligible e, job_done j where w.id=e.worker_id returning w.id
+         ), attempt_done as (
+           update job_attempts a set ended_at=$7,outcome='COMPLETED'
+           from eligible e, job_done j
+           where a.job_id=e.job_id and a.worker_id=e.worker_id
+             and a.fencing_token=e.fencing_token and a.ended_at is null returning a.id
+         ), lease_deleted as (
+           delete from job_leases l using eligible e, job_done j
+           where l.job_id=e.job_id and l.worker_id=e.worker_id
+             and l.fencing_token=e.fencing_token returning l.job_id
+         ) select a.id from artifact_done a
+           cross join worker_ready w cross join attempt_done t cross join lease_deleted l`,
+        [
+          input.artifactId,
+          input.jobId,
+          input.workerId,
+          input.fencingToken,
+          input.driveFileId,
+          input.sizeBytes,
+          input.now.toISOString(),
+        ],
+      );
+      return result.rows.length === 1 ? "COMPLETED" : "LEASE_LOST";
+    },
+
     async expireWorkersAndLeases(now: Date): Promise<void> {
       await sql.query(
         `with expired as materialized (
