@@ -1,11 +1,20 @@
 import type { JobSummary } from "@/lib/domain/control-plane";
+import type { DriveConnectionView, FreeTierHealthView, PublicProject } from "./dashboard-types";
+import { DriveCard } from "./drive-card";
+import { ProjectUpload } from "./project-upload";
 
 export function DashboardShell({
   workerOnline,
   jobs,
+  drive,
+  health,
+  projects,
 }: {
   workerOnline: boolean;
   jobs: readonly JobSummary[];
+  drive: DriveConnectionView;
+  health: FreeTierHealthView;
+  projects: readonly PublicProject[];
 }) {
   return (
     <main className="dashboard">
@@ -27,7 +36,11 @@ export function DashboardShell({
           {workerOnline ? "Có thể nhận job" : "Anh vẫn có thể chuẩn bị và xếp hàng dự án."}
         </span>
       </section>
-      <section>
+      <div className="workspace-grid">
+        <DriveCard value={drive} health={health} />
+        <ProjectUpload health={health} projects={projects} />
+      </div>
+      <section className="recent-jobs">
         <h2>Dự án gần đây</h2>
         {jobs.length === 0 ? (
           <p>Chưa có dự án.</p>
