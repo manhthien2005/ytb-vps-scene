@@ -37,7 +37,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     } finally {
       await db.close();
     }
@@ -115,7 +115,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       await expect(db.exec("insert into jobs(id, project_name, state) values ('j1','Demo','WRONG')"))
         .rejects.toThrow();
     } finally {
