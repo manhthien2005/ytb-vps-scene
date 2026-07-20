@@ -34,6 +34,10 @@ describe("POST /api/v1/auth/login", () => {
       DRIVE_UPLOAD_MAX_BYTES: "10737418240",
       FREE_TIER_SOFT_PERCENT: "90",
       QUOTA_STALE_AFTER_SECONDS: "900",
+      WORKER_AUTH_KEY_V1: "A".repeat(43),
+      WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+      WORKER_RELEASE_COMMIT: "a".repeat(40),
+      WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
     });
     delete process.env.OPENAI_API_KEY;
     repository.consumeLoginAttempt.mockResolvedValue({ allowed: true, retryAfterSeconds: 0 });

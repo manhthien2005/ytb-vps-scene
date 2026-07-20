@@ -69,10 +69,20 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .worker-list li > div { display: grid; gap: 4px; }
 .worker-list li span { font-size: .9rem; }
 .queue-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.scene-editor { grid-column: 1 / -1; }
+.scene-toolbar, .scene-tts { display: grid; gap: 10px; margin-top: 16px; }
+.scene-toolbar { grid-template-columns: auto auto 1fr 2fr; align-items: center; }
+.scene-toolbar label, .scene-tts label { color: var(--muted); font-weight: 700; }
+.scene-preview { position: relative; min-height: 260px; margin-top: 18px; overflow: hidden; border: 1px solid #466789; border-radius: 14px; background: #02070c; touch-action: none; }
+.scene-preview video { display: block; width: 100%; height: 100%; min-height: 260px; object-fit: contain; }
+.scene-rectangle { position: absolute; display: block; border: 2px dashed var(--accent); background: #76e6c233; pointer-events: none; }
+.scene-logo { border-color: var(--warning); background: #ffd38a33; }
+.scene-tts textarea, .scene-tts select { width: 100%; min-height: 44px; padding: 10px; border: 1px solid #3b5674; border-radius: 10px; color: var(--text); background: #081524; }
 @media (max-width: 720px) {
   .dashboard > header, .dashboard li { align-items: stretch; flex-direction: column; }
   .dashboard { width: min(100% - 28px, 1100px); padding: 24px 0; }
   .workspace-grid { grid-template-columns: 1fr; }
+  .scene-toolbar { grid-template-columns: 1fr; }
   .workspace-card { padding: 19px; }
   .usage-grid { grid-template-columns: 1fr; }
   .card-heading { align-items: stretch; flex-direction: column; }

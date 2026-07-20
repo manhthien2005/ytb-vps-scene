@@ -446,3 +446,11 @@ create unique index if not exists job_attempts_fence_idx
   on job_attempts(job_id, fencing_token);
 
 insert into schema_migrations(version) values (7) on conflict (version) do nothing;
+
+-- migration v8: persisted human-reviewed blur rectangles and voice preview settings
+create table if not exists project_scene_settings (
+  project_id text primary key references projects(id),
+  settings jsonb not null check (jsonb_typeof(settings) = 'object' and pg_column_size(settings) <= 4096),
+  updated_at timestamptz not null default now()
+);
+insert into schema_migrations(version) values (8) on conflict (version) do nothing;

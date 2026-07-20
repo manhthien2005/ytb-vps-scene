@@ -4,6 +4,7 @@ import { DriveCard } from "./drive-card";
 import { ProjectUpload } from "./project-upload";
 import { WorkerCard } from "./worker-card";
 import { JobList } from "./job-list";
+import { SceneEditor } from "./scene-editor";
 
 export function DashboardShell({
   workerOnline,
@@ -41,6 +42,7 @@ export function DashboardShell({
         <ProjectUpload health={health} projects={projects} />
       </div>
       <JobList jobs={jobs} projects={projects} />
+      <SceneEditor projectId={projects.find((project) => project.sourceStatus === "SOURCE_READY")?.id ?? null} />
     </main>
   );
 }

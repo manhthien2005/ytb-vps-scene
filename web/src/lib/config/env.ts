@@ -79,6 +79,12 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     SESSION_SECRET: source.SESSION_SECRET,
     APP_ORIGIN: source.APP_ORIGIN,
   });
+  const workerDefaults = value.NODE_ENV === "production" ? {} : {
+    WORKER_AUTH_KEY_V1: "A".repeat(43),
+    WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+    WORKER_RELEASE_COMMIT: "0".repeat(40),
+    WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
+  };
   const cp2 = cp2Schema.parse({
     GOOGLE_OAUTH_CLIENT_ID: source.GOOGLE_OAUTH_CLIENT_ID,
     GOOGLE_OAUTH_CLIENT_SECRET: source.GOOGLE_OAUTH_CLIENT_SECRET,
@@ -87,10 +93,10 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     DRIVE_UPLOAD_MAX_BYTES: source.DRIVE_UPLOAD_MAX_BYTES,
     FREE_TIER_SOFT_PERCENT: source.FREE_TIER_SOFT_PERCENT,
     QUOTA_STALE_AFTER_SECONDS: source.QUOTA_STALE_AFTER_SECONDS,
-    WORKER_AUTH_KEY_V1: source.WORKER_AUTH_KEY_V1,
-    WORKER_RELEASE_REPOSITORY: source.WORKER_RELEASE_REPOSITORY,
-    WORKER_RELEASE_COMMIT: source.WORKER_RELEASE_COMMIT,
-    WORKER_PIPELINE_BRIDGE_VERSION: source.WORKER_PIPELINE_BRIDGE_VERSION,
+    WORKER_AUTH_KEY_V1: source.WORKER_AUTH_KEY_V1 ?? workerDefaults.WORKER_AUTH_KEY_V1,
+    WORKER_RELEASE_REPOSITORY: source.WORKER_RELEASE_REPOSITORY ?? workerDefaults.WORKER_RELEASE_REPOSITORY,
+    WORKER_RELEASE_COMMIT: source.WORKER_RELEASE_COMMIT ?? workerDefaults.WORKER_RELEASE_COMMIT,
+    WORKER_PIPELINE_BRIDGE_VERSION: source.WORKER_PIPELINE_BRIDGE_VERSION ?? workerDefaults.WORKER_PIPELINE_BRIDGE_VERSION,
   });
   decodeDriveKey(cp2.DRIVE_TOKEN_KEY_V1);
   decodeWorkerKey(cp2.WORKER_AUTH_KEY_V1);
