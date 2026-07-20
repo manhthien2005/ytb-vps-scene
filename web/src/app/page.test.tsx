@@ -139,7 +139,7 @@ describe("HomePage", () => {
 
     expect(screen.getByText("Đã kết nối")).toBeVisible();
     expect(screen.getByText("a***@example.test")).toBeVisible();
-    expect(screen.getByRole("option", { name: "Test 1" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "Test 1 · Chưa tải" })).toBeVisible();
     expect(container.textContent).not.toContain("secret-root-folder-id");
     expect(container.textContent).not.toContain("secret-project-folder-id");
     expect(container.textContent).not.toContain("secret-envelope");
