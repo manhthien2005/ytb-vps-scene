@@ -238,6 +238,36 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(query).toContain(`value='${ARTIFACT_ID}'`);
   });
 
+  it("accepts a canonical Vietnamese display filename while keeping provider names private", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse({
+        id: "drive-source-file-001",
+        name: "source.mp4",
+        mimeType: "video/mp4",
+        size: "0",
+        parents: ["drive-input-folder-001"],
+        trashed: false,
+        appProperties: {
+          ytbVpsProjectId: PROJECT_ID,
+          ytbVpsArtifactId: ARTIFACT_ID,
+          ytbVpsRole: "source",
+          schema: "1",
+        },
+      }));
+
+    await expect(adapter(fetcher).ensureSourceFile(ACCESS_TOKEN, {
+      projectId: PROJECT_ID,
+      artifactId: ARTIFACT_ID,
+      parentId: "drive-input-folder-001",
+      fileName: "Phụ đề tiếng Việt.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "mp4",
+    })).resolves.toBe("drive-source-file-001");
+  });
+
   it("reuses the lowest opaque ID when exact empty source duplicates exist", async () => {
     const properties = {
       ytbVpsProjectId: PROJECT_ID,
@@ -371,7 +401,7 @@ describe("createGoogleDriveFilesAdapter", () => {
   });
 
   it("creates a bounded resumable PATCH update session with a trusted URI", async () => {
-    const sessionUri = "https://www.googleapis.com/upload/drive/v3/files/file-001?upload_id=opaque";
+    const sessionUri = "https://www.googleapis.com/upload/drive/v3/files/file-001?uploadType=resumable&upload_id=opaque";
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, {
       status: 200,
       headers: { location: sessionUri },
@@ -398,6 +428,10 @@ describe("createGoogleDriveFilesAdapter", () => {
     ["http://www.googleapis.com/upload/drive/v3/files/file?upload_id=x"],
     ["https://evil.example/upload/drive/v3/files/file?upload_id=x"],
     ["https://www.googleapis.com/drive/v3/files/file"],
+    ["https://www.googleapis.com/upload/drive/v3/files/file?upload_id=x&unexpected=value"],
+    ["https://www.googleapis.com/upload/drive/v3/files/file?uploadType=resumable&uploadType=resumable&upload_id=x"],
+    ["https://www.googleapis.com/upload/drive/v3/files/file?upload_id=x&access_token=credential"],
+    ["https://www.googleapis.com/upload/drive/v3/files/file?upload_id=x#fragment"],
   ])("rejects an untrusted resumable Location %#", async (location) => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, {
       status: 200,

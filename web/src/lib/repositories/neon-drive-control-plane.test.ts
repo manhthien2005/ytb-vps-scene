@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DRIVE_FILE_SCOPE, type UploadIntent } from "@/lib/domain/drive";
+import { AppError } from "@/lib/domain/errors";
 import type { UsageSnapshot } from "@/lib/ports/drive";
+import type { DriveFilesPort } from "@/lib/ports/drive";
+import { createFreeTierHealthService } from "@/lib/application/free-tier-health";
 
 vi.mock("server-only", () => ({}));
 
@@ -378,8 +381,8 @@ describe("Drive control-plane repository", () => {
       driveParentId: project.driveInputFolderId!,
     }, CLAIM_TOKEN)).resolves.toEqual(source);
 
-    await repository.markArtifactUploading(ARTIFACT_ID);
-    await repository.markSourceReady(ARTIFACT_ID, 100, NOW);
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
+    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
     await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toMatchObject({
       status: "READY",
       actualSizeBytes: 100,
@@ -387,6 +390,107 @@ describe("Drive control-plane repository", () => {
     await expect(repository.appManagedDriveBytes()).resolves.toBe(100);
     await expect(repository.markSourceInvalid(ARTIFACT_ID))
       .rejects.toThrow("Source cannot be marked invalid");
+  });
+
+  it("atomically audits one READY winner and treats a concurrent replay as terminal", async () => {
+    const { repository } = await reserveTrackedSource();
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
+
+    const outcomes = await Promise.all([
+      repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN),
+      repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN),
+    ]);
+
+    expect(outcomes.sort()).toEqual(["CHANGED", "REPLAY"]);
+    const audits = await db.query<{
+      event_type: string;
+      target_id: string;
+      actor_class: string;
+      payload: Record<string, unknown>;
+    }>(
+      `select event_type,target_id,actor_class,payload
+       from audit_events where target_id=$1 order by id`,
+      [ARTIFACT_ID],
+    );
+    expect(audits.rows).toEqual([{
+      event_type: "UPLOAD_COMPLETED",
+      target_id: ARTIFACT_ID,
+      actor_class: "admin",
+      payload: {
+        projectId: expect.any(String),
+        artifactId: ARTIFACT_ID,
+        actualSizeBytes: 100,
+        mimeType: "video/mp4",
+        status: "READY",
+      },
+    }]);
+    const serialized = JSON.stringify(audits.rows);
+    expect(serialized).not.toContain("drive-source-file-001");
+    expect(serialized).not.toContain("drive-input-folder-001");
+  });
+
+  it("atomically audits one INVALID winner and replays after a lost response", async () => {
+    const { repository } = await reserveTrackedSource();
+
+    await expect(repository.markSourceInvalid(ARTIFACT_ID)).resolves.toBe("CHANGED");
+    await expect(repository.markSourceInvalid(ARTIFACT_ID)).resolves.toBe("REPLAY");
+
+    const audits = await db.query<{
+      event_type: string;
+      target_id: string;
+      actor_class: string;
+      payload: Record<string, unknown>;
+    }>(
+      `select event_type,target_id,actor_class,payload
+       from audit_events where target_id=$1 order by id`,
+      [ARTIFACT_ID],
+    );
+    expect(audits.rows).toEqual([{
+      event_type: "UPLOAD_FAILED",
+      target_id: ARTIFACT_ID,
+      actor_class: "admin",
+      payload: {
+        projectId: expect.any(String),
+        artifactId: ARTIFACT_ID,
+        expectedSizeBytes: 100,
+        mimeType: "video/mp4",
+        status: "INVALID",
+      },
+    }]);
+  });
+
+  it("atomically audits one DELETED winner and treats a concurrent replay as terminal", async () => {
+    const { repository } = await reserveTrackedSource();
+    await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");
+
+    const outcomes = await Promise.all([
+      repository.markSourceDeleted(ARTIFACT_ID),
+      repository.markSourceDeleted(ARTIFACT_ID),
+    ]);
+
+    expect(outcomes.sort()).toEqual(["CHANGED", "REPLAY"]);
+    const audits = await db.query<{
+      event_type: string;
+      target_id: string;
+      actor_class: string;
+      payload: Record<string, unknown>;
+    }>(
+      `select event_type,target_id,actor_class,payload
+       from audit_events where target_id=$1 order by id`,
+      [ARTIFACT_ID],
+    );
+    expect(audits.rows).toEqual([{
+      event_type: "UPLOAD_CANCELLED",
+      target_id: ARTIFACT_ID,
+      actor_class: "admin",
+      payload: {
+        projectId: expect.any(String),
+        artifactId: ARTIFACT_ID,
+        expectedSizeBytes: 100,
+        mimeType: "video/mp4",
+        status: "DELETED",
+      },
+    }]);
   });
 
   it("does not let stale cancellation overwrite a source that completion made READY", async () => {
@@ -403,9 +507,9 @@ describe("Drive control-plane repository", () => {
       lastModified: 1,
       normalizedExtension: "mp4",
     }, CLAIM_TOKEN);
-    await repository.markArtifactUploading(ARTIFACT_ID);
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
-    await repository.markSourceReady(ARTIFACT_ID, 100, NOW);
+    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
 
     await expect(repository.markSourceDeleted(ARTIFACT_ID))
       .rejects.toThrow("Source cannot be marked deleted");
@@ -432,10 +536,10 @@ describe("Drive control-plane repository", () => {
       lastModified: 1,
       normalizedExtension: "mp4",
     }, CLAIM_TOKEN);
-    await repository.markArtifactUploading(ARTIFACT_ID);
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
     await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");
-    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW))
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN))
       .rejects.toThrow("Source cannot be marked ready");
     await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toMatchObject({
       status: "DELETING",
@@ -555,9 +659,9 @@ describe("Drive control-plane repository", () => {
   it("tracks authoritative partial progress as committed bytes plus remaining capacity", async () => {
     const { repository } = await reserveTrackedSource();
 
-    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40)).resolves.toBe(60);
-    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40)).resolves.toBe(60);
-    await expect(repository.observeSourceProgress(ARTIFACT_ID, 39)).resolves.toBe(61);
+    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN)).resolves.toBe(60);
+    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN)).resolves.toBe(60);
+    await expect(repository.observeSourceProgress(ARTIFACT_ID, 39, CLAIM_TOKEN)).resolves.toBe(61);
     await expect(repository.appManagedDriveBytes()).resolves.toBe(39);
     const ledger = await db.query<{ observed_size_bytes: string; remaining_bytes: string }>(
       `select observed_size_bytes,remaining_bytes from drive_upload_reservations
@@ -614,6 +718,37 @@ describe("Drive control-plane repository", () => {
     await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toBeNull();
   });
 
+  it("rejects stale progress and uploading mutations after a source-claim takeover", async () => {
+    const { repository, project } = await reserveTrackedSource();
+    await db.exec("update drive_provisioning_claims set expires_at=now()-interval '1 second'");
+    const replacementToken = "30000000-0000-4000-8000-000000000005";
+    await expect(repository.claimProvisioning("SOURCE", ARTIFACT_ID, replacementToken))
+      .resolves.toBe(true);
+
+    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN))
+      .rejects.toThrow("Source provisioning claim lost");
+    await expect(repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN))
+      .rejects.toThrow("Source provisioning claim lost");
+    await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toMatchObject({
+      status: "PENDING",
+    });
+    const beforeOwner = await db.query<{ observed_size_bytes: number; remaining_bytes: number }>(
+      `select observed_size_bytes,remaining_bytes from drive_upload_reservations
+       where artifact_id=$1`,
+      [ARTIFACT_ID],
+    );
+    expect(beforeOwner.rows).toEqual([{ observed_size_bytes: 0, remaining_bytes: 100 }]);
+
+    await expect(repository.observeSourceProgress(ARTIFACT_ID, 40, replacementToken))
+      .resolves.toBe(60);
+    await expect(repository.markArtifactUploading(ARTIFACT_ID, replacementToken))
+      .resolves.toBeUndefined();
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN))
+      .rejects.toThrow("Source cannot be marked ready");
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, replacementToken))
+      .resolves.toBe("CHANGED");
+  });
+
   it("atomically replaces a crash-stranded unbound capacity reservation", async () => {
     const project = await readyProject();
     const repository = repo();
@@ -656,8 +791,8 @@ describe("Drive control-plane repository", () => {
 
   it("retains remaining capacity after deletion is claimed and releases only after remote deletion", async () => {
     const { repository } = await reserveTrackedSource();
-    await repository.observeSourceProgress(ARTIFACT_ID, 40);
-    await repository.markArtifactUploading(ARTIFACT_ID);
+    await repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN);
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
     await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");
     const claimed = await db.query<{ remaining_bytes: number; released_at: Date | null }>(
@@ -666,7 +801,7 @@ describe("Drive control-plane repository", () => {
     );
     expect(claimed.rows).toEqual([{ remaining_bytes: 100, released_at: null }]);
 
-    await expect(repository.markSourceDeleted(ARTIFACT_ID)).resolves.toBe(true);
+    await expect(repository.markSourceDeleted(ARTIFACT_ID)).resolves.toBe("CHANGED");
     const deleted = await db.query<{ remaining_bytes: number; released_at: Date | null }>(
       `select remaining_bytes,released_at from drive_upload_reservations where artifact_id=$1`,
       [ARTIFACT_ID],
@@ -679,17 +814,17 @@ describe("Drive control-plane repository", () => {
     "releases remaining capacity exactly once when a source becomes %s",
     async (terminal) => {
       const { repository } = await reserveTrackedSource();
-      await repository.observeSourceProgress(ARTIFACT_ID, 40);
+      await repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN);
       if (terminal === "READY") {
-        await repository.markArtifactUploading(ARTIFACT_ID);
-        await repository.markSourceReady(ARTIFACT_ID, 100, NOW);
+        await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
+        await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
       } else if (terminal === "INVALID") {
         await repository.markSourceInvalid(ARTIFACT_ID);
       } else {
-        await repository.markArtifactUploading(ARTIFACT_ID);
+        await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
         await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");
         await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("RECONCILE");
-        await expect(repository.markSourceDeleted(ARTIFACT_ID)).resolves.toBe(true);
+        await expect(repository.markSourceDeleted(ARTIFACT_ID)).resolves.toBe("CHANGED");
       }
 
       const ledger = await db.query<{ remaining_bytes: string; released_at: Date | null }>(
@@ -704,6 +839,101 @@ describe("Drive control-plane repository", () => {
       );
     },
   );
+
+  it("keeps a newly finalized source charged until a newer Drive snapshot observes it", async () => {
+    const { repository } = await reserveTrackedSource();
+    await db.exec("update usage_guards set used_bytes=700 where provider='DRIVE'");
+    await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
+    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
+    const fallbackHealth = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "synthetic-access" },
+      files: {
+        inspectAccount: async () => {
+          throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+        },
+      } as unknown as DriveFilesPort,
+      neonLimitBytes: 536_870_912,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+    await expect(fallbackHealth.assertUploadAllowed(0, NOW)).resolves.toBeUndefined();
+
+    const nextProjectId = "40000000-0000-4000-8000-000000000003";
+    const nextClaimToken = "50000000-0000-4000-8000-000000000003";
+    await db.query(
+      `insert into projects(
+         id,status,name,source_status,creation_idempotency_key_hash,creation_request_hash,
+         drive_project_folder_id,drive_input_folder_id
+       ) values ($1,'READY','Next','NO_SOURCE',$2,$3,'drive-project-folder-003','drive-input-folder-003')`,
+      [nextProjectId, "1".repeat(64), "2".repeat(64)],
+    );
+    await repository.claimProvisioning("SOURCE", nextProjectId, nextClaimToken);
+
+    const nextInput = {
+      artifactId: nextProjectId,
+      projectId: nextProjectId,
+      driveParentId: "drive-input-folder-003",
+      fileName: "next.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 100,
+      claimToken: nextClaimToken,
+      now: NOW,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    } as const;
+    await expect(repository.reserveSourceCapacity(nextInput)).resolves.toBe("DRIVE_STORAGE_HIGH");
+
+    const released = await db.query<{ released_at: Date }>(
+      "select released_at from drive_upload_reservations where artifact_id=$1",
+      [ARTIFACT_ID],
+    );
+    const newerObservation = new Date(released.rows[0]!.released_at.getTime() + 1_000);
+    await repository.saveUsage({
+      provider: "DRIVE",
+      usedBytes: 800,
+      limitBytes: 1_000,
+      appManagedBytes: 100,
+      mode: "READ_WRITE",
+      reasonCodes: [],
+      observedAt: newerObservation.toISOString(),
+    });
+    await expect(repository.reserveSourceCapacity({
+      ...nextInput,
+      sizeBytes: 50,
+      now: newerObservation,
+    })).resolves.toBe("RESERVED");
+  });
+
+  it("keeps progress newer than the Drive snapshot charged during admission", async () => {
+    const { repository } = await reserveTrackedSource();
+    await db.exec("update usage_guards set used_bytes=700 where provider='DRIVE'");
+    await repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN);
+
+    const nextProjectId = "40000000-0000-4000-8000-000000000004";
+    const nextClaimToken = "50000000-0000-4000-8000-000000000004";
+    await db.query(
+      `insert into projects(
+         id,status,name,source_status,creation_idempotency_key_hash,creation_request_hash,
+         drive_project_folder_id,drive_input_folder_id
+       ) values ($1,'READY','Progress','NO_SOURCE',$2,$3,'drive-project-folder-004','drive-input-folder-004')`,
+      [nextProjectId, "3".repeat(64), "4".repeat(64)],
+    );
+    await repository.claimProvisioning("SOURCE", nextProjectId, nextClaimToken);
+
+    await expect(repository.reserveSourceCapacity({
+      artifactId: nextProjectId,
+      projectId: nextProjectId,
+      driveParentId: "drive-input-folder-004",
+      fileName: "progress.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 100,
+      claimToken: nextClaimToken,
+      now: NOW,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    })).resolves.toBe("DRIVE_STORAGE_HIGH");
+  });
 
   it("atomically prevents concurrent remaining-byte reservations from reaching the soft limit", async () => {
     const repository = repo();

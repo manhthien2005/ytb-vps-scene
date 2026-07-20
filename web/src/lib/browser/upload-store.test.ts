@@ -100,6 +100,24 @@ describe("UploadSessionStore", () => {
     expect(removeItem).not.toHaveBeenCalled();
   });
 
+  it("accepts the documented resumable query pair", async () => {
+    const value = record({
+      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source-file?uploadType=resumable&upload_id=opaque-capability",
+    });
+
+    await expect(store.put(value)).resolves.toBeUndefined();
+    await expect(store.get(PROJECT_ID, ARTIFACT_ID)).resolves.toEqual(value);
+  });
+
+  it("round-trips a canonical Vietnamese display filename", async () => {
+    const value = record({
+      fileIdentity: { ...record().fileIdentity, displayName: "Phụ đề tiếng Việt.mp4" },
+    });
+
+    await store.put(value);
+    await expect(store.get(PROJECT_ID, ARTIFACT_ID)).resolves.toEqual(value);
+  });
+
   it.each([
     ["noncanonical project id", record({ projectId: PROJECT_ID.toUpperCase() })],
     ["noncanonical artifact id", record({ artifactId: ARTIFACT_ID.toUpperCase() })],

@@ -2,6 +2,8 @@ import "server-only";
 
 import { AppError, type PublicCode } from "@/lib/domain/errors";
 import type { UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
+import { parseDriveResumableSessionUri } from "@/lib/domain/resumable-session-uri";
+import { isCanonicalUploadFileName } from "@/lib/domain/upload-filename";
 import type { DriveFilesPort } from "@/lib/ports/drive";
 import { googleJson } from "./http";
 
@@ -240,7 +242,7 @@ function validUploadIntent(input: UploadIntent): boolean {
     webm: "video/webm",
   };
   return (
-    boundedAscii(input.fileName, 1, 255) &&
+    isCanonicalUploadFileName(input.fileName) &&
     mimeByExtension[input.normalizedExtension] === input.mimeType &&
     Number.isSafeInteger(input.sizeBytes) &&
     input.sizeBytes >= 1 &&
@@ -292,27 +294,9 @@ async function cancelResponse(response: Response): Promise<void> {
 }
 
 function validateSessionUri(value: string | null): string {
-  try {
-    if (!boundedAscii(value, 1, 4_096)) throw new Error();
-    const url = new URL(value);
-    const uploadIds = url.searchParams.getAll("upload_id");
-    if (
-      url.protocol !== "https:" ||
-      url.hostname !== "www.googleapis.com" ||
-      url.port !== "" ||
-      url.username !== "" ||
-      url.password !== "" ||
-      url.hash !== "" ||
-      !url.pathname.startsWith("/upload/drive/v3/files/") ||
-      uploadIds.length !== 1 ||
-      !boundedAscii(uploadIds[0], 1, 2_048)
-    ) {
-      throw new Error();
-    }
-    return url.toString();
-  } catch {
-    throw stableError("DRIVE_PROVIDER_REJECTED");
-  }
+  const parsed = parseDriveResumableSessionUri(value);
+  if (parsed === null) throw stableError("DRIVE_PROVIDER_REJECTED");
+  return parsed;
 }
 
 export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions = {}): DriveFilesPort {

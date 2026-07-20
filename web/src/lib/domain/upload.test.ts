@@ -32,6 +32,27 @@ describe("validateUploadIntent", () => {
     )).toThrow("UPLOAD_TYPE_REJECTED");
   });
 
+  it("normalizes and accepts a bounded Vietnamese display name", () => {
+    const decomposed = "Phu\u0323 de\u0302̀ video.mp4";
+    expect(validateUploadIntent(
+      { fileName: decomposed, mimeType: "video/mp4", sizeBytes: 1, lastModified: 0 },
+      TEN_GIB,
+    )).toMatchObject({ fileName: decomposed.normalize("NFC"), normalizedExtension: "mp4" });
+  });
+
+  it.each([
+    "../movie.mp4",
+    "folder/movie.mp4",
+    "folder\\movie.mp4",
+    "movie\u0000.mp4",
+    "movie\u202Emp4",
+  ])("rejects unsafe display name %j", (fileName) => {
+    expect(() => validateUploadIntent(
+      { fileName, mimeType: "video/mp4", sizeBytes: 1, lastModified: 0 },
+      TEN_GIB,
+    )).toThrow("UPLOAD_TYPE_REJECTED");
+  });
+
   it("requires safe positive sizes and a safe nonnegative last-modified value", () => {
     for (const input of [
       { fileName: "movie.mp4", mimeType: "video/mp4" as const, sizeBytes: 0, lastModified: 0 },

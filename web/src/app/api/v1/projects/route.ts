@@ -6,6 +6,7 @@ import { createDriveAccessProvider } from "@/lib/application/drive-access";
 import { createProjectService, type ProjectService } from "@/lib/application/projects";
 import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
 import { AppError } from "@/lib/domain/errors";
+import type { Project } from "@/lib/domain/drive";
 import {
   HttpError,
   readStrictJson,
@@ -19,6 +20,17 @@ export const runtime = "nodejs";
 const BODY_BYTES = 1_024;
 const createProjectBody = z.object({ name: z.string().trim().min(1).max(160) }).strict();
 const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/);
+
+function publicProject(project: Project) {
+  return {
+    id: project.id,
+    status: project.status,
+    name: project.name,
+    sourceStatus: project.sourceStatus,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+  };
+}
 
 function errorResponse(error: AppError): NextResponse {
   return NextResponse.json(
@@ -73,7 +85,7 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json(
-      { project: result.project },
+      { project: publicProject(result.project) },
       { status: result.outcome === "CREATED" ? 201 : 200, headers: { "cache-control": "no-store" } },
     );
   } catch (error) {
@@ -88,7 +100,7 @@ export async function GET(request: NextRequest) {
     await requireAdmin(request, env.sessionSecret);
     const projects = await projectService(env).listProjects();
     return NextResponse.json(
-      { projects },
+      { projects: projects.map(publicProject) },
       { headers: { "cache-control": "no-store" } },
     );
   } catch (error) {

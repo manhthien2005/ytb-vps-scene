@@ -457,16 +457,16 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return outcome;
     },
 
-    async observeSourceProgress(artifactId, observedSizeBytes) {
+    async observeSourceProgress(artifactId, observedSizeBytes, claimToken) {
       if (!Number.isSafeInteger(observedSizeBytes) || observedSizeBytes < 0) {
         throw new Error("Invalid observed source size");
       }
       const result = await sql.query(
-        `select observe_drive_upload_progress($1,$2) as remaining_bytes`,
-        [artifactId, observedSizeBytes],
+        `select observe_drive_upload_progress($1,$2,$3) as remaining_bytes`,
+        [artifactId, observedSizeBytes, claimToken ?? null],
       );
       const remaining = safeInteger(result.rows[0]?.remaining_bytes);
-      if (remaining === null) throw new Error("Source progress cannot be observed");
+      if (remaining === null) throw new Error("Source provisioning claim lost or progress cannot be observed");
       return remaining;
     },
 
@@ -533,32 +533,86 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return result.rows.length === 0 ? null : parseArtifact(result.rows[0]!);
     },
 
-    async markArtifactUploading(artifactId) {
+    async markArtifactUploading(artifactId, claimToken) {
       const result = await sql.query(
         `update artifacts set status='UPLOADING',updated_at=now()
-         where id=$1 and kind='SOURCE' and status in ('PENDING','UPLOADING') returning id`,
-        [artifactId],
+         where id=$1 and kind='SOURCE' and status in ('PENDING','UPLOADING')
+           and (
+             ($2::text is not null and exists(
+               select 1 from drive_provisioning_claims
+               where resource_kind='SOURCE' and resource_id=$1
+                 and claim_token=$2 and expires_at > now()
+             ))
+             or
+             ($2::text is null and not exists(
+               select 1 from drive_provisioning_claims
+               where resource_kind='SOURCE' and resource_id=$1 and expires_at > now()
+             ))
+           )
+         returning id`,
+        [artifactId, claimToken ?? null],
       );
-      if (result.rows.length === 0) throw new Error("Artifact cannot start uploading");
+      if (result.rows.length === 0) throw new Error("Source provisioning claim lost or artifact cannot start uploading");
     },
 
-    async markSourceReady(artifactId, actualSizeBytes, verifiedAt) {
+    async markSourceReady(artifactId, actualSizeBytes, verifiedAt, claimToken) {
       if (!Number.isSafeInteger(actualSizeBytes) || actualSizeBytes < 0) throw new Error("Invalid artifact size");
       const result = await sql.query(
         `with changed as (
            update artifacts set status='READY',actual_size_bytes=$2,verified_at=$3,updated_at=now()
-           where id=$1 and kind='SOURCE' and status in ('UPLOADING','READY') returning project_id
+           where id=$1 and kind='SOURCE' and status='UPLOADING'
+             and (
+               ($4::text is not null and exists(
+                 select 1 from drive_provisioning_claims
+                 where resource_kind='SOURCE' and resource_id=$1
+                   and claim_token=$4 and expires_at > now()
+               ))
+               or
+               ($4::text is null and not exists(
+                 select 1 from drive_provisioning_claims
+                 where resource_kind='SOURCE' and resource_id=$1 and expires_at > now()
+               ))
+             )
+           returning id,project_id,actual_size_bytes,mime_type
          ), released as (
            update drive_upload_reservations set
              observed_size_bytes=expected_size_bytes,remaining_bytes=0,released_at=coalesce(released_at,now()),updated_at=now()
            where artifact_id=$1 and released_at is null and exists(select 1 from changed)
            returning artifact_id
+         ), project_updated as (
+           update projects set source_status='SOURCE_READY',updated_at=now()
+           where id=(select project_id from changed) returning id
+         ), audited as (
+           insert into audit_events(event_type,target_id,actor_class,payload)
+           select 'UPLOAD_COMPLETED',$1,'admin',jsonb_build_object(
+             'projectId',changed.project_id,
+             'artifactId',changed.id,
+             'actualSizeBytes',changed.actual_size_bytes,
+             'mimeType',changed.mime_type,
+             'status','READY'
+           )
+           from changed
+           returning id
          )
-         update projects set source_status='SOURCE_READY',updated_at=now()
-         where id=(select project_id from changed) returning id`,
-        [artifactId, actualSizeBytes, validDate(verifiedAt)],
+         select exists(select 1 from changed) as changed,
+                exists(select 1 from audited) as audited,
+                exists(select 1 from project_updated) as project_updated`,
+        [artifactId, actualSizeBytes, validDate(verifiedAt), claimToken ?? null],
       );
-      if (result.rows.length === 0) throw new Error("Source cannot be marked ready");
+      if (
+        result.rows[0]?.changed === true && result.rows[0]?.audited === true &&
+        result.rows[0]?.project_updated === true
+      ) return "CHANGED";
+      if (result.rows[0]?.changed === true) throw new Error("Source ready transition was incomplete");
+      const replay = await sql.query(
+        "select status,actual_size_bytes from artifacts where id=$1 and kind='SOURCE'",
+        [artifactId],
+      );
+      if (
+        replay.rows[0]?.status === "READY" &&
+        safeInteger(replay.rows[0]?.actual_size_bytes) === actualSizeBytes
+      ) return "REPLAY";
+      throw new Error("Source cannot be marked ready");
     },
 
     async markSourceInvalid(artifactId) {
@@ -566,17 +620,42 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
         `with changed as (
            update artifacts set status='INVALID',updated_at=now()
            where id=$1 and kind='SOURCE' and status in ('PENDING','UPLOADING')
-           returning project_id
+           returning id,project_id,expected_size_bytes,mime_type
          ), released as (
            update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
            where artifact_id=$1 and released_at is null and exists(select 1 from changed)
            returning artifact_id
+         ), project_updated as (
+           update projects set source_status='UPLOAD_FAILED',updated_at=now()
+           where id=(select project_id from changed) returning id
+         ), audited as (
+           insert into audit_events(event_type,target_id,actor_class,payload)
+           select 'UPLOAD_FAILED',$1,'admin',jsonb_build_object(
+             'projectId',changed.project_id,
+             'artifactId',changed.id,
+             'expectedSizeBytes',changed.expected_size_bytes,
+             'mimeType',changed.mime_type,
+             'status','INVALID'
+           )
+           from changed
+           returning id
          )
-         update projects set source_status='UPLOAD_FAILED',updated_at=now()
-         where id=(select project_id from changed) returning id`,
+         select exists(select 1 from changed) as changed,
+                exists(select 1 from audited) as audited,
+                exists(select 1 from project_updated) as project_updated`,
         [artifactId],
       );
-      if (result.rows.length === 0) throw new Error("Source cannot be marked invalid");
+      if (
+        result.rows[0]?.changed === true && result.rows[0]?.audited === true &&
+        result.rows[0]?.project_updated === true
+      ) return "CHANGED";
+      if (result.rows[0]?.changed === true) throw new Error("Source invalid transition was incomplete");
+      const replay = await sql.query(
+        "select status from artifacts where id=$1 and kind='SOURCE'",
+        [artifactId],
+      );
+      if (replay.rows[0]?.status === "INVALID") return "REPLAY";
+      throw new Error("Source cannot be marked invalid");
     },
 
     async claimSourceDeletion(artifactId) {
@@ -597,7 +676,7 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
         `with changed as (
            update artifacts set status='DELETED',updated_at=now()
            where id=$1 and kind='SOURCE' and status='DELETING'
-           returning project_id
+           returning id,project_id,expected_size_bytes,mime_type
          ), project_updated as (
            update projects set source_status='NO_SOURCE',updated_at=now()
            where id=(select project_id from changed) returning id
@@ -605,16 +684,34 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
            update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
            where artifact_id=$1 and released_at is null and exists(select 1 from changed)
            returning artifact_id
+         ), audited as (
+           insert into audit_events(event_type,target_id,actor_class,payload)
+           select 'UPLOAD_CANCELLED',$1,'admin',jsonb_build_object(
+             'projectId',changed.project_id,
+             'artifactId',changed.id,
+             'expectedSizeBytes',changed.expected_size_bytes,
+             'mimeType',changed.mime_type,
+             'status','DELETED'
+           )
+           from changed
+           returning id
          )
          select exists(select 1 from changed) as changed,
-           (
-             exists(select 1 from changed)
-             or exists(select 1 from artifacts where id=$1 and kind='SOURCE' and status='DELETED')
-           ) as deleted`,
+                exists(select 1 from audited) as audited,
+                exists(select 1 from project_updated) as project_updated`,
         [artifactId],
       );
-      if (result.rows[0]?.deleted !== true) throw new Error("Source cannot be marked deleted");
-      return result.rows[0]?.changed === true;
+      if (
+        result.rows[0]?.changed === true && result.rows[0]?.audited === true &&
+        result.rows[0]?.project_updated === true
+      ) return "CHANGED";
+      if (result.rows[0]?.changed === true) throw new Error("Source deleted transition was incomplete");
+      const replay = await sql.query(
+        "select status from artifacts where id=$1 and kind='SOURCE'",
+        [artifactId],
+      );
+      if (replay.rows[0]?.status === "DELETED") return "REPLAY";
+      throw new Error("Source cannot be marked deleted");
     },
 
     async getUsage(provider) {

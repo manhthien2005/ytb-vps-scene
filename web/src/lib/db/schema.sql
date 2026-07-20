@@ -285,8 +285,20 @@ begin
     return 'CONFLICT';
   end if;
 
-  select coalesce(sum(remaining_bytes),0)::numeric into total_remaining
-  from drive_upload_reservations where released_at is null;
+  select coalesce(sum(
+    case
+      when released_at is null then
+        remaining_bytes + case
+          when observed_size_bytes > 0 and updated_at > quota.observed_at
+            then observed_size_bytes
+          else 0
+        end
+      when observed_size_bytes > 0 and updated_at > quota.observed_at
+        then observed_size_bytes
+      else 0
+    end
+  ),0)::numeric into total_remaining
+  from drive_upload_reservations;
   if replacing_unbound then
     total_remaining := total_remaining - reservation.remaining_bytes;
   end if;
@@ -314,15 +326,29 @@ begin
   return 'RESERVED';
 end $$;
 
+drop function if exists observe_drive_upload_progress(text,bigint);
 create or replace function observe_drive_upload_progress(
   p_artifact_id text,
-  p_observed_size_bytes bigint
+  p_observed_size_bytes bigint,
+  p_claim_token text
 ) returns bigint
 language plpgsql as $$
 declare
   remaining bigint;
 begin
   perform provider from usage_guards where provider='DRIVE' for update;
+  if p_claim_token is not null then
+    if not exists(
+      select 1 from drive_provisioning_claims
+      where resource_kind='SOURCE' and resource_id=p_artifact_id
+        and claim_token=p_claim_token and expires_at > now()
+    ) then return null; end if;
+  elsif exists(
+    select 1 from drive_provisioning_claims
+    where resource_kind='SOURCE' and resource_id=p_artifact_id and expires_at > now()
+  ) then
+    return null;
+  end if;
   update drive_upload_reservations set
     observed_size_bytes=p_observed_size_bytes,
     remaining_bytes=expected_size_bytes-p_observed_size_bytes,
@@ -355,3 +381,7 @@ begin
 end $$;
 
 insert into schema_migrations(version) values (5) on conflict (version) do nothing;
+
+-- migration v6: keep progress and terminal bytes charged until a newer
+-- authoritative Drive usage observation has had a chance to include them
+insert into schema_migrations(version) values (6) on conflict (version) do nothing;

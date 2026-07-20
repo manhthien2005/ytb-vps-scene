@@ -1,3 +1,6 @@
+import { isDriveResumableSessionUri } from "../domain/resumable-session-uri";
+import { isCanonicalUploadFileName } from "../domain/upload-filename";
+
 const DATABASE_NAME = "ytb-vps-upload-v1";
 const DATABASE_VERSION = 1;
 const OBJECT_STORE = "sessions";
@@ -50,15 +53,6 @@ function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]):
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function boundedAscii(value: unknown, minimum: number, maximum: number): value is string {
-  return (
-    typeof value === "string" &&
-    value.length >= minimum &&
-    value.length <= maximum &&
-    /^[\x20-\x7E]+$/.test(value)
-  );
-}
-
 function canonicalUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_PATTERN.test(value);
 }
@@ -71,8 +65,7 @@ function validFileIdentity(value: unknown): value is StoredUploadSession["fileId
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["displayName", "sizeBytes", "mimeType", "lastModified"]) ||
-    !boundedAscii(value.displayName, 1, 255) ||
-    value.displayName !== value.displayName.trim() ||
+    !isCanonicalUploadFileName(value.displayName) ||
     !MIME_TYPES.has(value.mimeType as string) ||
     !safeIntegerInRange(value.sizeBytes, 1, Number.MAX_SAFE_INTEGER) ||
     !safeIntegerInRange(value.lastModified, 0, Number.MAX_SAFE_INTEGER)
@@ -82,30 +75,6 @@ function validFileIdentity(value: unknown): value is StoredUploadSession["fileId
 
   const extension = value.displayName.slice(value.displayName.lastIndexOf(".") + 1).toLowerCase();
   return MIME_BY_EXTENSION[extension] === value.mimeType;
-}
-
-function validSessionUri(value: unknown): value is string {
-  if (!boundedAscii(value, 1, 4_096)) return false;
-  try {
-    const uri = new URL(value);
-    const queryEntries = [...uri.searchParams.entries()];
-    const uploadIds = uri.searchParams.getAll("upload_id");
-    return (
-      uri.protocol === "https:" &&
-      uri.hostname === "www.googleapis.com" &&
-      uri.port === "" &&
-      uri.username === "" &&
-      uri.password === "" &&
-      uri.hash === "" &&
-      /^\/upload\/drive\/v3\/files\/[^/]+$/.test(uri.pathname) &&
-      queryEntries.length === 1 &&
-      queryEntries[0]?.[0] === "upload_id" &&
-      uploadIds.length === 1 &&
-      boundedAscii(uploadIds[0], 1, 2_048)
-    );
-  } catch {
-    return false;
-  }
 }
 
 function validExpiration(value: unknown, now: Date): value is string {
@@ -131,7 +100,7 @@ function parseStoredRow(value: unknown, now: Date): StoredUploadSession | null {
     !canonicalUuid(value.projectId) ||
     !canonicalUuid(value.artifactId) ||
     value.key !== sessionKey(value.projectId, value.artifactId) ||
-    !validSessionUri(value.sessionUri) ||
+    !isDriveResumableSessionUri(value.sessionUri) ||
     !validFileIdentity(value.fileIdentity) ||
     !safeIntegerInRange(value.nextOffset, 0, value.fileIdentity.sizeBytes) ||
     value.chunkBytes !== CHUNK_BYTES ||

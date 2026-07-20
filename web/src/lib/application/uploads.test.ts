@@ -135,7 +135,9 @@ describe("UploadService sessions", () => {
       expectedSizeBytes: input.sizeBytes,
     }));
     repository.claimSourceDeletion.mockResolvedValue("CLAIMED");
-    repository.markSourceDeleted.mockResolvedValue(true);
+    repository.markSourceReady.mockResolvedValue("CHANGED");
+    repository.markSourceInvalid.mockResolvedValue("CHANGED");
+    repository.markSourceDeleted.mockResolvedValue("CHANGED");
     access = { getAccessToken: vi.fn().mockResolvedValue("access") };
     health = {
       getHealth: vi.fn(),
@@ -294,10 +296,25 @@ describe("UploadService sessions", () => {
     await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
       .rejects.toMatchObject({ code: "DRIVE_RATE_LIMITED" });
     expect(repository.reserveSourceArtifact).toHaveBeenCalledOnce();
-    expect(repository.markArtifactUploading).toHaveBeenCalledWith(PROJECT_ID);
+    expect(repository.markArtifactUploading).toHaveBeenCalledWith(PROJECT_ID, expect.any(String));
     expect(repository.markSourceInvalid).not.toHaveBeenCalled();
     expect(repository.markSourceDeleted).not.toHaveBeenCalled();
     expect(repository.recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a provider session created after its source claim is taken over", async () => {
+    repository.renewProvisioning
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
+      .rejects.toMatchObject({ code: "DRIVE_TEMPORARILY_UNAVAILABLE", status: 503 });
+
+    expect(files.resumableSessionCalls).toHaveLength(1);
+    expect(repository.recordAudit).not.toHaveBeenCalled();
+    expect(JSON.stringify(repository.recordAudit.mock.calls))
+      .not.toContain(files.resumableSession.sessionUri);
   });
 
   it.each([
@@ -345,13 +362,19 @@ describe("UploadService sessions", () => {
         actualSizeBytes: validIntent.sizeBytes,
       });
 
-    expect(repository.observeSourceProgress).toHaveBeenCalledWith(PROJECT_ID, validIntent.sizeBytes);
-    expect(repository.markSourceReady).toHaveBeenCalledWith(PROJECT_ID, validIntent.sizeBytes, NOW);
+    expect(repository.observeSourceProgress).toHaveBeenCalledWith(
+      PROJECT_ID,
+      validIntent.sizeBytes,
+      expect.any(String),
+    );
+    expect(repository.markSourceReady).toHaveBeenCalledWith(
+      PROJECT_ID,
+      validIntent.sizeBytes,
+      NOW,
+      expect.any(String),
+    );
     expect(files.resumableSessionCalls).toHaveLength(0);
-    expect(repository.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
-      eventType: "UPLOAD_COMPLETED",
-      targetId: PROJECT_ID,
-    }));
+    expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
   it("replays terminal READY metadata when the prior renewal response was lost", async () => {
@@ -439,18 +462,7 @@ describe("UploadService sessions", () => {
       artifact.expectedSizeBytes,
       NOW,
     );
-    expect(repository.recordAudit).toHaveBeenCalledWith({
-      eventType: "UPLOAD_COMPLETED",
-      targetId: PROJECT_ID,
-      actorClass: "admin",
-      payload: {
-        projectId: PROJECT_ID,
-        artifactId: PROJECT_ID,
-        actualSizeBytes: artifact.expectedSizeBytes,
-        mimeType: artifact.mimeType,
-        status: "READY",
-      },
-    });
+    expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
   it("moves a crash-left PENDING artifact through UPLOADING before ready", async () => {
@@ -502,18 +514,7 @@ describe("UploadService sessions", () => {
         .rejects.toMatchObject({ code: "UPLOAD_REMOTE_MISMATCH", status: 409 });
       expect(repository.markSourceReady).not.toHaveBeenCalled();
       expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID);
-      expect(repository.recordAudit).toHaveBeenCalledWith({
-        eventType: "UPLOAD_FAILED",
-        targetId: PROJECT_ID,
-        actorClass: "admin",
-        payload: {
-          projectId: PROJECT_ID,
-          artifactId: PROJECT_ID,
-          expectedSizeBytes: artifact.expectedSizeBytes,
-          mimeType: artifact.mimeType,
-          status: "INVALID",
-        },
-      });
+      expect(repository.recordAudit).not.toHaveBeenCalled();
     },
   );
 
@@ -600,18 +601,7 @@ describe("UploadService sessions", () => {
     expect(files.inspectFileCalls).toEqual([{ accessToken: "access", fileId: SOURCE_FILE_ID }]);
     expect(files.deleteFileCalls).toEqual([{ accessToken: "access", fileId: SOURCE_FILE_ID }]);
     expect(repository.markSourceDeleted).toHaveBeenCalledWith(PROJECT_ID);
-    expect(repository.recordAudit).toHaveBeenCalledWith({
-      eventType: "UPLOAD_CANCELLED",
-      targetId: PROJECT_ID,
-      actorClass: "admin",
-      payload: {
-        projectId: PROJECT_ID,
-        artifactId: PROJECT_ID,
-        expectedSizeBytes: artifact.expectedSizeBytes,
-        mimeType: artifact.mimeType,
-        status: "DELETED",
-      },
-    });
+    expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
   it("cancels an exact owned source even when its current size is lower than a prior observation", async () => {
@@ -685,7 +675,7 @@ describe("UploadService sessions", () => {
       .mockResolvedValueOnce({ ...artifact, status: "DELETING" });
     repository.markSourceDeleted
       .mockRejectedValueOnce(new Error("database unavailable"))
-      .mockResolvedValueOnce(true);
+      .mockResolvedValueOnce("CHANGED");
     files.file = exactRemoteFile(262_144);
 
     await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
@@ -697,7 +687,7 @@ describe("UploadService sessions", () => {
     expect(files.inspectFileCalls).toHaveLength(1);
     expect(files.deleteFileCalls).toHaveLength(2);
     expect(repository.markSourceDeleted).toHaveBeenCalledTimes(2);
-    expect(repository.recordAudit).toHaveBeenCalledOnce();
+    expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
   it("keeps the deletion claim reconcilable when the provider delete fails", async () => {

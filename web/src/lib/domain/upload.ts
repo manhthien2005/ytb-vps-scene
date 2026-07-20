@@ -1,5 +1,6 @@
 import type { UploadIntent, UploadIntentInput } from "./drive";
 import { AppError } from "./errors";
+import { canonicalUploadFileName } from "./upload-filename";
 
 const EXTENSION_MIME_TYPES = {
   mp4: "video/mp4",
@@ -32,10 +33,10 @@ export function validateUploadIntent(source: UploadIntentInput, maximumBytes: nu
     throw new AppError("INVALID_REQUEST", 400);
   }
 
-  const fileName = source.fileName.trim();
+  const fileName = canonicalUploadFileName(source.fileName);
+  if (fileName === null) throw new AppError("UPLOAD_TYPE_REJECTED", 400);
   const extension = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
   if (
-    fileName.length === 0 ||
     !(extension in EXTENSION_MIME_TYPES) ||
     EXTENSION_MIME_TYPES[extension as UploadExtension] !== source.mimeType
   ) {

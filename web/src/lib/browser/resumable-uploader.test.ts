@@ -160,6 +160,31 @@ describe("ResumableUploader", () => {
     expect(uploader.snapshot().phase).toBe("READY");
   });
 
+  it("uploads through the documented resumable query pair", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file, {
+      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source-file?uploadType=resumable&upload_id=synthetic-capability",
+    });
+    const fetcher = queuedFetcher(response(201));
+    const api = controlPlaneApi();
+    vi.mocked(api.complete).mockResolvedValue({
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    });
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store: new MemoryUploadSessionStore(),
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await uploader.start(file, session);
+
+    expect(fetcher.requests.map((request) => request.url)).toEqual([session.sessionUri]);
+  });
+
   it("treats a rejected final fetch as ambiguous and trusts server metadata", async () => {
     const file = fileOfSize();
     const session = sessionFor(file);

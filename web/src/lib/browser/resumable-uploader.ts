@@ -1,6 +1,8 @@
 import type { StoredUploadSession, UploadSessionStore } from "./upload-store";
 import { AppError } from "../domain/errors";
 import { nextRetry, parseAcknowledgedRange } from "../domain/upload";
+import { isDriveResumableSessionUri } from "../domain/resumable-session-uri";
+import { canonicalUploadFileName } from "../domain/upload-filename";
 
 function snapshotSession(record: StoredUploadSession): StoredUploadSession {
   return {
@@ -17,31 +19,6 @@ function snapshotSession(record: StoredUploadSession): StoredUploadSession {
     chunkBytes: record.chunkBytes,
     expiresAt: record.expiresAt,
   };
-}
-
-function validDriveSessionUri(value: string): boolean {
-  if (value.length < 1 || value.length > 4_096 || !/^[\x20-\x7E]+$/.test(value)) return false;
-  try {
-    const uri = new URL(value);
-    const query = [...uri.searchParams.entries()];
-    const uploadIds = uri.searchParams.getAll("upload_id");
-    return uri.protocol === "https:" &&
-      uri.hostname === "www.googleapis.com" &&
-      uri.port === "" &&
-      uri.username === "" &&
-      uri.password === "" &&
-      uri.hash === "" &&
-      /^\/upload\/drive\/v3\/files\/[^/]+$/.test(uri.pathname) &&
-      query.length === 1 &&
-      query[0]?.[0] === "upload_id" &&
-      uploadIds.length === 1 &&
-      uploadIds[0] !== undefined &&
-      uploadIds[0].length >= 1 &&
-      uploadIds[0].length <= 2_048 &&
-      /^[\x20-\x7E]+$/.test(uploadIds[0]);
-  } catch {
-    return false;
-  }
 }
 
 function validFutureExpiration(value: string, now: number): boolean {
@@ -146,7 +123,7 @@ export function createResumableUploader(
   }
 
   async function driveFetch(input: string, init: RequestInit): Promise<Response> {
-    if (!validDriveSessionUri(input)) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
+    if (!isDriveResumableSessionUri(input)) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
     if (disposed) throw new DOMException("The operation was aborted", "AbortError");
     const controller = new AbortController();
     activeController = controller;
@@ -220,11 +197,11 @@ export function createResumableUploader(
     try {
       if (disposed) throw new AppError("INVALID_REQUEST", 400);
       if (
-        file.name !== initialRecord.fileIdentity.displayName ||
+        canonicalUploadFileName(file.name) !== initialRecord.fileIdentity.displayName ||
         file.size !== initialRecord.fileIdentity.sizeBytes ||
         file.type !== initialRecord.fileIdentity.mimeType ||
         file.lastModified !== initialRecord.fileIdentity.lastModified ||
-        !validDriveSessionUri(initialRecord.sessionUri)
+        !isDriveResumableSessionUri(initialRecord.sessionUri)
       ) {
         throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       }
@@ -397,7 +374,7 @@ export function createResumableUploader(
         if (
           renewedSnapshot.artifactId !== record.artifactId ||
           renewedSnapshot.chunkBytes !== 8_388_608 ||
-          !validDriveSessionUri(renewedSnapshot.sessionUri) ||
+          !isDriveResumableSessionUri(renewedSnapshot.sessionUri) ||
           !validFutureExpiration(renewedSnapshot.expiresAt, dependencies.now())
         ) {
           throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);

@@ -42,6 +42,14 @@ const PROJECT: Project = {
   createdAt: "2026-07-19T00:00:00.000Z",
   updatedAt: "2026-07-19T00:00:00.000Z",
 };
+const PUBLIC_PROJECT = {
+  id: PROJECT.id,
+  status: PROJECT.status,
+  name: PROJECT.name,
+  sourceStatus: PROJECT.sourceStatus,
+  createdAt: PROJECT.createdAt,
+  updatedAt: PROJECT.updatedAt,
+};
 
 function setEnv() {
   Object.assign(process.env, {
@@ -173,13 +181,18 @@ describe("/api/v1/projects", () => {
   it.each([
     ["CREATED", 201],
     ["REPLAYED", 200],
-  ])("returns %s with the exact project domain response", async (outcome, status) => {
+  ])("returns %s with the public project response only", async (outcome, status) => {
     service.createProject.mockResolvedValue({ outcome, project: PROJECT });
     const response = await POST(postRequest({ body: JSON.stringify({ name: "  Test 1  " }) }));
 
     expect(response.status).toBe(status);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    await expect(response.json()).resolves.toEqual({ project: PROJECT });
+    const body = await response.json();
+    expect(body).toEqual({ project: PUBLIC_PROJECT });
+    expect(JSON.stringify(body)).not.toContain("driveProjectFolderId");
+    expect(JSON.stringify(body)).not.toContain("driveInputFolderId");
+    expect(JSON.stringify(body)).not.toContain(PROJECT.driveProjectFolderId);
+    expect(JSON.stringify(body)).not.toContain(PROJECT.driveInputFolderId);
     expect(service.createProject).toHaveBeenCalledWith({
       idempotencyKey: "0123456789abcdef",
       name: "Test 1",
@@ -216,7 +229,12 @@ describe("/api/v1/projects", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    await expect(response.json()).resolves.toEqual({ projects: [PROJECT] });
+    const body = await response.json();
+    expect(body).toEqual({ projects: [PUBLIC_PROJECT] });
+    expect(JSON.stringify(body)).not.toContain("driveProjectFolderId");
+    expect(JSON.stringify(body)).not.toContain("driveInputFolderId");
+    expect(JSON.stringify(body)).not.toContain(PROJECT.driveProjectFolderId);
+    expect(JSON.stringify(body)).not.toContain(PROJECT.driveInputFolderId);
     expect(service.listProjects).toHaveBeenCalledOnce();
   });
 

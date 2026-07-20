@@ -369,26 +369,61 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     this.artifacts.set(artifactId, { ...artifact, status: "UPLOADING" });
   }
 
-  async markSourceReady(artifactId: string, actualSizeBytes: number, verifiedAt: Date): Promise<void> {
+  async markSourceReady(
+    artifactId: string,
+    actualSizeBytes: number,
+    verifiedAt: Date,
+  ): Promise<"CHANGED" | "REPLAY"> {
     const artifact = this.artifacts.get(artifactId);
     if (
-      !artifact || artifact.kind !== "SOURCE" || !["UPLOADING", "READY"].includes(artifact.status) ||
+      artifact?.kind === "SOURCE" && artifact.status === "READY" &&
+      artifact.actualSizeBytes === actualSizeBytes
+    ) return "REPLAY";
+    if (
+      !artifact || artifact.kind !== "SOURCE" || artifact.status !== "UPLOADING" ||
       !Number.isSafeInteger(actualSizeBytes) || actualSizeBytes < 0 ||
       !Number.isFinite(verifiedAt.getTime())
     ) throw new Error("Source cannot be marked ready");
     this.artifacts.set(artifactId, { ...artifact, status: "READY", actualSizeBytes });
     this.releaseSourceCapacity(artifactId, true);
     this.updateProject(artifact.projectId, { sourceStatus: "SOURCE_READY" });
+    this.auditEvents.push({
+      eventType: "UPLOAD_COMPLETED",
+      targetId: artifact.id,
+      actorClass: "admin",
+      payload: {
+        projectId: artifact.projectId,
+        artifactId: artifact.id,
+        actualSizeBytes,
+        mimeType: artifact.mimeType,
+        status: "READY",
+      },
+    });
+    return "CHANGED";
   }
 
-  async markSourceInvalid(artifactId: string): Promise<void> {
+  async markSourceInvalid(artifactId: string): Promise<"CHANGED" | "REPLAY"> {
     const artifact = this.artifacts.get(artifactId);
+    if (artifact?.kind === "SOURCE" && artifact.status === "INVALID") return "REPLAY";
     if (!artifact || artifact.kind !== "SOURCE" || !["PENDING", "UPLOADING"].includes(artifact.status)) {
       throw new Error("Source cannot be marked invalid");
     }
     this.artifacts.set(artifactId, { ...artifact, status: "INVALID" });
     this.releaseSourceCapacity(artifactId);
     this.updateProject(artifact.projectId, { sourceStatus: "UPLOAD_FAILED" });
+    this.auditEvents.push({
+      eventType: "UPLOAD_FAILED",
+      targetId: artifact.id,
+      actorClass: "admin",
+      payload: {
+        projectId: artifact.projectId,
+        artifactId: artifact.id,
+        expectedSizeBytes: artifact.expectedSizeBytes,
+        mimeType: artifact.mimeType,
+        status: "INVALID",
+      },
+    });
+    return "CHANGED";
   }
 
   async claimSourceDeletion(
@@ -411,15 +446,27 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return "CLAIMED";
   }
 
-  async markSourceDeleted(artifactId: string): Promise<boolean> {
+  async markSourceDeleted(artifactId: string): Promise<"CHANGED" | "REPLAY"> {
     const artifact = this.artifacts.get(artifactId);
     if (!artifact || artifact.kind !== "SOURCE") throw new Error("Source cannot be marked deleted");
-    if (artifact.status === "DELETED") return false;
+    if (artifact.status === "DELETED") return "REPLAY";
     if (artifact.status !== "DELETING") throw new Error("Source cannot be marked deleted");
     this.artifacts.set(artifactId, { ...artifact, status: "DELETED" });
     this.releaseSourceCapacity(artifactId);
     this.updateProject(artifact.projectId, { sourceStatus: "NO_SOURCE" });
-    return true;
+    this.auditEvents.push({
+      eventType: "UPLOAD_CANCELLED",
+      targetId: artifact.id,
+      actorClass: "admin",
+      payload: {
+        projectId: artifact.projectId,
+        artifactId: artifact.id,
+        expectedSizeBytes: artifact.expectedSizeBytes,
+        mimeType: artifact.mimeType,
+        status: "DELETED",
+      },
+    });
+    return "CHANGED";
   }
 
   async getUsage(provider: "DRIVE" | "NEON"): Promise<UsageSnapshot | null> {

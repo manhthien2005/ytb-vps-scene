@@ -197,18 +197,6 @@ function parseResourceIds(projectId: string, artifactId: string): Readonly<{
   return { projectId: parsedProjectId.data, artifactId: parsedArtifactId.data };
 }
 
-function auditPayload(artifact: Artifact, status: "UPLOADING" | "READY" | "INVALID" | "DELETED") {
-  return {
-    projectId: artifact.projectId,
-    artifactId: artifact.id,
-    ...(status === "READY"
-      ? { actualSizeBytes: artifact.expectedSizeBytes }
-      : { expectedSizeBytes: artifact.expectedSizeBytes }),
-    mimeType: artifact.mimeType,
-    status,
-  } as const;
-}
-
 export function createUploadService(dependencies: UploadDependencies): UploadService {
   return {
     async createSession(input) {
@@ -312,22 +300,17 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
           if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
             throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
           }
-          await dependencies.repository.observeSourceProgress(existing.id, remote.sizeBytes);
+          await dependencies.repository.observeSourceProgress(existing.id, remote.sizeBytes, claimToken);
           if (evidence === "READY") {
             if (existing.status === "PENDING") {
-              await dependencies.repository.markArtifactUploading(existing.id);
+              await dependencies.repository.markArtifactUploading(existing.id, claimToken);
             }
             await dependencies.repository.markSourceReady(
               existing.id,
               existing.expectedSizeBytes,
               input.now,
+              claimToken,
             );
-            await dependencies.repository.recordAudit({
-              eventType: "UPLOAD_COMPLETED",
-              targetId: existing.id,
-              actorClass: "admin",
-              payload: auditPayload(existing, "READY"),
-            });
             return {
               artifactId: existing.id,
               status: "SOURCE_READY",
@@ -341,12 +324,15 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
           throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
         }
 
-        await dependencies.repository.markArtifactUploading(artifactId);
+        await dependencies.repository.markArtifactUploading(artifactId, claimToken);
         const session = await dependencies.files.createResumableUpdateSession(accessToken, {
           fileId: selected.driveFileId,
           mimeType: selected.mimeType,
           sizeBytes: selected.expectedSizeBytes,
         });
+        if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
+          throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+        }
         await dependencies.repository.recordAudit({
           eventType: "UPLOAD_SESSION_CREATED",
           targetId: artifactId,
@@ -403,12 +389,6 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== "UPLOAD_REMOTE_MISMATCH") throw error;
         await dependencies.repository.markSourceInvalid(artifact.id);
-        await dependencies.repository.recordAudit({
-          eventType: "UPLOAD_FAILED",
-          targetId: artifact.id,
-          actorClass: "admin",
-          payload: auditPayload(artifact, "INVALID"),
-        });
         throw error;
       }
       await dependencies.repository.observeSourceProgress(artifact.id, remote.sizeBytes);
@@ -422,12 +402,6 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         artifact.expectedSizeBytes,
         input.now,
       );
-      await dependencies.repository.recordAudit({
-        eventType: "UPLOAD_COMPLETED",
-        targetId: artifact.id,
-        actorClass: "admin",
-        payload: auditPayload(artifact, "READY"),
-      });
       return { status: "SOURCE_READY", actualSizeBytes: artifact.expectedSizeBytes };
     },
 
@@ -455,15 +429,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         if (claim === "DELETED") return { status: "CANCELLED" };
       }
       await dependencies.files.deleteFile(accessToken, artifact.driveFileId);
-      const changed = await dependencies.repository.markSourceDeleted(artifact.id);
-      if (changed) {
-        await dependencies.repository.recordAudit({
-          eventType: "UPLOAD_CANCELLED",
-          targetId: artifact.id,
-          actorClass: "admin",
-          payload: auditPayload(artifact, "DELETED"),
-        });
-      }
+      await dependencies.repository.markSourceDeleted(artifact.id);
       return { status: "CANCELLED" };
     },
   };

@@ -67,6 +67,8 @@ export type SourceCapacityOutcome =
   | "QUOTA_INVALID"
   | "DRIVE_TEMPORARILY_UNAVAILABLE";
 
+export type SourceTerminalOutcome = "CHANGED" | "REPLAY";
+
 export type ProvisioningKind = "PROJECT" | "SOURCE";
 export const PROJECT_TREE_CLAIM_ID = "00000000-0000-4000-8000-000000000000" as const;
 
@@ -91,14 +93,23 @@ export interface DriveControlPlaneRepository {
   ): Promise<Project>;
   listProjects(): Promise<readonly Project[]>;
   reserveSourceCapacity(input: SourceCapacityReservation): Promise<SourceCapacityOutcome>;
-  observeSourceProgress(artifactId: string, observedSizeBytes: number): Promise<number>;
+  observeSourceProgress(
+    artifactId: string,
+    observedSizeBytes: number,
+    claimToken?: string,
+  ): Promise<number>;
   reserveSourceArtifact(input: SourceReservation, claimToken: string): Promise<Artifact>;
   getArtifact(projectId: string, artifactId: string): Promise<Artifact | null>;
-  markArtifactUploading(artifactId: string): Promise<void>;
-  markSourceReady(artifactId: string, actualSizeBytes: number, verifiedAt: Date): Promise<void>;
-  markSourceInvalid(artifactId: string): Promise<void>;
+  markArtifactUploading(artifactId: string, claimToken?: string): Promise<void>;
+  markSourceReady(
+    artifactId: string,
+    actualSizeBytes: number,
+    verifiedAt: Date,
+    claimToken?: string,
+  ): Promise<SourceTerminalOutcome>;
+  markSourceInvalid(artifactId: string): Promise<SourceTerminalOutcome>;
   claimSourceDeletion(artifactId: string): Promise<"CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT">;
-  markSourceDeleted(artifactId: string): Promise<boolean>;
+  markSourceDeleted(artifactId: string): Promise<SourceTerminalOutcome>;
   getUsage(provider: "DRIVE" | "NEON"): Promise<UsageSnapshot | null>;
   saveUsage(snapshot: UsageSnapshot): Promise<UsageSnapshot>;
   appManagedDriveBytes(): Promise<number>;
