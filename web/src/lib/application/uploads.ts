@@ -234,13 +234,13 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
           };
         }
         let selected: Artifact;
-        const replaceDeleted = existing !== null &&
+        const replaceTerminal = existing !== null &&
           existing.id === artifactId &&
           existing.projectId === projectId &&
           existing.kind === "SOURCE" &&
-          existing.status === "DELETED";
+          (existing.status === "INVALID" || existing.status === "DELETED");
 
-        if (existing !== null && !replaceDeleted && !matchingLiveArtifact(
+        if (existing !== null && !replaceTerminal && !matchingLiveArtifact(
           existing,
           projectId,
           project.driveInputFolderId,
@@ -250,7 +250,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         }
 
         await dependencies.health.assertUploadAllowed(
-          existing === null || replaceDeleted ? intent.sizeBytes : 0,
+          existing === null || replaceTerminal ? intent.sizeBytes : 0,
           input.now,
         );
         const capacity = await dependencies.repository.reserveSourceCapacity({
@@ -268,7 +268,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         if (capacity !== "RESERVED" && capacity !== "EXISTING") rejectCapacity(capacity);
         const accessToken = await dependencies.access.getAccessToken();
 
-        if (existing === null || replaceDeleted) {
+        if (existing === null || replaceTerminal) {
           if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
             throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
           }

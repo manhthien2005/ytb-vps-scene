@@ -428,6 +428,27 @@ describe("UploadService sessions", () => {
     });
   });
 
+  it("creates a fresh placeholder after Drive rejected the prior session", async () => {
+    repository.getArtifact.mockResolvedValue({ ...artifact, status: "INVALID" });
+    files.sourceFileId = "replacement-source-file-001";
+
+    await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
+      .resolves.toMatchObject({ artifactId: PROJECT_ID });
+
+    expect(health.assertUploadAllowed).toHaveBeenCalledWith(validIntent.sizeBytes, NOW);
+    expect(files.inspectFileCalls).toHaveLength(0);
+    expect(files.ensureSourceFileCalls).toHaveLength(1);
+    expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactId: PROJECT_ID,
+        driveFileId: "replacement-source-file-001",
+      }),
+      expect.any(String),
+    );
+    expect(files.resumableSessionCalls[0]?.input.fileId)
+      .toBe("replacement-source-file-001");
+  });
+
   it("rejects conclusive remote mismatch when renewing the exact stored file", async () => {
     repository.getArtifact.mockResolvedValue({ ...artifact, status: "UPLOADING" });
     files.file = { ...exactRemoteFile(), parentIds: ["wrong-parent"] };
