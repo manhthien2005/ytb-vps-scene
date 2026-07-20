@@ -55,6 +55,10 @@ type UploadDependencies = Readonly<{
   maximumBytes: number;
   softPercent: number;
   staleAfterSeconds: number;
+  onDiagnostic?: (event: Readonly<{
+    stage: "get-access-token" | "ensure-source-file" | "inspect-source-file" | "create-resumable-session";
+    code: string;
+  }>) => void;
 }>;
 
 function remoteMismatch(): AppError {
@@ -198,6 +202,21 @@ function parseResourceIds(projectId: string, artifactId: string): Readonly<{
 }
 
 export function createUploadService(dependencies: UploadDependencies): UploadService {
+  async function observeProviderCall<T>(
+    stage: "get-access-token" | "ensure-source-file" | "inspect-source-file" | "create-resumable-session",
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      dependencies.onDiagnostic?.({
+        stage,
+        code: error instanceof AppError ? error.code : "INTERNAL_ERROR",
+      });
+      throw error;
+    }
+  }
+
   return {
     async createSession(input) {
       const parsedProjectId = uuid.safeParse(input.projectId);
@@ -213,6 +232,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
       ) {
         throw remoteMismatch();
       }
+      const inputFolderId = project.driveInputFolderId;
 
       const artifactId = projectId;
       const claimToken = randomUUID();
@@ -224,7 +244,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         if (existing !== null && matchingReadyArtifact(
           existing,
           projectId,
-          project.driveInputFolderId,
+          inputFolderId,
           intent,
         )) {
           return {
@@ -243,7 +263,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         if (existing !== null && !replaceTerminal && !matchingLiveArtifact(
           existing,
           projectId,
-          project.driveInputFolderId,
+          inputFolderId,
           intent,
         )) {
           throw remoteMismatch();
@@ -256,7 +276,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         const capacity = await dependencies.repository.reserveSourceCapacity({
           artifactId,
           projectId,
-          driveParentId: project.driveInputFolderId,
+          driveParentId: inputFolderId,
           fileName: intent.fileName,
           mimeType: intent.mimeType,
           sizeBytes: intent.sizeBytes,
@@ -266,36 +286,45 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
           staleAfterSeconds: dependencies.staleAfterSeconds,
         });
         if (capacity !== "RESERVED" && capacity !== "EXISTING") rejectCapacity(capacity);
-        const accessToken = await dependencies.access.getAccessToken();
+        const accessToken = await observeProviderCall(
+          "get-access-token",
+          () => dependencies.access.getAccessToken(),
+        );
 
         if (existing === null || replaceTerminal) {
           if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
             throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
           }
-          const driveFileId = await dependencies.files.ensureSourceFile(accessToken, {
-            ...intent,
-            projectId,
-            artifactId,
-            parentId: project.driveInputFolderId,
-          });
+          const driveFileId = await observeProviderCall(
+            "ensure-source-file",
+            () => dependencies.files.ensureSourceFile(accessToken, {
+              ...intent,
+              projectId,
+              artifactId,
+              parentId: inputFolderId,
+            }),
+          );
           selected = await dependencies.repository.reserveSourceArtifact({
             ...intent,
             artifactId,
             projectId,
             driveFileId,
-            driveParentId: project.driveInputFolderId,
+            driveParentId: inputFolderId,
           }, claimToken);
           if (!matchingReservation(
             selected,
             projectId,
             driveFileId,
-            project.driveInputFolderId,
+            inputFolderId,
             intent,
           )) {
             throw remoteMismatch();
           }
         } else {
-          const remote = await dependencies.files.inspectFile(accessToken, existing.driveFileId);
+          const remote = await observeProviderCall(
+            "inspect-source-file",
+            () => dependencies.files.inspectFile(accessToken, existing.driveFileId),
+          );
           const evidence = classifyEvidence(existing, remote);
           if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
             throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
@@ -327,11 +356,14 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         await dependencies.repository.markArtifactUploading(artifactId, claimToken);
         let session: Awaited<ReturnType<DriveFilesPort["createResumableUpdateSession"]>>;
         try {
-          session = await dependencies.files.createResumableUpdateSession(accessToken, {
-            fileId: selected.driveFileId,
-            mimeType: selected.mimeType,
-            sizeBytes: selected.expectedSizeBytes,
-          });
+          session = await observeProviderCall(
+            "create-resumable-session",
+            () => dependencies.files.createResumableUpdateSession(accessToken, {
+              fileId: selected.driveFileId,
+              mimeType: selected.mimeType,
+              sizeBytes: selected.expectedSizeBytes,
+            }),
+          );
         } catch (error) {
           if (error instanceof AppError && error.code === "DRIVE_PROVIDER_REJECTED") {
             await dependencies.repository.markSourceInvalid(artifactId);

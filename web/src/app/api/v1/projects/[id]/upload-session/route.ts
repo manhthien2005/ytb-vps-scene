@@ -69,6 +69,7 @@ function uploadService(env: ServerEnv): UploadService {
     maximumBytes: env.driveUploadMaxBytes,
     softPercent: env.freeTierSoftPercent,
     staleAfterSeconds: env.quotaStaleAfterSeconds,
+    onDiagnostic: (event) => console.error("[drive-upload] session-failed", event),
   });
 }
 

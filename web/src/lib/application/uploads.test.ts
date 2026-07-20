@@ -114,6 +114,7 @@ describe("UploadService sessions", () => {
   let access: Mocked<DriveAccessProvider>;
   let health: Mocked<FreeTierHealthService>;
   let files: FakeGoogleDriveFiles;
+  let diagnostics: ReturnType<typeof vi.fn>;
   let service: ReturnType<typeof createUploadService>;
 
   beforeEach(() => {
@@ -146,6 +147,7 @@ describe("UploadService sessions", () => {
     files = new FakeGoogleDriveFiles();
     files.sourceFileId = SOURCE_FILE_ID;
     files.file = exactRemoteFile();
+    diagnostics = vi.fn();
     service = createUploadService({
       repository,
       access,
@@ -154,6 +156,7 @@ describe("UploadService sessions", () => {
       maximumBytes: MAXIMUM_BYTES,
       softPercent: 90,
       staleAfterSeconds: 900,
+      onDiagnostic: diagnostics,
     });
   });
 
@@ -309,6 +312,10 @@ describe("UploadService sessions", () => {
       .rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
 
     expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID);
+    expect(diagnostics).toHaveBeenCalledWith({
+      stage: "create-resumable-session",
+      code: "DRIVE_PROVIDER_REJECTED",
+    });
   });
 
   it("does not expose a provider session created after its source claim is taken over", async () => {
