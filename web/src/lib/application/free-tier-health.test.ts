@@ -7,6 +7,32 @@ import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control
 const NOW = new Date("2026-07-19T00:00:00.000Z");
 
 describe("FreeTierHealthService", () => {
+  it("returns the newer snapshot retained after an out-of-order refresh completes", async () => {
+    const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
+    const retained = {
+      provider: "DRIVE" as const,
+      usedBytes: 200,
+      limitBytes: 1_000,
+      appManagedBytes: 0,
+      mode: "READ_WRITE" as const,
+      reasonCodes: [] as const,
+      observedAt: "2026-07-19T00:00:02.000Z",
+    };
+    await repository.saveUsage(retained);
+    const service = createFreeTierHealthService({
+      repository,
+      access: { getAccessToken: async () => "access" },
+      files: new FakeGoogleDriveFiles(),
+      neonLimitBytes: 1_000,
+      softPercent: 90,
+      staleAfterSeconds: 900,
+    });
+
+    const result = await service.getHealth(new Date("2026-07-19T00:00:01.000Z"));
+
+    expect(result.drive).toEqual(retained);
+  });
+
   it("allows a projection strictly below 90 percent", async () => {
     const repository = new FakeDriveControlPlaneRepository(() => NOW, 100);
     const drive = new FakeGoogleDriveFiles();
@@ -167,6 +193,7 @@ describe("FreeTierHealthService", () => {
     });
     vi.spyOn(repository, "saveUsage").mockImplementation(async (snapshot) => {
       if (snapshot.provider === "DRIVE") throw new Error("write unavailable");
+      return snapshot;
     });
     const drive = new FakeGoogleDriveFiles();
     drive.account = { ...drive.account, usedBytes: 900, limitBytes: 1_000 };

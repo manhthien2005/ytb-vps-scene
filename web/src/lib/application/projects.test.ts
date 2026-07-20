@@ -74,7 +74,7 @@ describe("createProjectService", () => {
       name: "Test 1",
     })).rejects.toThrow("DRIVE_REMOTE_MISMATCH");
     const project = (await repository.listProjects())[0]!;
-    expect(markProjectFailed).toHaveBeenCalledWith(project.id);
+    expect(markProjectFailed).toHaveBeenCalledWith(project.id, expect.any(String));
     expect(project.status).toBe("FAILED");
   });
 
@@ -146,6 +146,91 @@ describe("createProjectService", () => {
       project: { status: "READY" },
     });
     expect(remoteProjectIds.size).toBe(1);
+    expect(files.ensureProjectFolders).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows only one concurrent provider provisioner for the same idempotency key", async () => {
+    const repository = new FakeDriveControlPlaneRepository();
+    const files = new FakeGoogleDriveFiles();
+    let releaseProvisioning!: () => void;
+    const provisioningBlocked = new Promise<void>((resolve) => {
+      releaseProvisioning = resolve;
+    });
+    vi.spyOn(files, "ensureProjectFolders").mockImplementation(async () => {
+      await provisioningBlocked;
+      return {
+        projectFolderId: "project-folder-001",
+        inputFolderId: "input-folder-001",
+      };
+    });
+    const service = createProjectService({
+      repository,
+      access: { getAccessToken: vi.fn().mockResolvedValue("access") },
+      files,
+    });
+    const request = { idempotencyKey: "0123456789abcdef", name: "Test 1" };
+
+    const first = service.createProject(request);
+    await vi.waitFor(() => expect(files.ensureProjectFolders).toHaveBeenCalledOnce());
+    const second = service.createProject(request);
+    const settled = Promise.allSettled([first, second]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseProvisioning();
+
+    const results = await settled;
+    expect(files.ensureProjectFolders).toHaveBeenCalledOnce();
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "fulfilled" }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "DRIVE_TEMPORARILY_UNAVAILABLE", status: 503 }),
+      }),
+    ]));
+
+    await expect(service.createProject(request)).resolves.toMatchObject({
+      outcome: "REPLAYED",
+      project: { status: "READY" },
+    });
+  });
+
+  it("serializes shared Drive folder ancestors across different projects", async () => {
+    const repository = new FakeDriveControlPlaneRepository();
+    const files = new FakeGoogleDriveFiles();
+    let releaseProvisioning!: () => void;
+    const provisioningBlocked = new Promise<void>((resolve) => {
+      releaseProvisioning = resolve;
+    });
+    vi.spyOn(files, "ensureProjectFolders").mockImplementation(async (_access, projectId) => {
+      await provisioningBlocked;
+      return {
+        projectFolderId: `project-${projectId}`,
+        inputFolderId: `input-${projectId}`,
+      };
+    });
+    const service = createProjectService({
+      repository,
+      access: { getAccessToken: vi.fn().mockResolvedValue("access") },
+      files,
+    });
+
+    const first = service.createProject({ idempotencyKey: "project-key-one", name: "One" });
+    await vi.waitFor(() => expect(files.ensureProjectFolders).toHaveBeenCalledOnce());
+    const second = service.createProject({ idempotencyKey: "project-key-two", name: "Two" });
+    const secondSettled = Promise.allSettled([second]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(files.ensureProjectFolders).toHaveBeenCalledOnce();
+    await expect(secondSettled).resolves.toEqual([
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "DRIVE_TEMPORARILY_UNAVAILABLE", status: 503 }),
+      }),
+    ]);
+
+    releaseProvisioning();
+    await expect(first).resolves.toMatchObject({ outcome: "CREATED", project: { status: "READY" } });
+    await expect(service.createProject({ idempotencyKey: "project-key-two", name: "Two" }))
+      .resolves.toMatchObject({ outcome: "REPLAYED", project: { status: "READY" } });
     expect(files.ensureProjectFolders).toHaveBeenCalledTimes(2);
   });
 

@@ -177,6 +177,25 @@ describe("/api/v1/projects/[id]/upload-session", () => {
     });
   });
 
+  it("returns terminal metadata when renewal finds an already-complete source", async () => {
+    service.createSession.mockResolvedValue({
+      artifactId: PROJECT_ID,
+      status: "SOURCE_READY",
+      actualSizeBytes: VALID_BODY.sizeBytes,
+      ignoredProviderField: "private",
+    });
+
+    const response = await POST(postRequest(), context());
+
+    expect(response.status).toBe(200);
+    expectSessionSecurityHeaders(response);
+    await expect(response.json()).resolves.toEqual({
+      artifactId: PROJECT_ID,
+      status: "SOURCE_READY",
+      actualSizeBytes: VALID_BODY.sizeBytes,
+    });
+  });
+
   it("returns stable application errors without private provider detail", async () => {
     const error = Object.assign(new AppError("DRIVE_RATE_LIMITED", 429), {
       providerBody: "private-provider-detail",

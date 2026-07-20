@@ -175,7 +175,12 @@ function validateExpectedFile(
 
 function parseList(value: unknown): readonly unknown[] {
   const record = objectRecord(value);
-  if (!record || !hasExactKeys(record, ["files"]) || !Array.isArray(record.files) || record.files.length > 2) {
+  if (
+    !record || !hasOnlyKeys(record, ["files", "nextPageToken"]) ||
+    !Array.isArray(record.files) || record.files.length > 17 ||
+    (record.nextPageToken !== undefined && !boundedAscii(record.nextPageToken, 1, 2_048)) ||
+    record.nextPageToken !== undefined || record.files.length > 16
+  ) {
     throw remoteMismatch();
   }
   return record.files;
@@ -343,12 +348,14 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     const url = driveUrl("/files", {
       q: queryFor(expected.parentId, expected.appProperties),
       spaces: "drive",
-      pageSize: "2",
-      fields: `files(${FILE_FIELDS})`,
+      pageSize: "17",
+      fields: `nextPageToken,files(${FILE_FIELDS})`,
     });
     const results = parseList(await driveJson(accessToken, url, { method: "GET" }));
-    if (results.length > 1) throw remoteMismatch();
-    return results.length === 0 ? null : validateExpectedFile(results[0], expected);
+    if (results.length === 0) return null;
+    return results
+      .map((result) => validateExpectedFile(result, expected))
+      .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)[0]!;
   }
 
   async function createExpected(
@@ -563,11 +570,40 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
 
     async deleteFile(accessToken, fileId) {
       if (!boundedDriveId(fileId)) throw stableError("DRIVE_PROVIDER_REJECTED");
-      await driveJson(
-        accessToken,
-        driveUrl(`/files/${encodeURIComponent(fileId)}`),
-        { method: "DELETE" },
-      );
+      let lastCode: "DRIVE_RATE_LIMITED" | "DRIVE_TEMPORARILY_UNAVAILABLE" =
+        "DRIVE_TEMPORARILY_UNAVAILABLE";
+      for (let attempt = 0; attempt < DRIVE_ATTEMPTS; attempt += 1) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), DRIVE_TIMEOUT_MS);
+        try {
+          const response = await fetcher(
+            driveUrl(`/files/${encodeURIComponent(fileId)}`),
+            { method: "DELETE", headers: headers(accessToken), signal: controller.signal },
+          );
+          if (response.status === 401) {
+            await cancelResponse(response);
+            throw stableError("DRIVE_REAUTH_REQUIRED", 401);
+          }
+          if (response.status === 429 || response.status >= 500) {
+            lastCode = response.status === 429 ? "DRIVE_RATE_LIMITED" : "DRIVE_TEMPORARILY_UNAVAILABLE";
+            await cancelResponse(response);
+            continue;
+          }
+          if (response.status === 404) {
+            await cancelResponse(response);
+            return;
+          }
+          await readAndDiscardBounded(response);
+          if (!response.ok) throw stableError("DRIVE_PROVIDER_REJECTED");
+          return;
+        } catch (error) {
+          if (error instanceof AppError) throw error;
+          lastCode = "DRIVE_TEMPORARILY_UNAVAILABLE";
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      throw stableError(lastCode, lastCode === "DRIVE_RATE_LIMITED" ? 429 : 503);
     },
   };
 }

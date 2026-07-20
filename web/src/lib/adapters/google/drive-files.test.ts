@@ -88,8 +88,8 @@ describe("createGoogleDriveFilesAdapter", () => {
       .resolves.toEqual({ rootFolderId: "drive-root-folder-001" });
 
     const list = requestDetails(fetcher, 0);
-    expect(list.url.searchParams.get("fields")).toBe(`files(${FILE_FIELDS})`);
-    expect(list.url.searchParams.get("pageSize")).toBe("2");
+    expect(list.url.searchParams.get("fields")).toBe(`nextPageToken,files(${FILE_FIELDS})`);
+    expect(list.url.searchParams.get("pageSize")).toBe("17");
     expect(list.url.searchParams.get("q")).toContain("'root' in parents");
     expect(list.url.searchParams.get("q")).toContain("key='ytbVpsRole' and value='root'");
     expect(list.url.searchParams.get("q")).toContain("key='schema' and value='1'");
@@ -131,7 +131,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 
-  it("reuses exactly one valid root and rejects duplicates or mismatches", async () => {
+  it("reuses exact duplicate roots with one deterministic canonical identity", async () => {
     const properties = { ytbVpsRole: "root", schema: "1" };
     const valid = folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, properties);
     const reuseFetcher = vi.fn<typeof fetch>()
@@ -140,8 +140,24 @@ describe("createGoogleDriveFilesAdapter", () => {
       .resolves.toEqual({ rootFolderId: valid.id });
     expect(reuseFetcher).toHaveBeenCalledTimes(1);
 
-    const duplicateFetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ files: [valid, valid] }));
+    const duplicateFetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      files: [
+        folder("drive-root-folder-002", "YTB-VPS", MY_DRIVE_ROOT_ID, properties),
+        valid,
+      ],
+    }));
+    await expect(adapter(duplicateFetcher).ensureWorkspace(ACCESS_TOKEN))
+      .resolves.toEqual({ rootFolderId: valid.id });
+    expect(duplicateFetcher).toHaveBeenCalledOnce();
+    expect(duplicateFetcher.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
+  it("rejects mixed duplicate or mismatched root evidence", async () => {
+    const properties = { ytbVpsRole: "root", schema: "1" };
+    const valid = folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, properties);
+    const duplicateFetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      files: [valid, { ...valid, id: "drive-root-folder-002", name: "wrong-name" }],
+    }));
     await expect(adapter(duplicateFetcher).ensureWorkspace(ACCESS_TOKEN))
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
 
@@ -220,6 +236,39 @@ describe("createGoogleDriveFilesAdapter", () => {
     const query = requestDetails(fetcher).url.searchParams.get("q")!;
     expect(query).toContain("'parent\\'id\\\\segment' in parents");
     expect(query).toContain(`value='${ARTIFACT_ID}'`);
+  });
+
+  it("reuses the lowest opaque ID when exact empty source duplicates exist", async () => {
+    const properties = {
+      ytbVpsProjectId: PROJECT_ID,
+      ytbVpsArtifactId: ARTIFACT_ID,
+      ytbVpsRole: "source",
+      schema: "1",
+    };
+    const source = (id: string) => ({
+      id,
+      name: "source.mp4",
+      mimeType: "video/mp4",
+      size: "0",
+      parents: ["drive-input-folder-001"],
+      trashed: false,
+      appProperties: properties,
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      files: [source("drive-source-file-002"), source("drive-source-file-001")],
+    }));
+
+    await expect(adapter(fetcher).ensureSourceFile(ACCESS_TOKEN, {
+      projectId: PROJECT_ID,
+      artifactId: ARTIFACT_ID,
+      parentId: "drive-input-folder-001",
+      fileName: "display-name.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 100,
+      lastModified: 1,
+      normalizedExtension: "mp4",
+    })).resolves.toBe("drive-source-file-001");
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("creates a normalized private empty source file on zero matches", async () => {
@@ -410,6 +459,15 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(requestDetails(fetcher, 0).url.searchParams.get("fields")).toBe(FILE_FIELDS);
     expect(requestDetails(fetcher, 1).init.method).toBe("DELETE");
     expect(fetcher.mock.calls.every(([input]) => !String(input).includes("permissions"))).toBe(true);
+  });
+
+  it("treats an already-missing claimed file as an idempotent deletion", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 }));
+
+    await expect(adapter(fetcher).deleteFile(ACCESS_TOKEN, "drive-source-file-001"))
+      .resolves.toBeUndefined();
+    expect(requestDetails(fetcher).init.method).toBe("DELETE");
+    expect(fetcher).toHaveBeenCalledOnce();
   });
 
   it("retries metadata failures at most three total attempts", async () => {

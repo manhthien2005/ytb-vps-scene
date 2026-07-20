@@ -49,18 +49,19 @@ function validDriveAccount(value: unknown): value is Readonly<{ usedBytes: numbe
     value.usedBytes <= value.limitBytes;
 }
 
-function validSnapshot(snapshot: UsageSnapshot | null, provider: UsageSnapshot["provider"]): snapshot is UsageSnapshot {
-  return snapshot !== null &&
-    snapshot.provider === provider &&
-    validQuotaValue(snapshot.usedBytes) &&
-    validQuotaValue(snapshot.limitBytes, 1) &&
-    snapshot.usedBytes <= snapshot.limitBytes &&
-    validQuotaValue(snapshot.appManagedBytes) &&
-    (provider === "DRIVE" ? snapshot.appManagedBytes <= snapshot.usedBytes : snapshot.appManagedBytes === 0) &&
-    (snapshot.mode === "READ_WRITE" || snapshot.mode === "READ_ONLY") &&
-    Array.isArray(snapshot.reasonCodes) &&
-    snapshot.reasonCodes.every((reason) => typeof reason === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(reason)) &&
-    typeof snapshot.observedAt === "string";
+function validSnapshot(snapshot: unknown, provider: UsageSnapshot["provider"]): snapshot is UsageSnapshot {
+  if (typeof snapshot !== "object" || snapshot === null) return false;
+  const value = snapshot as Partial<UsageSnapshot>;
+  return value.provider === provider &&
+    validQuotaValue(value.usedBytes) &&
+    validQuotaValue(value.limitBytes, 1) &&
+    value.usedBytes <= value.limitBytes &&
+    validQuotaValue(value.appManagedBytes) &&
+    (provider === "DRIVE" ? value.appManagedBytes <= value.usedBytes : value.appManagedBytes === 0) &&
+    (value.mode === "READ_WRITE" || value.mode === "READ_ONLY") &&
+    Array.isArray(value.reasonCodes) &&
+    value.reasonCodes.every((reason) => typeof reason === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(reason)) &&
+    typeof value.observedAt === "string";
 }
 
 function fallbackSnapshot(
@@ -284,23 +285,46 @@ export function createFreeTierHealthService(
       mode,
       reasonCodes: reasons,
     };
-    await Promise.all([
+    const saved = await Promise.allSettled([
       ...(drive === null ? [] : [dependencies.repository.saveUsage(drive)]),
       ...(neon === null ? [] : [dependencies.repository.saveUsage(neon)]),
-    ]).catch(() => undefined);
-    if ([previousDrive, previousNeon].some((snapshot) => snapshot !== null && snapshot.mode !== mode)) {
+    ]);
+    let retainedDrive = drive;
+    let retainedNeon = neon;
+    let savedIndex = 0;
+    if (drive !== null) {
+      const result = saved[savedIndex++];
+      if (result?.status === "fulfilled" && validSnapshot(result.value, "DRIVE")) {
+        retainedDrive = result.value;
+      }
+    }
+    if (neon !== null) {
+      const result = saved[savedIndex];
+      if (result?.status === "fulfilled" && validSnapshot(result.value, "NEON")) {
+        retainedNeon = result.value;
+      }
+    }
+    const retainedReasons = retainedDrive !== null && retainedNeon !== null
+      ? uniqueReasons([...retainedDrive.reasonCodes, ...retainedNeon.reasonCodes])
+      : reasons;
+    const retainedMode: FreeTierHealth["mode"] = (
+      retainedDrive?.mode === "READ_ONLY" ||
+      retainedNeon?.mode === "READ_ONLY" ||
+      retainedReasons.length > 0
+    ) ? "READ_ONLY" : "READ_WRITE";
+    if ([previousDrive, previousNeon].some((snapshot) => snapshot !== null && snapshot.mode !== retainedMode)) {
       await dependencies.repository.recordAudit({
         eventType: "FREE_TIER_MODE_CHANGED",
         actorClass: "system",
-        payload: { mode, reasonCode: reasons[0] ?? null },
+        payload: { mode: retainedMode, reasonCode: retainedReasons[0] ?? null },
       }).catch(() => undefined);
     }
     return {
-      mode,
-      reasons,
+      mode: retainedMode,
+      reasons: retainedReasons,
       driveConnection: driveResult.driveConnection,
-      drive,
-      neon,
+      drive: retainedDrive,
+      neon: retainedNeon,
     };
   }
 

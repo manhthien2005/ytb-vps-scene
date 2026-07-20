@@ -59,6 +59,8 @@ function uploadService(env: ServerEnv): UploadService {
     files,
     health,
     maximumBytes: env.driveUploadMaxBytes,
+    softPercent: env.freeTierSoftPercent,
+    staleAfterSeconds: env.quotaStaleAfterSeconds,
   });
 }
 

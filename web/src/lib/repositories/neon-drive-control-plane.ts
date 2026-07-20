@@ -5,13 +5,14 @@ import { DRIVE_FILE_SCOPE, type Artifact, type Project } from "@/lib/domain/driv
 import type { UsageSnapshot } from "@/lib/ports/drive";
 import { createSql } from "@/lib/db/client";
 import type { AuditEvent } from "./control-plane";
-import type {
-  DriveControlPlaneRepository,
-  ProjectReservation,
-  ProjectReservationResult,
-  SourceReservation,
-  StoredConnectedCredential,
-  StoredDriveCredential,
+import {
+  PROJECT_TREE_CLAIM_ID,
+  type DriveControlPlaneRepository,
+  type ProjectReservation,
+  type ProjectReservationResult,
+  type SourceReservation,
+  type StoredConnectedCredential,
+  type StoredDriveCredential,
 } from "./drive-control-plane";
 
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -19,10 +20,14 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const PROJECT_STATUSES = ["PROVISIONING", "READY", "FAILED"] as const;
 const SOURCE_STATUSES = ["NO_SOURCE", "UPLOAD_PENDING", "SOURCE_READY", "UPLOAD_FAILED"] as const;
 const ARTIFACT_KINDS = ["SOURCE", "CHECKPOINT", "OUTPUT"] as const;
-const ARTIFACT_STATUSES = ["PENDING", "UPLOADING", "READY", "INVALID", "DELETED"] as const;
+const ARTIFACT_STATUSES = ["PENDING", "UPLOADING", "DELETING", "READY", "INVALID", "DELETED"] as const;
 const CREDENTIAL_STATUSES = ["CONNECTED", "REAUTH_REQUIRED", "REVOKE_PENDING", "DISCONNECTED"] as const;
 const USAGE_PROVIDERS = ["DRIVE", "NEON"] as const;
 const USAGE_MODES = ["READ_WRITE", "READ_ONLY"] as const;
+const SOURCE_CAPACITY_OUTCOMES = [
+  "RESERVED", "EXISTING", "CONFLICT", "DRIVE_STORAGE_HIGH", "NEON_STORAGE_HIGH",
+  "DRIVE_QUOTA_STALE", "QUOTA_INVALID", "DRIVE_TEMPORARILY_UNAVAILABLE",
+] as const;
 
 export type DriveControlPlaneSqlClient = Readonly<{
   query: (
@@ -365,15 +370,54 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return result.rows.length === 0 ? null : parseProject(result.rows[0]!);
     },
 
-    async markProjectFailed(projectId) {
+    async claimProvisioning(kind, resourceId, claimToken) {
+      const result = await sql.query(
+        `insert into drive_provisioning_claims(
+           resource_kind,resource_id,claim_token,expires_at
+         ) values ($1,$2,$3,now()+interval '5 minutes')
+         on conflict(resource_kind,resource_id) do update set
+           claim_token=excluded.claim_token,expires_at=excluded.expires_at,updated_at=now()
+         where drive_provisioning_claims.expires_at <= now()
+           or drive_provisioning_claims.claim_token=excluded.claim_token
+         returning resource_id`,
+        [kind, resourceId, claimToken],
+      );
+      return result.rows.length === 1;
+    },
+
+    async renewProvisioning(kind, resourceId, claimToken) {
+      const result = await sql.query(
+        `update drive_provisioning_claims
+         set expires_at=now()+interval '5 minutes',updated_at=now()
+         where resource_kind=$1 and resource_id=$2 and claim_token=$3
+           and expires_at > now()
+         returning resource_id`,
+        [kind, resourceId, claimToken],
+      );
+      return result.rows.length === 1;
+    },
+
+    async releaseProvisioning(kind, resourceId, claimToken) {
       await sql.query(
-        `update projects set status='FAILED',updated_at=now()
-         where id=$1 and status='PROVISIONING'`,
-        [projectId],
+        `delete from drive_provisioning_claims
+         where resource_kind=$1 and resource_id=$2 and claim_token=$3`,
+        [kind, resourceId, claimToken],
       );
     },
 
-    async completeProjectFolders(projectId, projectFolderId, inputFolderId) {
+    async markProjectFailed(projectId, claimToken) {
+      await sql.query(
+        `update projects set status='FAILED',updated_at=now()
+         where id=$1 and status='PROVISIONING'
+           and exists(
+             select 1 from drive_provisioning_claims
+             where resource_kind='PROJECT' and resource_id=$3 and claim_token=$2 and expires_at > now()
+           )`,
+        [projectId, claimToken, PROJECT_TREE_CLAIM_ID],
+      );
+    },
+
+    async completeProjectFolders(projectId, projectFolderId, inputFolderId, claimToken) {
       const result = await sql.query(
         `update projects set
            status='READY',drive_project_folder_id=$2,drive_input_folder_id=$3,updated_at=now()
@@ -381,8 +425,12 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
            status='PROVISIONING'
            or (status='READY' and drive_project_folder_id=$2 and drive_input_folder_id=$3)
          )
+           and exists(
+             select 1 from drive_provisioning_claims
+             where resource_kind='PROJECT' and resource_id=$5 and claim_token=$4 and expires_at > now()
+           )
          returning ${projectColumns()}`,
-        [projectId, projectFolderId, inputFolderId],
+        [projectId, projectFolderId, inputFolderId, claimToken, PROJECT_TREE_CLAIM_ID],
       );
       if (!result.rows[0]) throw new Error("Project cannot be completed");
       return parseProject(result.rows[0]);
@@ -393,7 +441,36 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return result.rows.map(parseProject);
     },
 
-    async reserveSourceArtifact(input: SourceReservation) {
+    async reserveSourceCapacity(input) {
+      const result = await sql.query(
+        `select reserve_drive_upload_capacity(
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+         ) as outcome`,
+        [
+          input.artifactId, input.projectId, input.driveParentId, input.fileName,
+          input.mimeType, input.sizeBytes, input.claimToken, validDate(input.now),
+          input.softPercent, input.staleAfterSeconds,
+        ],
+      );
+      const outcome = result.rows[0]?.outcome;
+      if (!isOneOf(outcome, SOURCE_CAPACITY_OUTCOMES)) fail("source capacity outcome");
+      return outcome;
+    },
+
+    async observeSourceProgress(artifactId, observedSizeBytes) {
+      if (!Number.isSafeInteger(observedSizeBytes) || observedSizeBytes < 0) {
+        throw new Error("Invalid observed source size");
+      }
+      const result = await sql.query(
+        `select observe_drive_upload_progress($1,$2) as remaining_bytes`,
+        [artifactId, observedSizeBytes],
+      );
+      const remaining = safeInteger(result.rows[0]?.remaining_bytes);
+      if (remaining === null) throw new Error("Source progress cannot be observed");
+      return remaining;
+    },
+
+    async reserveSourceArtifact(input: SourceReservation, claimToken: string) {
       const reserved = await sql.query(
         `with reserved as (
            insert into artifacts(
@@ -401,6 +478,10 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
            )
            select $1,$2,'SOURCE','PENDING',$3,$4,$5,$6,$7
            from projects where id=$2 and status='READY'
+             and exists(
+               select 1 from drive_provisioning_claims
+               where resource_kind='SOURCE' and resource_id=$1 and claim_token=$8 and expires_at > now()
+             )
            on conflict(id) do update set
              status=case when artifacts.status in ('INVALID','DELETED') then 'PENDING' else artifacts.status end,
              drive_file_id=case when artifacts.status in ('INVALID','DELETED') then excluded.drive_file_id else artifacts.drive_file_id end,
@@ -435,11 +516,11 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
          select reserved.*, (select count(*) from project_updated) as project_updates from reserved`,
         [
           input.artifactId, input.projectId, input.driveFileId, input.driveParentId,
-          input.fileName, input.mimeType, input.sizeBytes,
+          input.fileName, input.mimeType, input.sizeBytes, claimToken,
         ],
       );
       const row = reserved.rows[0];
-      if (!row) throw new Error("Artifact reservation mismatch or project not ready");
+      if (!row) throw new Error("Artifact provisioning claim lost or reservation mismatch");
       const artifact = parseArtifact(row);
       return artifact;
     },
@@ -467,6 +548,11 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
         `with changed as (
            update artifacts set status='READY',actual_size_bytes=$2,verified_at=$3,updated_at=now()
            where id=$1 and kind='SOURCE' and status in ('UPLOADING','READY') returning project_id
+         ), released as (
+           update drive_upload_reservations set
+             observed_size_bytes=expected_size_bytes,remaining_bytes=0,released_at=coalesce(released_at,now()),updated_at=now()
+           where artifact_id=$1 and released_at is null and exists(select 1 from changed)
+           returning artifact_id
          )
          update projects set source_status='SOURCE_READY',updated_at=now()
          where id=(select project_id from changed) returning id`,
@@ -479,7 +565,12 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       const result = await sql.query(
         `with changed as (
            update artifacts set status='INVALID',updated_at=now()
-           where id=$1 and kind='SOURCE' and status <> 'DELETED' returning project_id
+           where id=$1 and kind='SOURCE' and status in ('PENDING','UPLOADING')
+           returning project_id
+         ), released as (
+           update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
+           where artifact_id=$1 and released_at is null and exists(select 1 from changed)
+           returning artifact_id
          )
          update projects set source_status='UPLOAD_FAILED',updated_at=now()
          where id=(select project_id from changed) returning id`,
@@ -488,17 +579,42 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       if (result.rows.length === 0) throw new Error("Source cannot be marked invalid");
     },
 
+    async claimSourceDeletion(artifactId) {
+      const result = await sql.query(
+        `select claim_source_deletion($1) as outcome`,
+        [artifactId],
+      );
+      const outcome = result.rows[0]?.outcome;
+      if (
+        outcome !== "CLAIMED" && outcome !== "RECONCILE" &&
+        outcome !== "DELETED" && outcome !== "CONFLICT"
+      ) return "CONFLICT";
+      return outcome;
+    },
+
     async markSourceDeleted(artifactId) {
       const result = await sql.query(
         `with changed as (
            update artifacts set status='DELETED',updated_at=now()
-           where id=$1 and kind='SOURCE' returning project_id
+           where id=$1 and kind='SOURCE' and status='DELETING'
+           returning project_id
+         ), project_updated as (
+           update projects set source_status='NO_SOURCE',updated_at=now()
+           where id=(select project_id from changed) returning id
+         ), released as (
+           update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
+           where artifact_id=$1 and released_at is null and exists(select 1 from changed)
+           returning artifact_id
          )
-         update projects set source_status='NO_SOURCE',updated_at=now()
-         where id=(select project_id from changed) returning id`,
+         select exists(select 1 from changed) as changed,
+           (
+             exists(select 1 from changed)
+             or exists(select 1 from artifacts where id=$1 and kind='SOURCE' and status='DELETED')
+           ) as deleted`,
         [artifactId],
       );
-      if (result.rows.length === 0) throw new Error("Source cannot be marked deleted");
+      if (result.rows[0]?.deleted !== true) throw new Error("Source cannot be marked deleted");
+      return result.rows[0]?.changed === true;
     },
 
     async getUsage(provider) {
@@ -511,25 +627,39 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
     },
 
     async saveUsage(snapshot) {
-      await sql.query(
+      const result = await sql.query(
         `insert into usage_guards(
            provider,used_bytes,limit_bytes,app_managed_bytes,mode,reason_codes,observed_at
          ) values ($1,$2,$3,$4,$5,$6::jsonb,$7)
          on conflict(provider) do update set
-           used_bytes=excluded.used_bytes,limit_bytes=excluded.limit_bytes,
-           app_managed_bytes=excluded.app_managed_bytes,mode=excluded.mode,
-           reason_codes=excluded.reason_codes,observed_at=excluded.observed_at,updated_at=now()`,
+           used_bytes=case when excluded.observed_at > usage_guards.observed_at then excluded.used_bytes else usage_guards.used_bytes end,
+           limit_bytes=case when excluded.observed_at > usage_guards.observed_at then excluded.limit_bytes else usage_guards.limit_bytes end,
+           app_managed_bytes=case when excluded.observed_at > usage_guards.observed_at then excluded.app_managed_bytes else usage_guards.app_managed_bytes end,
+           mode=case when excluded.observed_at > usage_guards.observed_at then excluded.mode else usage_guards.mode end,
+           reason_codes=case when excluded.observed_at > usage_guards.observed_at then excluded.reason_codes else usage_guards.reason_codes end,
+           observed_at=greatest(usage_guards.observed_at,excluded.observed_at),
+           updated_at=case when excluded.observed_at > usage_guards.observed_at then now() else usage_guards.updated_at end
+         returning provider,used_bytes,limit_bytes,app_managed_bytes,mode,reason_codes,observed_at`,
         [
           snapshot.provider, snapshot.usedBytes, snapshot.limitBytes, snapshot.appManagedBytes,
           snapshot.mode, JSON.stringify(snapshot.reasonCodes), snapshot.observedAt,
         ],
       );
+      if (!result.rows[0]) fail("usage");
+      return parseUsage(result.rows[0]);
     },
 
     async appManagedDriveBytes() {
       const result = await sql.query(
-        `select coalesce(sum(coalesce(actual_size_bytes,expected_size_bytes)),0) as bytes
-         from artifacts where status <> 'DELETED'`,
+        `select coalesce(sum(
+           case when artifacts.status='READY' then artifacts.actual_size_bytes
+             else coalesce(drive_upload_reservations.observed_size_bytes,0)
+           end
+         ),0) as bytes
+         from artifacts
+         left join drive_upload_reservations
+           on drive_upload_reservations.artifact_id=artifacts.id
+         where artifacts.status <> 'DELETED'`,
       );
       const value = safeInteger(result.rows[0]?.bytes);
       if (value === null) fail("Drive usage");

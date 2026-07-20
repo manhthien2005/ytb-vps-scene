@@ -78,7 +78,10 @@ export interface UploadControlPlaneApi {
   renewSession(
     projectId: string,
     identity: StoredUploadSession["fileIdentity"],
-  ): Promise<Pick<StoredUploadSession, "artifactId" | "sessionUri" | "chunkBytes" | "expiresAt">>;
+  ): Promise<
+    | Pick<StoredUploadSession, "artifactId" | "sessionUri" | "chunkBytes" | "expiresAt">
+    | Readonly<{ artifactId: string; status: "SOURCE_READY"; actualSizeBytes: number }>
+  >;
   complete(
     projectId: string,
     artifactId: string,
@@ -360,6 +363,31 @@ export function createResumableUploader(
           continue;
         }
         if (cancelRequested) return;
+        if ("status" in renewed) {
+          const terminal = Object.freeze({
+            artifactId: renewed.artifactId,
+            status: renewed.status,
+            actualSizeBytes: renewed.actualSizeBytes,
+          });
+          if (
+            terminal.artifactId !== record.artifactId ||
+            terminal.status !== "SOURCE_READY" ||
+            terminal.actualSizeBytes !== file.size
+          ) {
+            throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
+          }
+          if (terminalOutcome === "CANCELLED") return;
+          terminalOutcome = "READY";
+          currentRecord = null;
+          publish({
+            ...value,
+            phase: "READY",
+            committedBytes: terminal.actualSizeBytes,
+            bytesPerSecond: 0,
+          });
+          await dependencies.store.delete(record.projectId, record.artifactId);
+          return;
+        }
         const renewedSnapshot = Object.freeze({
           artifactId: renewed.artifactId,
           sessionUri: renewed.sessionUri,

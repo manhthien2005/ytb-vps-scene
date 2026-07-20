@@ -1,10 +1,13 @@
 import "server-only";
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Project } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
 import type { DriveAccessProvider, DriveFilesPort } from "@/lib/ports/drive";
-import type { DriveControlPlaneRepository } from "@/lib/repositories/drive-control-plane";
+import {
+  PROJECT_TREE_CLAIM_ID,
+  type DriveControlPlaneRepository,
+} from "@/lib/repositories/drive-control-plane";
 
 export type CreateProjectInput = Readonly<{
   idempotencyKey: string;
@@ -48,6 +51,17 @@ export function createProjectService(dependencies: ProjectDependencies): Project
       if (reservation.outcome === "EXISTING") {
         return { outcome: "REPLAYED", project: reservation.project };
       }
+      const claimToken = randomUUID();
+      const claimed = await dependencies.repository.claimProvisioning(
+        "PROJECT",
+        PROJECT_TREE_CLAIM_ID,
+        claimToken,
+      );
+      if (!claimed) {
+        const current = await dependencies.repository.getProject(reservation.project.id);
+        if (current?.status === "READY") return { outcome: "REPLAYED", project: current };
+        throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+      }
       try {
         const accessToken = await dependencies.access.getAccessToken();
         const folders = await dependencies.files.ensureProjectFolders(
@@ -58,6 +72,7 @@ export function createProjectService(dependencies: ProjectDependencies): Project
           reservation.project.id,
           folders.projectFolderId,
           folders.inputFolderId,
+          claimToken,
         );
         await dependencies.repository.recordAudit({
           eventType: "PROJECT_CREATED",
@@ -71,9 +86,15 @@ export function createProjectService(dependencies: ProjectDependencies): Project
         };
       } catch (error) {
         if (error instanceof AppError && error.code === "DRIVE_REMOTE_MISMATCH") {
-          await dependencies.repository.markProjectFailed(reservation.project.id);
+          await dependencies.repository.markProjectFailed(reservation.project.id, claimToken);
         }
         throw error;
+      } finally {
+        await dependencies.repository.releaseProvisioning(
+          "PROJECT",
+          PROJECT_TREE_CLAIM_ID,
+          claimToken,
+        ).catch(() => undefined);
       }
     },
 

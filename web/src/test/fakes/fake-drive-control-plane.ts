@@ -1,13 +1,17 @@
 import type { Artifact, Project } from "@/lib/domain/drive";
 import type { UsageSnapshot } from "@/lib/ports/drive";
 import type { AuditEvent } from "@/lib/repositories/control-plane";
-import type {
-  DriveControlPlaneRepository,
-  ProjectReservation,
-  ProjectReservationResult,
-  SourceReservation,
-  StoredConnectedCredential,
-  StoredDriveCredential,
+import {
+  PROJECT_TREE_CLAIM_ID,
+  type DriveControlPlaneRepository,
+  type ProjectReservation,
+  type ProjectReservationResult,
+  type ProvisioningKind,
+  type SourceCapacityOutcome,
+  type SourceCapacityReservation,
+  type SourceReservation,
+  type StoredConnectedCredential,
+  type StoredDriveCredential,
 } from "@/lib/repositories/drive-control-plane";
 
 type StoredProject = Readonly<{
@@ -16,12 +20,21 @@ type StoredProject = Readonly<{
   requestHash: string;
 }>;
 
+type StoredSourceCapacity = Readonly<{
+  input: Omit<SourceCapacityReservation, "claimToken" | "now" | "softPercent" | "staleAfterSeconds">;
+  observedSizeBytes: number;
+  remainingBytes: number;
+  released: boolean;
+}>;
+
 export class FakeDriveControlPlaneRepository implements DriveControlPlaneRepository {
   readonly auditEvents: AuditEvent[] = [];
   private readonly nonces = new Map<string, number>();
   private readonly projects = new Map<string, StoredProject>();
   private readonly artifacts = new Map<string, Artifact>();
+  private readonly sourceCapacities = new Map<string, StoredSourceCapacity>();
   private readonly usage = new Map<"DRIVE" | "NEON", UsageSnapshot>();
+  private readonly provisioningClaims = new Map<string, Readonly<{ token: string; expiresAt: number }>>();
   private credential: StoredDriveCredential | null = null;
   private nextProjectNumber = 1;
 
@@ -122,15 +135,67 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return stored ? structuredClone(stored.project) : null;
   }
 
-  async markProjectFailed(projectId: string): Promise<void> {
-    if (this.projects.get(projectId)?.project.status === "PROVISIONING") {
+  async claimProvisioning(
+    kind: ProvisioningKind,
+    resourceId: string,
+    claimToken: string,
+  ): Promise<boolean> {
+    const key = `${kind}:${resourceId}`;
+    const existing = this.provisioningClaims.get(key);
+    if (existing && existing.token !== claimToken && existing.expiresAt > this.now().getTime()) return false;
+    this.provisioningClaims.set(key, {
+      token: claimToken,
+      expiresAt: this.now().getTime() + 5 * 60 * 1_000,
+    });
+    return true;
+  }
+
+  async renewProvisioning(
+    kind: ProvisioningKind,
+    resourceId: string,
+    claimToken: string,
+  ): Promise<boolean> {
+    const key = `${kind}:${resourceId}`;
+    const existing = this.provisioningClaims.get(key);
+    if (existing?.token !== claimToken || existing.expiresAt <= this.now().getTime()) return false;
+    this.provisioningClaims.set(key, {
+      token: claimToken,
+      expiresAt: this.now().getTime() + 5 * 60 * 1_000,
+    });
+    return true;
+  }
+
+  async releaseProvisioning(
+    kind: ProvisioningKind,
+    resourceId: string,
+    claimToken: string,
+  ): Promise<void> {
+    const key = `${kind}:${resourceId}`;
+    if (this.provisioningClaims.get(key)?.token === claimToken) this.provisioningClaims.delete(key);
+  }
+
+  private ownsProvisioning(kind: ProvisioningKind, resourceId: string, claimToken: string): boolean {
+    const claim = this.provisioningClaims.get(`${kind}:${resourceId}`);
+    return claim?.token === claimToken && claim.expiresAt > this.now().getTime();
+  }
+
+  async markProjectFailed(projectId: string, claimToken: string): Promise<void> {
+    if (
+      this.ownsProvisioning("PROJECT", PROJECT_TREE_CLAIM_ID, claimToken) &&
+      this.projects.get(projectId)?.project.status === "PROVISIONING"
+    ) {
       this.updateProject(projectId, { status: "FAILED" });
     }
   }
 
-  async completeProjectFolders(projectId: string, projectFolderId: string, inputFolderId: string): Promise<Project> {
+  async completeProjectFolders(
+    projectId: string,
+    projectFolderId: string,
+    inputFolderId: string,
+    claimToken: string,
+  ): Promise<Project> {
     const stored = this.projects.get(projectId);
-    if (!stored || (stored.project.status !== "PROVISIONING" && (
+    if (!this.ownsProvisioning("PROJECT", PROJECT_TREE_CLAIM_ID, claimToken) || !stored || (stored.project.status !== "PROVISIONING" && (
       stored.project.status !== "READY" ||
       stored.project.driveProjectFolderId !== projectFolderId ||
       stored.project.driveInputFolderId !== inputFolderId
@@ -148,9 +213,96 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
   }
 
-  async reserveSourceArtifact(input: SourceReservation): Promise<Artifact> {
+  async reserveSourceCapacity(input: SourceCapacityReservation): Promise<SourceCapacityOutcome> {
+    const quota = this.usage.get("DRIVE");
+    if (!quota) return "DRIVE_QUOTA_STALE";
+    const observedAt = Date.parse(quota.observedAt);
+    if (
+      !Number.isFinite(observedAt) || observedAt > input.now.getTime() ||
+      input.now.getTime() - observedAt > input.staleAfterSeconds * 1_000
+    ) return "DRIVE_QUOTA_STALE";
+    if (quota.usedBytes > quota.limitBytes || quota.appManagedBytes > quota.usedBytes) return "QUOTA_INVALID";
+    if (quota.mode !== "READ_WRITE") {
+      const reason = quota.reasonCodes[0];
+      return reason === "DRIVE_STORAGE_HIGH" || reason === "NEON_STORAGE_HIGH" ||
+        reason === "DRIVE_QUOTA_STALE" || reason === "QUOTA_INVALID"
+        ? reason
+        : "QUOTA_INVALID";
+    }
+    if (!this.ownsProvisioning("SOURCE", input.artifactId, input.claimToken)) {
+      return "DRIVE_TEMPORARILY_UNAVAILABLE";
+    }
     const project = this.projects.get(input.projectId)?.project;
-    if (!project || project.status !== "READY") throw new Error("Project not ready or source already reserved");
+    if (
+      !project || project.status !== "READY" || project.driveInputFolderId !== input.driveParentId
+    ) return "CONFLICT";
+    const existing = this.sourceCapacities.get(input.artifactId);
+    const artifact = this.artifacts.get(input.artifactId);
+    let replacedRemaining = 0;
+    if (existing && !existing.released) {
+      const exact = existing.input.artifactId === input.artifactId &&
+        existing.input.projectId === input.projectId &&
+        existing.input.driveParentId === input.driveParentId &&
+        existing.input.fileName === input.fileName &&
+        existing.input.mimeType === input.mimeType &&
+        existing.input.sizeBytes === input.sizeBytes;
+      if (exact && (!artifact || artifact.status === "PENDING" || artifact.status === "UPLOADING")) {
+        return "EXISTING";
+      }
+      if (artifact) return "CONFLICT";
+      replacedRemaining = existing.remainingBytes;
+    }
+    if (artifact && artifact.status !== "INVALID" && artifact.status !== "DELETED") return "CONFLICT";
+    const remaining = [...this.sourceCapacities.values()]
+      .filter((capacity) => !capacity.released)
+      .reduce((sum, capacity) => sum + capacity.remainingBytes, 0) - replacedRemaining;
+    if ((quota.usedBytes + remaining + input.sizeBytes) * 100 >= quota.limitBytes * input.softPercent) {
+      return "DRIVE_STORAGE_HIGH";
+    }
+    this.sourceCapacities.set(input.artifactId, {
+      input: {
+        artifactId: input.artifactId,
+        projectId: input.projectId,
+        driveParentId: input.driveParentId,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+      },
+      observedSizeBytes: 0,
+      remainingBytes: input.sizeBytes,
+      released: false,
+    });
+    return "RESERVED";
+  }
+
+  async observeSourceProgress(artifactId: string, observedSizeBytes: number): Promise<number> {
+    const capacity = this.sourceCapacities.get(artifactId);
+    if (
+      !capacity || capacity.released || !Number.isSafeInteger(observedSizeBytes) ||
+      observedSizeBytes < 0 || observedSizeBytes > capacity.input.sizeBytes
+    ) throw new Error("Source progress cannot be observed");
+    const remainingBytes = capacity.input.sizeBytes - observedSizeBytes;
+    this.sourceCapacities.set(artifactId, { ...capacity, observedSizeBytes, remainingBytes });
+    return remainingBytes;
+  }
+
+  private releaseSourceCapacity(artifactId: string, complete = false): void {
+    const capacity = this.sourceCapacities.get(artifactId);
+    if (!capacity || capacity.released) return;
+    this.sourceCapacities.set(artifactId, {
+      ...capacity,
+      observedSizeBytes: complete ? capacity.input.sizeBytes : capacity.observedSizeBytes,
+      remainingBytes: 0,
+      released: true,
+    });
+  }
+
+  async reserveSourceArtifact(input: SourceReservation, claimToken: string): Promise<Artifact> {
+    const project = this.projects.get(input.projectId)?.project;
+    if (
+      !this.ownsProvisioning("SOURCE", input.artifactId, claimToken) ||
+      !project || project.status !== "READY"
+    ) throw new Error("Artifact provisioning claim lost or reservation mismatch");
     const existing = this.artifacts.get(input.artifactId);
     if (existing) {
       if (existing.projectId === input.projectId && existing.kind === "SOURCE" && ["INVALID", "DELETED"].includes(existing.status)) {
@@ -225,23 +377,49 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       !Number.isFinite(verifiedAt.getTime())
     ) throw new Error("Source cannot be marked ready");
     this.artifacts.set(artifactId, { ...artifact, status: "READY", actualSizeBytes });
+    this.releaseSourceCapacity(artifactId, true);
     this.updateProject(artifact.projectId, { sourceStatus: "SOURCE_READY" });
   }
 
   async markSourceInvalid(artifactId: string): Promise<void> {
     const artifact = this.artifacts.get(artifactId);
-    if (!artifact || artifact.kind !== "SOURCE" || artifact.status === "DELETED") {
+    if (!artifact || artifact.kind !== "SOURCE" || !["PENDING", "UPLOADING"].includes(artifact.status)) {
       throw new Error("Source cannot be marked invalid");
     }
     this.artifacts.set(artifactId, { ...artifact, status: "INVALID" });
+    this.releaseSourceCapacity(artifactId);
     this.updateProject(artifact.projectId, { sourceStatus: "UPLOAD_FAILED" });
   }
 
-  async markSourceDeleted(artifactId: string): Promise<void> {
+  async claimSourceDeletion(
+    artifactId: string,
+  ): Promise<"CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT"> {
+    const artifact = this.artifacts.get(artifactId);
+    if (!artifact || artifact.kind !== "SOURCE") return "CONFLICT";
+    if (artifact.status === "DELETING") return "RECONCILE";
+    if (artifact.status === "DELETED") return "DELETED";
+    if (artifact.status !== "PENDING" && artifact.status !== "UPLOADING") return "CONFLICT";
+    this.artifacts.set(artifactId, { ...artifact, status: "DELETING" });
+    const capacity = this.sourceCapacities.get(artifactId);
+    if (capacity && !capacity.released) {
+      this.sourceCapacities.set(artifactId, {
+        ...capacity,
+        observedSizeBytes: 0,
+        remainingBytes: capacity.input.sizeBytes,
+      });
+    }
+    return "CLAIMED";
+  }
+
+  async markSourceDeleted(artifactId: string): Promise<boolean> {
     const artifact = this.artifacts.get(artifactId);
     if (!artifact || artifact.kind !== "SOURCE") throw new Error("Source cannot be marked deleted");
+    if (artifact.status === "DELETED") return false;
+    if (artifact.status !== "DELETING") throw new Error("Source cannot be marked deleted");
     this.artifacts.set(artifactId, { ...artifact, status: "DELETED" });
+    this.releaseSourceCapacity(artifactId);
     this.updateProject(artifact.projectId, { sourceStatus: "NO_SOURCE" });
+    return true;
   }
 
   async getUsage(provider: "DRIVE" | "NEON"): Promise<UsageSnapshot | null> {
@@ -249,14 +427,23 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return snapshot ? structuredClone(snapshot) : null;
   }
 
-  async saveUsage(snapshot: UsageSnapshot): Promise<void> {
-    this.usage.set(snapshot.provider, structuredClone(snapshot));
+  async saveUsage(snapshot: UsageSnapshot): Promise<UsageSnapshot> {
+    const current = this.usage.get(snapshot.provider);
+    const retained = current === undefined || snapshot.observedAt > current.observedAt
+      ? structuredClone(snapshot)
+      : current;
+    this.usage.set(snapshot.provider, structuredClone(retained));
+    return structuredClone(retained);
   }
 
   async appManagedDriveBytes(): Promise<number> {
     return [...this.artifacts.values()]
       .filter((artifact) => artifact.status !== "DELETED")
-      .reduce((total, artifact) => total + (artifact.actualSizeBytes ?? artifact.expectedSizeBytes), 0);
+      .reduce((total, artifact) => total + (
+        artifact.status === "READY"
+          ? artifact.actualSizeBytes ?? 0
+          : this.sourceCapacities.get(artifact.id)?.observedSizeBytes ?? 0
+      ), 0);
   }
 
   async databaseUsedBytes(): Promise<number> {

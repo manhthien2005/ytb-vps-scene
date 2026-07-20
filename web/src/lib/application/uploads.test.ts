@@ -86,14 +86,20 @@ function repositoryDouble(): Mocked<DriveControlPlaneRepository> {
     hasDriveContent: vi.fn(),
     reserveProject: vi.fn(),
     getProject: vi.fn(),
+    claimProvisioning: vi.fn(),
+    renewProvisioning: vi.fn(),
+    releaseProvisioning: vi.fn(),
     markProjectFailed: vi.fn(),
     completeProjectFolders: vi.fn(),
     listProjects: vi.fn(),
+    reserveSourceCapacity: vi.fn(),
+    observeSourceProgress: vi.fn(),
     reserveSourceArtifact: vi.fn(),
     getArtifact: vi.fn(),
     markArtifactUploading: vi.fn(),
     markSourceReady: vi.fn(),
     markSourceInvalid: vi.fn(),
+    claimSourceDeletion: vi.fn(),
     markSourceDeleted: vi.fn(),
     getUsage: vi.fn(),
     saveUsage: vi.fn(),
@@ -114,6 +120,11 @@ describe("UploadService sessions", () => {
     repository = repositoryDouble();
     repository.getProject.mockResolvedValue(readyProject);
     repository.getArtifact.mockResolvedValue(null);
+    repository.claimProvisioning.mockResolvedValue(true);
+    repository.renewProvisioning.mockResolvedValue(true);
+    repository.releaseProvisioning.mockResolvedValue(undefined);
+    repository.reserveSourceCapacity.mockResolvedValue("RESERVED");
+    repository.observeSourceProgress.mockResolvedValue(validIntent.sizeBytes);
     repository.reserveSourceArtifact.mockImplementation(async (input) => ({
       ...artifact,
       status: "PENDING",
@@ -123,6 +134,8 @@ describe("UploadService sessions", () => {
       mimeType: input.mimeType,
       expectedSizeBytes: input.sizeBytes,
     }));
+    repository.claimSourceDeletion.mockResolvedValue("CLAIMED");
+    repository.markSourceDeleted.mockResolvedValue(true);
     access = { getAccessToken: vi.fn().mockResolvedValue("access") };
     health = {
       getHealth: vi.fn(),
@@ -137,6 +150,8 @@ describe("UploadService sessions", () => {
       files,
       health,
       maximumBytes: MAXIMUM_BYTES,
+      softPercent: 90,
+      staleAfterSeconds: 900,
     });
   });
 
@@ -149,9 +164,49 @@ describe("UploadService sessions", () => {
       chunkBytes: 8_388_608,
       expiresAt: files.resumableSession.expiresAt,
     });
+    if (!("sessionUri" in result)) throw new Error("expected upload capability");
     expect(JSON.stringify(Object.values(repository).map((method) => method.mock.calls)))
       .not.toContain(result.sessionUri);
     expect(JSON.stringify(repository.recordAudit.mock.calls)).not.toContain(result.sessionUri);
+  });
+
+  it("allows only one concurrent placeholder and session provisioner per source", async () => {
+    let ownerToken: string | undefined;
+    repository.claimProvisioning.mockImplementation(async (_kind, _resourceId, claimToken) => {
+      ownerToken ??= claimToken;
+      return claimToken === ownerToken;
+    });
+    repository.renewProvisioning.mockImplementation(async (_kind, _resourceId, claimToken) => (
+      claimToken === ownerToken
+    ));
+    let releasePlaceholder!: () => void;
+    const placeholderBlocked = new Promise<void>((resolve) => {
+      releasePlaceholder = resolve;
+    });
+    const ensureSourceFile = files.ensureSourceFile.bind(files);
+    vi.spyOn(files, "ensureSourceFile").mockImplementation(async (...args) => {
+      const fileId = await ensureSourceFile(...args);
+      await placeholderBlocked;
+      return fileId;
+    });
+
+    const first = service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW });
+    await vi.waitFor(() => expect(files.ensureSourceFileCalls).toHaveLength(1));
+    const second = service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW });
+    const settled = Promise.allSettled([first, second]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(files.ensureSourceFileCalls).toHaveLength(1);
+    releasePlaceholder();
+    const results = await settled;
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "fulfilled" }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "DRIVE_TEMPORARILY_UNAVAILABLE", status: 503 }),
+      }),
+    ]));
+    expect(files.resumableSessionCalls).toHaveLength(1);
   });
 
   it("uses the project UUID as the one-source artifact UUID", async () => {
@@ -164,12 +219,15 @@ describe("UploadService sessions", () => {
       parentId: readyProject.driveInputFolderId,
       normalizedExtension: "mp4",
     });
-    expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(expect.objectContaining({
-      artifactId: PROJECT_ID,
-      projectId: PROJECT_ID,
-      driveFileId: SOURCE_FILE_ID,
-      driveParentId: INPUT_FOLDER_ID,
-    }));
+    expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactId: PROJECT_ID,
+        projectId: PROJECT_ID,
+        driveFileId: SOURCE_FILE_ID,
+        driveParentId: INPUT_FOLDER_ID,
+      }),
+      expect.any(String),
+    );
   });
 
   it.each<readonly [string, Project | null]>([
@@ -206,6 +264,7 @@ describe("UploadService sessions", () => {
     expect(health.assertUploadAllowed).toHaveBeenCalledWith(MAXIMUM_BYTES, NOW);
     expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(
       expect.objectContaining({ sizeBytes: MAXIMUM_BYTES }),
+      expect.any(String),
     );
   });
 
@@ -275,6 +334,46 @@ describe("UploadService sessions", () => {
     expect(repository.reserveSourceArtifact).not.toHaveBeenCalled();
   });
 
+  it("finalizes exact provider metadata during renewal without creating another session", async () => {
+    repository.getArtifact.mockResolvedValue({ ...artifact, status: "UPLOADING" });
+    files.file = exactRemoteFile();
+
+    await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
+      .resolves.toEqual({
+        artifactId: PROJECT_ID,
+        status: "SOURCE_READY",
+        actualSizeBytes: validIntent.sizeBytes,
+      });
+
+    expect(repository.observeSourceProgress).toHaveBeenCalledWith(PROJECT_ID, validIntent.sizeBytes);
+    expect(repository.markSourceReady).toHaveBeenCalledWith(PROJECT_ID, validIntent.sizeBytes, NOW);
+    expect(files.resumableSessionCalls).toHaveLength(0);
+    expect(repository.recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "UPLOAD_COMPLETED",
+      targetId: PROJECT_ID,
+    }));
+  });
+
+  it("replays terminal READY metadata when the prior renewal response was lost", async () => {
+    repository.getArtifact.mockResolvedValue({
+      ...artifact,
+      status: "READY",
+      actualSizeBytes: validIntent.sizeBytes,
+    });
+
+    await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
+      .resolves.toEqual({
+        artifactId: PROJECT_ID,
+        status: "SOURCE_READY",
+        actualSizeBytes: validIntent.sizeBytes,
+      });
+
+    expect(health.assertUploadAllowed).not.toHaveBeenCalled();
+    expect(access.getAccessToken).not.toHaveBeenCalled();
+    expect(files.inspectFileCalls).toHaveLength(0);
+    expect(repository.markSourceReady).not.toHaveBeenCalled();
+  });
+
   it("creates a fresh placeholder after the prior source was cancelled", async () => {
     repository.getArtifact.mockResolvedValue({ ...artifact, status: "DELETED" });
     files.sourceFileId = "replacement-source-file-001";
@@ -285,10 +384,13 @@ describe("UploadService sessions", () => {
     expect(health.assertUploadAllowed).toHaveBeenCalledWith(validIntent.sizeBytes, NOW);
     expect(files.inspectFileCalls).toHaveLength(0);
     expect(files.ensureSourceFileCalls).toHaveLength(1);
-    expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(expect.objectContaining({
-      artifactId: PROJECT_ID,
-      driveFileId: "replacement-source-file-001",
-    }));
+    expect(repository.reserveSourceArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactId: PROJECT_ID,
+        driveFileId: "replacement-source-file-001",
+      }),
+      expect.any(String),
+    );
     expect(files.resumableSessionCalls[0]?.input).toMatchObject({
       fileId: "replacement-source-file-001",
     });
@@ -512,6 +614,19 @@ describe("UploadService sessions", () => {
     });
   });
 
+  it("cancels an exact owned source even when its current size is lower than a prior observation", async () => {
+    repository.getArtifact.mockResolvedValue({ ...artifact, status: "PENDING" });
+    repository.observeSourceProgress.mockRejectedValue(new Error("lower observation"));
+    files.file = exactRemoteFile(0);
+
+    await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .resolves.toEqual({ status: "CANCELLED" });
+
+    expect(repository.observeSourceProgress).not.toHaveBeenCalled();
+    expect(repository.claimSourceDeletion).toHaveBeenCalledWith(PROJECT_ID);
+    expect(files.deleteFileCalls).toHaveLength(1);
+  });
+
   it("returns cancellation idempotently for DELETED without provider calls or another audit", async () => {
     repository.getArtifact.mockResolvedValue({ ...artifact, status: "DELETED" });
 
@@ -551,31 +666,48 @@ describe("UploadService sessions", () => {
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
-  it("does not delete when completion wins during cancellation inspection", async () => {
-    repository.getArtifact
-      .mockResolvedValueOnce(artifact)
-      .mockResolvedValueOnce({
-        ...artifact,
-        status: "READY",
-        actualSizeBytes: artifact.expectedSizeBytes,
-      });
+  it("does not delete when completion wins immediately before the deletion claim", async () => {
+    repository.getArtifact.mockResolvedValue(artifact);
+    repository.claimSourceDeletion.mockResolvedValue("CONFLICT");
     files.file = exactRemoteFile();
 
     await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
       .rejects.toMatchObject({ code: "UPLOAD_REMOTE_MISMATCH" });
-    expect(files.inspectFileCalls).toHaveLength(1);
+    expect(repository.claimSourceDeletion).toHaveBeenCalledWith(PROJECT_ID);
     expect(files.deleteFileCalls).toHaveLength(0);
     expect(repository.markSourceDeleted).not.toHaveBeenCalled();
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
-  it("preserves pending cancellation state on provider failure", async () => {
+  it("reconciles deletion after the remote delete succeeds but database finalization fails", async () => {
+    repository.getArtifact
+      .mockResolvedValueOnce(artifact)
+      .mockResolvedValueOnce({ ...artifact, status: "DELETING" });
+    repository.markSourceDeleted
+      .mockRejectedValueOnce(new Error("database unavailable"))
+      .mockResolvedValueOnce(true);
+    files.file = exactRemoteFile(262_144);
+
+    await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .rejects.toThrow("database unavailable");
+    await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .resolves.toEqual({ status: "CANCELLED" });
+
+    expect(repository.claimSourceDeletion).toHaveBeenCalledOnce();
+    expect(files.inspectFileCalls).toHaveLength(1);
+    expect(files.deleteFileCalls).toHaveLength(2);
+    expect(repository.markSourceDeleted).toHaveBeenCalledTimes(2);
+    expect(repository.recordAudit).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the deletion claim reconcilable when the provider delete fails", async () => {
     repository.getArtifact.mockResolvedValue(artifact);
     const providerError = new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
     files.deleteFileError = providerError;
 
     await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
       .rejects.toBe(providerError);
+    expect(repository.claimSourceDeletion).toHaveBeenCalledWith(PROJECT_ID);
     expect(repository.markSourceDeleted).not.toHaveBeenCalled();
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });

@@ -67,6 +67,8 @@ function uploadService(env: ServerEnv): UploadService {
     files,
     health,
     maximumBytes: env.driveUploadMaxBytes,
+    softPercent: env.freeTierSoftPercent,
+    staleAfterSeconds: env.quotaStaleAfterSeconds,
   });
 }
 
@@ -88,6 +90,13 @@ export async function POST(request: NextRequest, context: RouteContext) {
       intent,
       now: new Date(),
     });
+    if ("status" in result) {
+      return NextResponse.json({
+        artifactId: result.artifactId,
+        status: result.status,
+        actualSizeBytes: result.actualSizeBytes,
+      }, { headers: SESSION_HEADERS });
+    }
     return NextResponse.json({
       artifactId: result.artifactId,
       sessionUri: result.sessionUri,

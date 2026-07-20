@@ -817,6 +817,36 @@ describe("ResumableUploader", () => {
     },
   );
 
+  it("accepts terminal metadata from renewal without creating or using another capability", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file, { nextOffset: 262_144 });
+    const store = new MemoryUploadSessionStore();
+    await store.put(session);
+    const fetcher = queuedFetcher(response(404));
+    const api = controlPlaneApi();
+    vi.mocked(api.renewSession).mockResolvedValue({
+      artifactId: session.artifactId,
+      status: "SOURCE_READY",
+      actualSizeBytes: file.size,
+    } as unknown as Awaited<ReturnType<UploadControlPlaneApi["renewSession"]>>);
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store,
+      api,
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await uploader.resume(file, session);
+
+    expect(api.renewSession).toHaveBeenCalledOnce();
+    expect(api.complete).not.toHaveBeenCalled();
+    expect(fetcher.requests).toHaveLength(1);
+    expect(await store.get(session.projectId, session.artifactId)).toBeNull();
+    expect(uploader.snapshot()).toMatchObject({ phase: "READY", committedBytes: file.size });
+  });
+
   it("delays a 429 retry with bounded jitter", async () => {
     const file = fileOfSize();
     const session = sessionFor(file);

@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Artifact, UploadIntent, UploadIntentInput, VerifiedDriveFile } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
@@ -11,12 +12,18 @@ import type { FreeTierHealthService } from "./free-tier-health";
 const CHUNK_BYTES = 8_388_608 as const;
 const uuid = z.string().uuid();
 
-export type UploadSessionResult = Readonly<{
-  artifactId: string;
-  sessionUri: string;
-  chunkBytes: 8_388_608;
-  expiresAt: string;
-}>;
+export type UploadSessionResult =
+  | Readonly<{
+      artifactId: string;
+      sessionUri: string;
+      chunkBytes: 8_388_608;
+      expiresAt: string;
+    }>
+  | Readonly<{
+      artifactId: string;
+      status: "SOURCE_READY";
+      actualSizeBytes: number;
+    }>;
 
 export type UploadCompletionResult =
   | Readonly<{ status: "SOURCE_READY"; actualSizeBytes: number }>
@@ -46,10 +53,26 @@ type UploadDependencies = Readonly<{
   files: DriveFilesPort;
   health: FreeTierHealthService;
   maximumBytes: number;
+  softPercent: number;
+  staleAfterSeconds: number;
 }>;
 
 function remoteMismatch(): AppError {
   return new AppError("UPLOAD_REMOTE_MISMATCH", 409);
+}
+
+function rejectCapacity(outcome: Awaited<ReturnType<DriveControlPlaneRepository["reserveSourceCapacity"]>>): never {
+  if (outcome === "CONFLICT") throw remoteMismatch();
+  if (outcome === "DRIVE_STORAGE_HIGH" || outcome === "NEON_STORAGE_HIGH") {
+    throw new AppError(outcome, 409);
+  }
+  if (outcome === "DRIVE_TEMPORARILY_UNAVAILABLE") {
+    throw new AppError(outcome, 503);
+  }
+  if (outcome === "DRIVE_QUOTA_STALE" || outcome === "QUOTA_INVALID") {
+    throw new AppError(outcome, 503);
+  }
+  throw new AppError("QUOTA_INVALID", 503);
 }
 
 function expectedSourceProperties(projectId: string, artifactId: string) {
@@ -126,6 +149,23 @@ function matchingReservation(
     artifact.driveFileId === fileId;
 }
 
+function matchingReadyArtifact(
+  artifact: Artifact,
+  projectId: string,
+  inputFolderId: string,
+  intent: UploadIntent,
+): boolean {
+  return artifact.id === projectId &&
+    artifact.projectId === projectId &&
+    artifact.kind === "SOURCE" &&
+    artifact.status === "READY" &&
+    artifact.driveParentId === inputFolderId &&
+    artifact.displayName === intent.fileName &&
+    artifact.mimeType === intent.mimeType &&
+    artifact.expectedSizeBytes === intent.sizeBytes &&
+    artifact.actualSizeBytes === intent.sizeBytes;
+}
+
 function validateStoredArtifact(
   artifact: Artifact | null,
   projectId: string,
@@ -143,16 +183,6 @@ function validateStoredArtifact(
     throw remoteMismatch();
   }
   return artifact;
-}
-
-function samePendingArtifact(current: Artifact, inspected: Artifact): boolean {
-  return (current.status === "PENDING" || current.status === "UPLOADING") &&
-    current.actualSizeBytes === null &&
-    current.driveFileId === inspected.driveFileId &&
-    current.driveParentId === inspected.driveParentId &&
-    current.displayName === inspected.displayName &&
-    current.mimeType === inspected.mimeType &&
-    current.expectedSizeBytes === inspected.expectedSizeBytes;
 }
 
 function parseResourceIds(projectId: string, artifactId: string): Readonly<{
@@ -197,73 +227,148 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
       }
 
       const artifactId = projectId;
-      const existing = await dependencies.repository.getArtifact(projectId, artifactId);
-      const accessToken = await dependencies.access.getAccessToken();
-      let selected: Artifact;
-      const replaceDeleted = existing !== null &&
-        existing.id === artifactId &&
-        existing.projectId === projectId &&
-        existing.kind === "SOURCE" &&
-        existing.status === "DELETED";
+      const claimToken = randomUUID();
+      if (!await dependencies.repository.claimProvisioning("SOURCE", artifactId, claimToken)) {
+        throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+      }
+      try {
+        const existing = await dependencies.repository.getArtifact(projectId, artifactId);
+        if (existing !== null && matchingReadyArtifact(
+          existing,
+          projectId,
+          project.driveInputFolderId,
+          intent,
+        )) {
+          return {
+            artifactId,
+            status: "SOURCE_READY",
+            actualSizeBytes: intent.sizeBytes,
+          };
+        }
+        let selected: Artifact;
+        const replaceDeleted = existing !== null &&
+          existing.id === artifactId &&
+          existing.projectId === projectId &&
+          existing.kind === "SOURCE" &&
+          existing.status === "DELETED";
 
-      if (existing === null || replaceDeleted) {
-        await dependencies.health.assertUploadAllowed(intent.sizeBytes, input.now);
-        const driveFileId = await dependencies.files.ensureSourceFile(accessToken, {
-          ...intent,
+        if (existing !== null && !replaceDeleted && !matchingLiveArtifact(
+          existing,
           projectId,
-          artifactId,
-          parentId: project.driveInputFolderId,
-        });
-        selected = await dependencies.repository.reserveSourceArtifact({
-          ...intent,
-          artifactId,
-          projectId,
-          driveFileId,
-          driveParentId: project.driveInputFolderId,
-        });
-        if (!matchingReservation(
-          selected,
-          projectId,
-          driveFileId,
           project.driveInputFolderId,
           intent,
         )) {
           throw remoteMismatch();
         }
-      } else {
-        if (!matchingLiveArtifact(existing, projectId, project.driveInputFolderId, intent)) {
-          throw remoteMismatch();
-        }
-        await dependencies.health.assertUploadAllowed(0, input.now);
-        const remote = await dependencies.files.inspectFile(accessToken, existing.driveFileId);
-        classifyEvidence(existing, remote);
-        selected = existing;
-      }
 
-      await dependencies.repository.markArtifactUploading(artifactId);
-      const session = await dependencies.files.createResumableUpdateSession(accessToken, {
-        fileId: selected.driveFileId,
-        mimeType: selected.mimeType,
-        sizeBytes: selected.expectedSizeBytes,
-      });
-      await dependencies.repository.recordAudit({
-        eventType: "UPLOAD_SESSION_CREATED",
-        targetId: artifactId,
-        actorClass: "admin",
-        payload: {
-          projectId,
+        await dependencies.health.assertUploadAllowed(
+          existing === null || replaceDeleted ? intent.sizeBytes : 0,
+          input.now,
+        );
+        const capacity = await dependencies.repository.reserveSourceCapacity({
           artifactId,
-          expectedSizeBytes: selected.expectedSizeBytes,
+          projectId,
+          driveParentId: project.driveInputFolderId,
+          fileName: intent.fileName,
+          mimeType: intent.mimeType,
+          sizeBytes: intent.sizeBytes,
+          claimToken,
+          now: input.now,
+          softPercent: dependencies.softPercent,
+          staleAfterSeconds: dependencies.staleAfterSeconds,
+        });
+        if (capacity !== "RESERVED" && capacity !== "EXISTING") rejectCapacity(capacity);
+        const accessToken = await dependencies.access.getAccessToken();
+
+        if (existing === null || replaceDeleted) {
+          if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
+            throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+          }
+          const driveFileId = await dependencies.files.ensureSourceFile(accessToken, {
+            ...intent,
+            projectId,
+            artifactId,
+            parentId: project.driveInputFolderId,
+          });
+          selected = await dependencies.repository.reserveSourceArtifact({
+            ...intent,
+            artifactId,
+            projectId,
+            driveFileId,
+            driveParentId: project.driveInputFolderId,
+          }, claimToken);
+          if (!matchingReservation(
+            selected,
+            projectId,
+            driveFileId,
+            project.driveInputFolderId,
+            intent,
+          )) {
+            throw remoteMismatch();
+          }
+        } else {
+          const remote = await dependencies.files.inspectFile(accessToken, existing.driveFileId);
+          const evidence = classifyEvidence(existing, remote);
+          if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
+            throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+          }
+          await dependencies.repository.observeSourceProgress(existing.id, remote.sizeBytes);
+          if (evidence === "READY") {
+            if (existing.status === "PENDING") {
+              await dependencies.repository.markArtifactUploading(existing.id);
+            }
+            await dependencies.repository.markSourceReady(
+              existing.id,
+              existing.expectedSizeBytes,
+              input.now,
+            );
+            await dependencies.repository.recordAudit({
+              eventType: "UPLOAD_COMPLETED",
+              targetId: existing.id,
+              actorClass: "admin",
+              payload: auditPayload(existing, "READY"),
+            });
+            return {
+              artifactId: existing.id,
+              status: "SOURCE_READY",
+              actualSizeBytes: existing.expectedSizeBytes,
+            };
+          }
+          selected = existing;
+        }
+
+        if (!await dependencies.repository.renewProvisioning("SOURCE", artifactId, claimToken)) {
+          throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+        }
+
+        await dependencies.repository.markArtifactUploading(artifactId);
+        const session = await dependencies.files.createResumableUpdateSession(accessToken, {
+          fileId: selected.driveFileId,
           mimeType: selected.mimeType,
-          status: "UPLOADING",
-        },
-      });
-      return {
-        artifactId,
-        sessionUri: session.sessionUri,
-        chunkBytes: CHUNK_BYTES,
-        expiresAt: session.expiresAt,
-      };
+          sizeBytes: selected.expectedSizeBytes,
+        });
+        await dependencies.repository.recordAudit({
+          eventType: "UPLOAD_SESSION_CREATED",
+          targetId: artifactId,
+          actorClass: "admin",
+          payload: {
+            projectId,
+            artifactId,
+            expectedSizeBytes: selected.expectedSizeBytes,
+            mimeType: selected.mimeType,
+            status: "UPLOADING",
+          },
+        });
+        return {
+          artifactId,
+          sessionUri: session.sessionUri,
+          chunkBytes: CHUNK_BYTES,
+          expiresAt: session.expiresAt,
+        };
+      } finally {
+        await dependencies.repository.releaseProvisioning("SOURCE", artifactId, claimToken)
+          .catch(() => undefined);
+      }
     },
 
     async complete(input) {
@@ -306,6 +411,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         });
         throw error;
       }
+      await dependencies.repository.observeSourceProgress(artifact.id, remote.sizeBytes);
       if (evidence === "PENDING") return { status: "UPLOAD_PENDING", retryAfterMs: 1_000 };
 
       if (artifact.status === "PENDING") {
@@ -333,30 +439,31 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         ids.artifactId,
       );
       if (artifact.status === "DELETED") return { status: "CANCELLED" };
-      if (
+      if (artifact.status !== "DELETING" && (
         (artifact.status !== "PENDING" && artifact.status !== "UPLOADING") ||
         artifact.actualSizeBytes !== null
-      ) {
+      )) {
         throw remoteMismatch();
       }
 
       const accessToken = await dependencies.access.getAccessToken();
-      const remote = await dependencies.files.inspectFile(accessToken, artifact.driveFileId);
-      classifyEvidence(artifact, remote);
-      const current = validateStoredArtifact(
-        await dependencies.repository.getArtifact(ids.projectId, ids.artifactId),
-        ids.projectId,
-        ids.artifactId,
-      );
-      if (!samePendingArtifact(current, artifact)) throw remoteMismatch();
+      if (artifact.status !== "DELETING") {
+        const remote = await dependencies.files.inspectFile(accessToken, artifact.driveFileId);
+        classifyEvidence(artifact, remote);
+        const claim = await dependencies.repository.claimSourceDeletion(artifact.id);
+        if (claim === "CONFLICT") throw remoteMismatch();
+        if (claim === "DELETED") return { status: "CANCELLED" };
+      }
       await dependencies.files.deleteFile(accessToken, artifact.driveFileId);
-      await dependencies.repository.markSourceDeleted(artifact.id);
-      await dependencies.repository.recordAudit({
-        eventType: "UPLOAD_CANCELLED",
-        targetId: artifact.id,
-        actorClass: "admin",
-        payload: auditPayload(artifact, "DELETED"),
-      });
+      const changed = await dependencies.repository.markSourceDeleted(artifact.id);
+      if (changed) {
+        await dependencies.repository.recordAudit({
+          eventType: "UPLOAD_CANCELLED",
+          targetId: artifact.id,
+          actorClass: "admin",
+          payload: auditPayload(artifact, "DELETED"),
+        });
+      }
       return { status: "CANCELLED" };
     },
   };

@@ -21,7 +21,7 @@ export type Artifact = Readonly<{
   id: string;
   projectId: string;
   kind: "SOURCE" | "CHECKPOINT" | "OUTPUT";
-  status: "PENDING" | "UPLOADING" | "READY" | "INVALID" | "DELETED";
+  status: "PENDING" | "UPLOADING" | "DELETING" | "READY" | "INVALID" | "DELETED";
   driveFileId: string;
   driveParentId: string;
   displayName: string;

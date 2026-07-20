@@ -57,7 +57,7 @@ create table if not exists artifacts (
   id text primary key check (id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
   project_id text not null references projects(id),
   kind text not null check (kind in ('SOURCE','CHECKPOINT','OUTPUT')),
-  status text not null check (status in ('PENDING','UPLOADING','READY','INVALID','DELETED')),
+  status text not null check (status in ('PENDING','UPLOADING','DELETING','READY','INVALID','DELETED')),
   drive_file_id text not null check (length(drive_file_id) between 10 and 256),
   drive_parent_id text not null check (length(drive_parent_id) between 10 and 256),
   display_name text not null check (display_name = btrim(display_name) and length(display_name) between 1 and 255),
@@ -146,3 +146,212 @@ create table if not exists usage_guards (
 );
 
 insert into schema_migrations(version) values (2) on conflict (version) do nothing;
+
+-- migration v3: cancellation claims must work on databases created before DELETING existed
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 3) then
+    alter table artifacts drop constraint if exists artifacts_status_check;
+    alter table artifacts add constraint artifacts_status_check check (
+      status in ('PENDING','UPLOADING','DELETING','READY','INVALID','DELETED')
+    );
+  end if;
+end $$;
+
+insert into schema_migrations(version) values (3) on conflict (version) do nothing;
+
+create table if not exists drive_provisioning_claims (
+  resource_kind text not null check (resource_kind in ('PROJECT','SOURCE')),
+  resource_id text not null check (resource_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  claim_token text not null check (claim_token ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key(resource_kind, resource_id)
+);
+create index if not exists drive_provisioning_claims_expires_at_idx
+  on drive_provisioning_claims(expires_at);
+
+insert into schema_migrations(version) values (4) on conflict (version) do nothing;
+
+create table if not exists drive_upload_reservations (
+  artifact_id text primary key check (artifact_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  project_id text not null unique references projects(id),
+  drive_parent_id text not null check (length(drive_parent_id) between 10 and 256),
+  display_name text not null check (display_name = btrim(display_name) and length(display_name) between 1 and 255),
+  mime_type text not null check (mime_type = btrim(mime_type) and length(mime_type) between 1 and 127),
+  expected_size_bytes bigint not null check (expected_size_bytes between 1 and 1099511627776),
+  observed_size_bytes bigint not null default 0 check (observed_size_bytes >= 0),
+  remaining_bytes bigint not null check (remaining_bytes >= 0),
+  released_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (observed_size_bytes <= expected_size_bytes),
+  check (
+    (released_at is null and observed_size_bytes + remaining_bytes = expected_size_bytes)
+    or (released_at is not null and remaining_bytes = 0)
+  )
+);
+
+insert into drive_upload_reservations(
+  artifact_id,project_id,drive_parent_id,display_name,mime_type,
+  expected_size_bytes,observed_size_bytes,remaining_bytes
+)
+select
+  id,project_id,drive_parent_id,display_name,mime_type,
+  expected_size_bytes,0,expected_size_bytes
+from artifacts
+where kind='SOURCE' and status in ('PENDING','UPLOADING')
+on conflict(artifact_id) do nothing;
+
+create or replace function reserve_drive_upload_capacity(
+  p_artifact_id text,
+  p_project_id text,
+  p_drive_parent_id text,
+  p_display_name text,
+  p_mime_type text,
+  p_expected_size_bytes bigint,
+  p_claim_token text,
+  p_now timestamptz,
+  p_soft_percent integer,
+  p_stale_after_seconds integer
+) returns text
+language plpgsql as $$
+declare
+  quota usage_guards%rowtype;
+  reservation drive_upload_reservations%rowtype;
+  artifact_status text;
+  has_artifact boolean;
+  has_reservation boolean;
+  replacing_unbound boolean := false;
+  total_remaining numeric;
+  retained_reason text;
+begin
+  if p_soft_percent < 1 or p_soft_percent > 90
+     or p_stale_after_seconds < 0 or p_stale_after_seconds > 900
+     or p_expected_size_bytes < 1 or p_now is null then
+    return 'QUOTA_INVALID';
+  end if;
+
+  select * into quota from usage_guards where provider='DRIVE' for update;
+  if not found then return 'DRIVE_QUOTA_STALE'; end if;
+  if quota.used_bytes > quota.limit_bytes or quota.app_managed_bytes > quota.used_bytes then
+    return 'QUOTA_INVALID';
+  end if;
+  if quota.observed_at > p_now
+     or quota.observed_at < p_now - make_interval(secs => p_stale_after_seconds) then
+    return 'DRIVE_QUOTA_STALE';
+  end if;
+  if quota.mode <> 'READ_WRITE' then
+    retained_reason := quota.reason_codes ->> 0;
+    if retained_reason is null or retained_reason not in (
+      'DRIVE_STORAGE_HIGH','NEON_STORAGE_HIGH','DRIVE_QUOTA_STALE','QUOTA_INVALID'
+    ) then retained_reason := 'QUOTA_INVALID'; end if;
+    return retained_reason;
+  end if;
+  if not exists(
+    select 1 from drive_provisioning_claims
+    where resource_kind='SOURCE' and resource_id=p_artifact_id
+      and claim_token=p_claim_token and expires_at > now()
+  ) then return 'DRIVE_TEMPORARILY_UNAVAILABLE'; end if;
+  if not exists(
+    select 1 from projects
+    where id=p_project_id and status='READY' and drive_input_folder_id=p_drive_parent_id
+  ) then return 'CONFLICT'; end if;
+
+  select status into artifact_status from artifacts where id=p_artifact_id for update;
+  has_artifact := found;
+  select * into reservation
+  from drive_upload_reservations where artifact_id=p_artifact_id for update;
+  has_reservation := found;
+
+  if has_reservation and reservation.released_at is null then
+    if reservation.project_id=p_project_id
+       and reservation.drive_parent_id=p_drive_parent_id
+       and reservation.display_name=p_display_name
+       and reservation.mime_type=p_mime_type
+       and reservation.expected_size_bytes=p_expected_size_bytes
+       and (not has_artifact or artifact_status in ('PENDING','UPLOADING')) then
+      return 'EXISTING';
+    end if;
+    if not has_artifact then
+      replacing_unbound := true;
+    else
+      return 'CONFLICT';
+    end if;
+  end if;
+
+  if has_artifact and artifact_status not in ('INVALID','DELETED') then
+    return 'CONFLICT';
+  end if;
+
+  select coalesce(sum(remaining_bytes),0)::numeric into total_remaining
+  from drive_upload_reservations where released_at is null;
+  if replacing_unbound then
+    total_remaining := total_remaining - reservation.remaining_bytes;
+  end if;
+  if (quota.used_bytes::numeric + total_remaining + p_expected_size_bytes::numeric) * 100
+       >= quota.limit_bytes::numeric * p_soft_percent then
+    return 'DRIVE_STORAGE_HIGH';
+  end if;
+
+  insert into drive_upload_reservations(
+    artifact_id,project_id,drive_parent_id,display_name,mime_type,
+    expected_size_bytes,observed_size_bytes,remaining_bytes,released_at
+  ) values (
+    p_artifact_id,p_project_id,p_drive_parent_id,p_display_name,p_mime_type,
+    p_expected_size_bytes,0,p_expected_size_bytes,null
+  ) on conflict(artifact_id) do update set
+    project_id=excluded.project_id,
+    drive_parent_id=excluded.drive_parent_id,
+    display_name=excluded.display_name,
+    mime_type=excluded.mime_type,
+    expected_size_bytes=excluded.expected_size_bytes,
+    observed_size_bytes=0,
+    remaining_bytes=excluded.expected_size_bytes,
+    released_at=null,
+    updated_at=now();
+  return 'RESERVED';
+end $$;
+
+create or replace function observe_drive_upload_progress(
+  p_artifact_id text,
+  p_observed_size_bytes bigint
+) returns bigint
+language plpgsql as $$
+declare
+  remaining bigint;
+begin
+  perform provider from usage_guards where provider='DRIVE' for update;
+  update drive_upload_reservations set
+    observed_size_bytes=p_observed_size_bytes,
+    remaining_bytes=expected_size_bytes-p_observed_size_bytes,
+    updated_at=now()
+  where artifact_id=p_artifact_id and released_at is null
+    and p_observed_size_bytes between 0 and expected_size_bytes
+  returning remaining_bytes into remaining;
+  return remaining;
+end $$;
+
+create or replace function claim_source_deletion(p_artifact_id text) returns text
+language plpgsql as $$
+declare
+  current_status text;
+begin
+  perform provider from usage_guards where provider='DRIVE' for update;
+  select status into current_status
+  from artifacts where id=p_artifact_id and kind='SOURCE' for update;
+  if not found then return 'CONFLICT'; end if;
+  if current_status in ('PENDING','UPLOADING') then
+    update artifacts set status='DELETING',updated_at=now() where id=p_artifact_id;
+    update drive_upload_reservations set
+      observed_size_bytes=0,remaining_bytes=expected_size_bytes,updated_at=now()
+    where artifact_id=p_artifact_id and released_at is null;
+    return 'CLAIMED';
+  end if;
+  if current_status='DELETING' then return 'RECONCILE'; end if;
+  if current_status='DELETED' then return 'DELETED'; end if;
+  return 'CONFLICT';
+end $$;
+
+insert into schema_migrations(version) values (5) on conflict (version) do nothing;
