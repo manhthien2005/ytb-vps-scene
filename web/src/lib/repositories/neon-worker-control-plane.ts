@@ -276,12 +276,12 @@ export function createWorkerControlPlaneRepository(
 
     async updateJobProgress(input: JobProgress): Promise<"UPDATED" | "LEASE_LOST"> {
       const result = await sql.query(
-        `update jobs j set state=$4,active_stage=$4,progress_percent=$5,updated_at=$6
+        `update jobs j set state=$5,active_stage=$5,progress_percent=$6,updated_at=$7
          from job_leases l
          where j.id=$1 and l.job_id=j.id and l.worker_id=$2 and l.fencing_token=$3
-           and l.expires_at>$6 and j.progress_percent<=$5
+           and l.expires_at>$7 and j.state=$4 and j.progress_percent<=$6
          returning j.id`,
-        [input.jobId, input.workerId, input.fencingToken, input.state, input.progressPercent, input.now.toISOString()],
+        [input.jobId, input.workerId, input.fencingToken, input.fromState, input.state, input.progressPercent, input.now.toISOString()],
       );
       return result.rows.length === 1 ? "UPDATED" : "LEASE_LOST";
     },

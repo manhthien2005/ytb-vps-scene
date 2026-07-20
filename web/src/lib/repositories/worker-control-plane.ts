@@ -50,6 +50,7 @@ export type JobProgress = Readonly<{
   workerId: string;
   jobId: string;
   fencingToken: number;
+  fromState: JobState;
   state: JobState;
   progressPercent: number;
   now: Date;
