@@ -34,7 +34,7 @@ describe("createProjectService", () => {
       outcome: "REPLAYED",
       project: { id: reserved.project.id, status: "READY" },
     });
-    expect(files.ensureProjectFolders).toHaveBeenCalledWith("access", reserved.project.id);
+    expect(files.ensureProjectFolders).toHaveBeenCalledWith("access", reserved.project.id, "Test 1");
   });
 
   it("returns a ready replay without calling Drive", async () => {

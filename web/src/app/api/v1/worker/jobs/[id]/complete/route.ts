@@ -7,6 +7,7 @@ import { requireWorkerSession } from "@/lib/http/worker-auth";
 import { createConfiguredDrive } from "@/lib/application/configured-drive";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
+import { outputPartFileName } from "@/lib/domain/output-part";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -41,7 +42,7 @@ export async function POST(request: NextRequest, context: Context) {
     const propertiesMatch = Object.keys(file.appProperties).sort().join("\u0000") === Object.keys(expectedProperties).sort().join("\u0000") &&
       Object.entries(expectedProperties).every(([key, value]) => file.appProperties[key] === value);
     if (
-      file.id !== body.driveFileId || file.name !== "Part_01_of_01.mp4" || file.mimeType !== "video/mp4" ||
+      file.id !== body.driveFileId || file.name !== outputPartFileName(1, 1) || file.mimeType !== "video/mp4" ||
       file.sizeBytes !== body.sizeBytes || file.trashed || file.parentIds.length !== 1 || file.parentIds[0] !== execution.outputParentId || !propertiesMatch
     ) throw new AppError("DRIVE_REMOTE_MISMATCH", 502);
     const outcome = await repository.completeOutput({

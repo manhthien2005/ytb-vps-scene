@@ -5,6 +5,7 @@ import type { UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
 import { parseDriveResumableSessionUri } from "@/lib/domain/resumable-session-uri";
 import { isCanonicalUploadFileName } from "@/lib/domain/upload-filename";
 import type { DriveFilesPort } from "@/lib/ports/drive";
+import { outputPartFileName } from "@/lib/domain/output-part";
 import { googleJson } from "./http";
 
 export const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,appProperties";
@@ -76,6 +77,17 @@ function boundedDriveId(value: unknown): value is string {
   return boundedAscii(value, 1, 256) && !value.includes(" ");
 }
 
+function boundedDriveName(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= 255 && !/[\u0000-\u001F\u007F]/.test(value);
+}
+
+function projectFolderName(projectName: string | undefined, projectId: string): string {
+  if (projectName === undefined) return projectId;
+  const normalized = projectName.trim().replace(/[\\/]+/g, " - ").replace(/\s+/g, " ").slice(0, 160);
+  if (!boundedDriveName(normalized)) throw stableError("DRIVE_PROVIDER_REJECTED");
+  return normalized;
+}
+
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -120,7 +132,7 @@ function parseDriveFile(value: unknown): DriveFile | null {
     !record ||
     !hasOnlyKeys(record, ["id", "name", "mimeType", "size", "parents", "trashed", "appProperties"]) ||
     !boundedDriveId(record.id) ||
-    !boundedAscii(record.name, 1, 255) ||
+    !boundedDriveName(record.name) ||
     !boundedAscii(record.mimeType, 1, 127) ||
     !Array.isArray(record.parents) ||
     record.parents.length !== 1 ||
@@ -454,8 +466,9 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
       return { rootFolderId: root.id };
     },
 
-    async ensureProjectFolders(accessToken, projectId) {
+    async ensureProjectFolders(accessToken, projectId, projectName) {
       validateProjectId(projectId);
+      const filmName = projectFolderName(projectName, projectId);
       const root = await ensureRoot(accessToken);
       const input = await ensureExpected(accessToken, {
         name: "input",
@@ -470,7 +483,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         appProperties: OUTPUT_PROPERTIES,
       });
       const film = await ensureExpected(accessToken, {
-        name: projectId,
+        name: filmName,
         mimeType: FOLDER_MIME,
         parentId: output.id,
         appProperties: projectProperties(projectId, "film"),
@@ -500,7 +513,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
       validateProjectId(input.artifactId);
       if (!boundedDriveId(input.parentId)) throw stableError("DRIVE_PROVIDER_REJECTED");
       const output = await ensureExpected(accessToken, {
-        name: "Part_01_of_01.mp4",
+        name: outputPartFileName(1, 1),
         mimeType: "video/mp4",
         parentId: input.parentId,
         appProperties: outputProperties(input.projectId, input.jobId, input.artifactId),

@@ -24,7 +24,7 @@ import { POST } from "./route";
 describe("POST /api/v1/worker/jobs/[id]/complete", () => {
   it("rejects a remote output whose parent or appProperties do not match the claimed project", async () => {
     repository.getFencedExecution.mockResolvedValue({ projectId: "20000000-0000-4000-8000-000000000001", outputParentId: "drive-project-001" });
-    drive.files.inspectFile.mockResolvedValue({ id: "drive-output-001", name: "Part_01_of_01.mp4", mimeType: "video/mp4", sizeBytes: 1234, parentIds: ["wrong-parent"], trashed: false, appProperties: {} });
+    drive.files.inspectFile.mockResolvedValue({ id: "drive-output-001", name: "part-01-of-01.mp4", mimeType: "video/mp4", sizeBytes: 1234, parentIds: ["wrong-parent"], trashed: false, appProperties: {} });
     const response = await POST(new Request("https://app.example/api/v1/worker/jobs/job-001/complete", {
       method: "POST",
       body: JSON.stringify({ artifactId: "50000000-0000-4000-8000-000000000001", driveFileId: "drive-output-001", fencingToken: 1, sizeBytes: 1234 }),

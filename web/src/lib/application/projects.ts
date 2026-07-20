@@ -67,6 +67,7 @@ export function createProjectService(dependencies: ProjectDependencies): Project
         const folders = await dependencies.files.ensureProjectFolders(
           accessToken,
           reservation.project.id,
+          reservation.project.name,
         );
         const project = await dependencies.repository.completeProjectFolders(
           reservation.project.id,

@@ -98,6 +98,7 @@ export function DriveCard({
 
       {value.accountHint && <p className="account-hint">Tài khoản: <strong>{value.accountHint}</strong></p>}
       <p>{value.rootReady ? "Thư mục YTB-VPS đã sẵn sàng và riêng tư." : "Chưa có thư mục làm việc được xác minh."}</p>
+      {value.rootReady && <div className="drive-folder-list" aria-label="Thư mục Drive được quản lý"><span>YTB-VPS / <strong>input</strong><small>Video nguồn tải lên</small></span><span>YTB-VPS / <strong>output</strong><small>Video render theo tên phim</small></span></div>}
 
       {health.drive && (
         <dl className="usage-grid">

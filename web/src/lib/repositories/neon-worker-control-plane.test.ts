@@ -165,6 +165,8 @@ describe("worker control plane repository", () => {
       },
       outputParentId: "drive-project-001",
       sceneSettings: {
+        version: 1,
+        sourceArtifactId: null,
         sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
         logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
         voice: "vi-VN-HoaiMyNeural",

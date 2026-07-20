@@ -31,6 +31,21 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .attach-control p { max-width: 260px; margin: 0; text-align: right; }
 .status-card { display: grid; gap: 8px; margin: 28px 0; padding: 22px; border: 1px solid #2b4563; border-radius: 18px; background: var(--panel); }
 .status-card span, li span { color: var(--muted); }
+.workflow-stepper { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 24px 0 12px; }
+.workflow-step { display: grid; gap: 5px; justify-items: start; padding: 15px; color: var(--text); border: 1px solid var(--border); background: var(--panel); text-align: left; }
+.workflow-step small { color: var(--muted); font-size: .78rem; font-weight: 500; }
+.workflow-step.active { border-color: var(--accent); box-shadow: 0 0 0 2px #76e6c233; }
+.workflow-step:disabled { color: var(--muted); background: #0a1726; }
+.workflow-summary { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 24px; }
+.workflow-summary span { padding: 8px 12px; border: 1px solid #29415d; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: .86rem; }
+.workflow-panels { display: grid; gap: 20px; }
+.workflow-panel { padding: 20px; border: 1px solid #203a57; border-radius: 22px; background: #091725aa; }
+.workflow-panel-active { border-color: #76e6c288; }
+.workflow-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.workflow-panel-heading p { margin: 0; }
+.workflow-panel-heading h2 { margin: 0; font-size: 1.12rem; }
+.workflow-panel .workspace-grid { margin: 0; }
+.workflow-panel > .workspace-card, .workflow-panel > .recent-jobs { margin: 0; }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, .82fr) minmax(0, 1.18fr); gap: 20px; align-items: start; }
 .workspace-card { min-width: 0; padding: 24px; border: 1px solid var(--border); border-radius: 20px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: 0 18px 48px #0003; }
 .workspace-card h2, .recent-jobs h2 { margin: 4px 0 0; font-size: 1.35rem; }
@@ -40,6 +55,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .connection-connected, .mode-read_write { color: var(--accent); background: #123a31; }
 .connection-reauth_required, .connection-revoke_pending, .mode-read_only { color: var(--warning); background: #463519; }
 .account-hint { overflow-wrap: anywhere; }
+.drive-folder-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+.drive-folder-list span { display: grid; gap: 4px; padding: 12px; border: 1px solid #29415d; border-radius: 12px; background: var(--surface); }
+.drive-folder-list small { color: var(--muted); }
 .usage-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 20px 0; }
 .usage-grid > div { min-width: 0; padding: 12px; border: 1px solid #29415d; border-radius: 12px; background: var(--surface); }
 .usage-grid dt { color: var(--muted); font-size: .78rem; }
@@ -64,6 +82,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .worker-command { display: grid; gap: 10px; margin-top: 18px; padding: 14px; border: 1px solid #466789; border-radius: 14px; background: var(--surface); }
 .worker-command p { margin: 0; }
 .worker-command code { display: block; overflow-x: auto; padding: 12px; border-radius: 10px; color: var(--accent); background: #06101c; white-space: nowrap; }
+.worker-setup-form { display: grid; gap: 9px; margin: 18px 0; }
+.worker-setup-form label { color: var(--muted); font-size: .9rem; font-weight: 800; }
+.worker-setup-form input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #3b5674; border-radius: 10px; color: var(--text); background: #081524; }
 .worker-list { margin: 18px 0 0; }
 .worker-list li { align-items: center; }
 .worker-list li > div { display: grid; gap: 4px; }
@@ -82,9 +103,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
   .dashboard > header, .dashboard li { align-items: stretch; flex-direction: column; }
   .dashboard { width: min(100% - 28px, 1100px); padding: 24px 0; }
   .workspace-grid { grid-template-columns: 1fr; }
+  .workflow-stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .workflow-panel { padding: 14px; }
+  .workflow-panel-heading { align-items: flex-start; flex-direction: column; }
   .scene-toolbar { grid-template-columns: 1fr; }
   .workspace-card { padding: 19px; }
   .usage-grid { grid-template-columns: 1fr; }
+  .drive-folder-list { grid-template-columns: 1fr; }
   .card-heading { align-items: stretch; flex-direction: column; }
   .connection-badge, .mode-badge { align-self: flex-start; }
   .button-row > button { flex: 1 1 150px; }

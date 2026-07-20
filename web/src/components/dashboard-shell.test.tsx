@@ -11,6 +11,17 @@ const health = {
 };
 
 describe("DashboardShell", () => {
+  it("shows the four-step workflow and readiness summary", () => {
+    render(<DashboardShell workerOnline={false} drive={{ status: "CONNECTED", accountHint: null, rootReady: true }} health={health} projects={[]} jobs={[]} workers={[]} />);
+    expect(screen.getByRole("navigation", { name: "Quy trình render" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /1\. Drive/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /2\. VPS/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /3\. Review/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: /4\. Render/ })).toBeVisible();
+    expect(screen.getByText("Nguồn: Chưa có")).toBeVisible();
+    expect(screen.getByText("VPS: Chưa gắn")).toBeVisible();
+  });
+
   it("shows the no-worker empty state and queued jobs", () => {
     render(
       <DashboardShell

@@ -12,6 +12,7 @@ import type {
   WorkerEnrollmentResult,
   WorkerHeartbeat,
 } from "./worker-control-plane";
+import { outputPartFileName } from "@/lib/domain/output-part";
 
 export type WorkerControlPlaneSqlClient = Readonly<{
   query: (text: string, parameters?: unknown[]) => Promise<Readonly<{ rows: Record<string, unknown>[] }>>;
@@ -357,7 +358,7 @@ export function createWorkerControlPlaneRepository(
              display_name,mime_type,expected_size_bytes,checksum_sha256,created_at,updated_at
            )
            select $1,e.project_id,$2,'OUTPUT','PENDING',$5,$6,
-                  'Part_01_of_01.mp4','video/mp4',$7,$8,$9,$9
+                  $10,'video/mp4',$7,$8,$9,$9
            from eligible e where not exists(select 1 from existing)
            on conflict do nothing returning id
          )
@@ -373,6 +374,7 @@ export function createWorkerControlPlaneRepository(
           input.sizeBytes,
           input.checksumSha256,
           input.now.toISOString(),
+          outputPartFileName(1, 1),
         ],
       );
       const outcome = result.rows[0]?.outcome;

@@ -20,7 +20,7 @@ export interface DriveFilesPort {
     permissionId: string; accountHint: string; usedBytes: number; limitBytes: number;
   }>>;
   ensureWorkspace(accessToken: string): Promise<Readonly<{ rootFolderId: string }>>;
-  ensureProjectFolders(accessToken: string, projectId: string): Promise<Readonly<{
+  ensureProjectFolders(accessToken: string, projectId: string, projectName?: string): Promise<Readonly<{
     projectFolderId: string; inputFolderId: string;
   }>>;
   ensureSourceFile(accessToken: string, input: UploadIntent & Readonly<{

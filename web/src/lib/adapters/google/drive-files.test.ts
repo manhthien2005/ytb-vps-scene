@@ -183,9 +183,9 @@ describe("createGoogleDriveFilesAdapter", () => {
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder("drive-output-folder-001", "output", "drive-root-folder-001", outputProperties)))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
-      .mockResolvedValueOnce(jsonResponse(folder("drive-film-folder-001", PROJECT_ID, "drive-output-folder-001", filmProperties)));
+      .mockResolvedValueOnce(jsonResponse(folder("drive-film-folder-001", "Tên phim - Phần 1", "drive-output-folder-001", filmProperties)));
 
-    await expect(adapter(fetcher).ensureProjectFolders(ACCESS_TOKEN, PROJECT_ID)).resolves.toEqual({
+    await expect(adapter(fetcher).ensureProjectFolders(ACCESS_TOKEN, PROJECT_ID, "Tên phim / Phần 1")).resolves.toEqual({
       projectFolderId: "drive-film-folder-001",
       inputFolderId: "drive-input-folder-001",
     });
@@ -204,7 +204,7 @@ describe("createGoogleDriveFilesAdapter", () => {
       appProperties: outputProperties,
     });
     expect(createdFilm).toMatchObject({
-      name: PROJECT_ID,
+      name: "Tên phim - Phần 1",
       parents: ["drive-output-folder-001"],
       appProperties: filmProperties,
     });
@@ -444,7 +444,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     };
     const output = {
       id: "drive-output-file-001",
-      name: "Part_01_of_01.mp4",
+      name: "part-01-of-01.mp4",
       mimeType: "video/mp4",
       size: "0",
       parents: ["drive-project-folder-001"],
@@ -464,7 +464,7 @@ describe("createGoogleDriveFilesAdapter", () => {
 
     const create = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
     expect(create).toEqual({
-      name: "Part_01_of_01.mp4",
+      name: "part-01-of-01.mp4",
       mimeType: "video/mp4",
       parents: ["drive-project-folder-001"],
       appProperties: properties,
