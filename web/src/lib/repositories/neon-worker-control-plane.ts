@@ -165,7 +165,8 @@ export function createWorkerControlPlaneRepository(
       return result.rows[0] ? parseWorkerRow(result.rows[0]) : null;
     },
 
-    async listWorkers(_now: Date): Promise<readonly WorkerView[]> {
+    async listWorkers(now: Date): Promise<readonly WorkerView[]> {
+      void now;
       const result = await sql.query(`select ${WORKER_COLUMNS} from workers order by updated_at desc limit 20`);
       return Object.freeze(result.rows.map(parseWorkerRow));
     },
