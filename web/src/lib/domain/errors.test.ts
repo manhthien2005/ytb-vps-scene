@@ -5,6 +5,17 @@ describe("public application errors", () => {
   it("defines one unique stable code for each public error", () => {
     expect(new Set(PUBLIC_CODES).size).toBe(PUBLIC_CODES.length);
     expect(PUBLIC_CODES).toContain("DRIVE_REMOTE_MISMATCH");
+    expect(PUBLIC_CODES).toEqual(expect.arrayContaining([
+      "WORKER_ENROLLMENT_INVALID",
+      "WORKER_AUTH_REQUIRED",
+      "WORKER_SESSION_EXPIRED",
+      "WORKER_REVOKED",
+      "WORKER_DOCTOR_FAILED",
+      "WORKER_INCOMPATIBLE",
+      "LEASE_LOST",
+      "NO_JOB_AVAILABLE",
+      "JOB_NOT_QUEUEABLE",
+    ]));
   });
 
   it("exposes only the stable code through a route response mapper", () => {

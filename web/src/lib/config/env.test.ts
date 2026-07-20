@@ -14,6 +14,10 @@ const cp2Valid = {
   DRIVE_UPLOAD_MAX_BYTES: "10737418240",
   FREE_TIER_SOFT_PERCENT: "90",
   QUOTA_STALE_AFTER_SECONDS: "900",
+  WORKER_AUTH_KEY_V1: "A".repeat(43),
+  WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+  WORKER_RELEASE_COMMIT: "a".repeat(40),
+  WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
 };
 
 describe("parseServerEnv", () => {
@@ -25,6 +29,14 @@ describe("parseServerEnv", () => {
     const env = parseServerEnv(cp2Valid);
     expect(env.driveUploadMaxBytes).toBe(10_737_418_240);
     expect(env.freeTierSoftPercent).toBe(90);
+  });
+
+  it("accepts the canonical worker release and security configuration", () => {
+    const env = parseServerEnv(cp2Valid);
+    expect(env.workerAuthKeyV1).toHaveLength(43);
+    expect(env.workerReleaseRepository).toBe("https://github.com/Vanvuong2005827/REUP-RENDER.git");
+    expect(env.workerReleaseCommit).toHaveLength(40);
+    expect(env.workerPipelineBridgeVersion).toBe("cp3-control-only");
   });
 
   it("rejects an OpenAI API key to prevent separate billing", () => {
@@ -53,6 +65,10 @@ describe("parseServerEnv", () => {
     ["DRIVE_TOKEN_KEY_V1", "not-canonical"],
     ["FREE_TIER_SOFT_PERCENT", "91"],
     ["QUOTA_STALE_AFTER_SECONDS", "901"],
+    ["WORKER_AUTH_KEY_V1", "not-canonical"],
+    ["WORKER_RELEASE_REPOSITORY", "https://gitlab.com/example/repo.git"],
+    ["WORKER_RELEASE_COMMIT", "A".repeat(40)],
+    ["WORKER_PIPELINE_BRIDGE_VERSION", "contains spaces"],
   ])("rejects unsafe %s", (name, value) => {
     expect(() => parseServerEnv({ ...cp2Valid, [name]: value })).toThrow();
   });
