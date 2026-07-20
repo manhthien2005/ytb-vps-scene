@@ -385,3 +385,64 @@ insert into schema_migrations(version) values (5) on conflict (version) do nothi
 -- migration v6: keep progress and terminal bytes charged until a newer
 -- authoritative Drive usage observation has had a chance to include them
 insert into schema_migrations(version) values (6) on conflict (version) do nothing;
+
+-- migration v7: outbound native worker control, queue, and fenced leases
+create table if not exists worker_enrollment_tokens (
+  token_digest text primary key check (token_digest ~ '^[0-9a-f]{64}$'),
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  revoked_at timestamptz,
+  created_at timestamptz not null default now(),
+  check (not (consumed_at is not null and revoked_at is not null))
+);
+create index if not exists worker_enrollment_tokens_expires_at_idx
+  on worker_enrollment_tokens(expires_at);
+
+create table if not exists workers (
+  id text primary key check (id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  session_digest text not null unique check (session_digest ~ '^[0-9a-f]{64}$'),
+  state text not null check (state in ('SETTING_UP','DOCTOR_FAILED','READY','BUSY','OFFLINE','REVOKED')),
+  account_label text check (account_label is null or (account_label = btrim(account_label) and length(account_label) between 1 and 80)),
+  capabilities jsonb not null check (jsonb_typeof(capabilities) = 'object' and pg_column_size(capabilities) <= 4096),
+  doctor_report jsonb not null check (jsonb_typeof(doctor_report) = 'object' and pg_column_size(doctor_report) <= 4096),
+  session_expires_at timestamptz not null,
+  heartbeat_at timestamptz not null,
+  revoked_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check ((state = 'REVOKED') = (revoked_at is not null))
+);
+create index if not exists workers_heartbeat_at_idx on workers(heartbeat_at desc);
+
+alter table jobs add column if not exists project_id text references projects(id);
+alter table jobs add column if not exists active_stage text;
+alter table jobs add column if not exists error_code text;
+alter table jobs add column if not exists request_key_digest text;
+create unique index if not exists jobs_request_key_digest_idx on jobs(request_key_digest);
+create index if not exists jobs_queue_idx on jobs(created_at) where state = 'QUEUED';
+
+create table if not exists job_leases (
+  job_id text primary key references jobs(id),
+  worker_id text not null references workers(id),
+  fencing_token bigint not null check (fencing_token > 0),
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists job_leases_expires_at_idx on job_leases(expires_at);
+
+create table if not exists job_attempts (
+  id bigint generated always as identity primary key,
+  job_id text not null references jobs(id),
+  worker_id text not null references workers(id),
+  fencing_token bigint not null check (fencing_token > 0),
+  started_at timestamptz not null,
+  ended_at timestamptz,
+  outcome text check (outcome is null or outcome in ('COMPLETED','FAILED','LEASE_LOST','CANCELLED')),
+  error_code text check (error_code is null or error_code ~ '^[A-Z][A-Z0-9_]{0,79}$'),
+  check ((ended_at is null and outcome is null) or (ended_at is not null and outcome is not null))
+);
+create unique index if not exists job_attempts_fence_idx
+  on job_attempts(job_id, fencing_token);
+
+insert into schema_migrations(version) values (7) on conflict (version) do nothing;
