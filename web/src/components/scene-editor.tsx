@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { SceneRectangle, SceneSettings } from "@/lib/domain/scene-settings";
+import { parseSceneSettings, type SceneRectangle, type SceneSettings } from "@/lib/domain/scene-settings";
 
 const DEFAULTS: SceneSettings = {
+  version: 1,
+  sourceArtifactId: null,
   sourceSubtitle: { x: 0.05, y: 0.78, width: 0.9, height: 0.16 },
   logo: { x: 0.78, y: 0.04, width: 0.18, height: 0.16 },
   voice: "vi-VN-HoaiMyNeural",
@@ -28,11 +30,15 @@ export function SceneEditor({ projectId, fetcher = fetch }: { projectId: string 
     fetcher(`/api/v1/projects/${projectId}/scene-settings`).then(async (response) => {
       if (!response.ok) return;
       const body = await response.json() as { settings?: SceneSettings | null };
-      if (body.settings) setSettings(body.settings);
+      if (body.settings) {
+        try { setSettings(parseSceneSettings(body.settings)); } catch { setSettings(DEFAULTS); }
+      }
     }).catch(() => undefined);
   }, [fetcher, projectId]);
 
-  useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
+  useEffect(() => () => {
+    if (videoUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(videoUrl);
+  }, [videoUrl]);
 
   function point(event: React.PointerEvent) {
     const bounds = preview.current?.getBoundingClientRect();
@@ -73,7 +79,7 @@ export function SceneEditor({ projectId, fetcher = fetch }: { projectId: string 
         <input id="scene-video" type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) setVideoUrl(URL.createObjectURL(file)); }} />
       </div>
       <div ref={preview} className="scene-preview" onPointerDown={start} onPointerUp={finish} role="application" aria-label="Kéo để chọn vùng blur">
-        {videoUrl && <video src={videoUrl} controls muted playsInline />}
+        {videoUrl && <video src={videoUrl} controls muted playsInline preload="metadata" />}
         <span className="scene-rectangle scene-subtitle" style={rectangleStyle(settings.sourceSubtitle)} />
         <span className="scene-rectangle scene-logo" style={rectangleStyle(settings.logo)} />
       </div>

@@ -11,6 +11,8 @@ const rectangle = z.object({
 });
 
 const schema = z.object({
+  version: z.literal(1).default(1),
+  sourceArtifactId: z.string().uuid().nullable().default(null),
   sourceSubtitle: rectangle,
   logo: rectangle,
   voice: z.enum(["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]),

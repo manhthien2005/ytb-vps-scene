@@ -10,7 +10,18 @@ describe("scene settings", () => {
       logo: { x: 0, y: 0, width: 0.2, height: 0.2 },
       voice: "vi-VN-HoaiMyNeural",
       rate: 1,
-    })).toMatchObject({ voice: "vi-VN-HoaiMyNeural", rate: 1 });
+    })).toMatchObject({ voice: "vi-VN-HoaiMyNeural", rate: 1, version: 1, sourceArtifactId: null });
+  });
+
+  it("keeps the source artifact reference versioned for local-only review", () => {
+    expect(parseSceneSettings({
+      version: 1,
+      sourceArtifactId: "10000000-0000-4000-8000-000000000001",
+      sourceSubtitle: rect,
+      logo: rect,
+      voice: "vi-VN-NamMinhNeural",
+      rate: 0.95,
+    })).toMatchObject({ version: 1, sourceArtifactId: "10000000-0000-4000-8000-000000000001" });
   });
 
   it.each([

@@ -22,4 +22,19 @@ describe("SceneEditor", () => {
     expect(await screen.findByText("Đã lưu vùng blur và voice.")).toBeVisible();
     expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("scene-settings"), expect.objectContaining({ method: "PUT" }));
   });
+
+  it("previews a selected file locally with metadata preload", () => {
+    const createObjectURL = vi.fn().mockReturnValue("blob:local-preview");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    render(<SceneEditor projectId={null} />);
+    const input = screen.getByLabelText("Video preview");
+    const file = new File(["video"], "episode.mp4", { type: "video/mp4" });
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(createObjectURL).toHaveBeenCalledWith(file);
+    const video = screen.getByRole("application").querySelector("video");
+    expect(video).toHaveAttribute("src", "blob:local-preview");
+    expect(video).toHaveAttribute("preload", "metadata");
+    createObjectURL.mockRestore();
+  });
 });
