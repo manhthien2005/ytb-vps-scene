@@ -1,0 +1,21 @@
+{
+  "name": "ytb-vps-local-connector",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "ssh2": "1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/ssh2": "1.15.5",
+    "tsx": "4.19.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.7"
+  }
+}

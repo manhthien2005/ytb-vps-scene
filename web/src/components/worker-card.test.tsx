@@ -29,4 +29,19 @@ describe("WorkerCard", () => {
     expect(screen.getByText("Đã kết nối · đang chờ cài pipeline media")).toBeVisible();
     expect(screen.queryByText("Sẵn sàng render")).not.toBeInTheDocument();
   });
+
+  it("sends SSH credentials only to the local connector", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ command: "curl -fsSL https://raw.githubusercontent.com/acme/repo/abc/ops/native-v2/bootstrap-worker.sh | sudo bash -s -- 'https://app.example' 'token' 'https://github.com/acme/repo.git' 'abc'", expiresAt: "2026-07-20T08:40:00.000Z" }), { status: 200 }));
+    const connectorFetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ jobId: "job-1" }), { status: 202 }))
+      .mockResolvedValueOnce(new Response("event: progress\ndata: {\"stage\":\"READY\",\"percent\":100,\"message\":\"VPS đã sẵn sàng để render.\"}\n\n", { status: 200 }));
+    render(<WorkerCard workers={[]} fetcher={fetcher} connectorFetcher={connectorFetcher} />);
+    fireEvent.change(screen.getByLabelText("SSH command"), { target: { value: "ssh root@n1.ckey.vn -p 1210" } });
+    fireEvent.change(screen.getByLabelText("Mật khẩu VPS"), { target: { value: "secret-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Kết nối và setup VPS" }));
+    expect(await screen.findByText("VPS đã sẵn sàng để render.")).toBeVisible();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(connectorFetcher).toHaveBeenNthCalledWith(1, "http://127.0.0.1:55871/setup", expect.objectContaining({ method: "POST", body: expect.stringContaining("secret-password") }));
+    expect(fetcher.mock.calls[0]?.[1]?.body).toBeUndefined();
+  });
 });
