@@ -5,7 +5,8 @@ import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { HttpError, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
 import { createJobQueueService } from "@/lib/application/job-queue";
-import { createFreeTierHealthService } from "@/lib/application/free-tier-health";
+import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
+import { createConfiguredFreeTierHealthService } from "@/lib/application/configured-health";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -22,16 +23,10 @@ export async function POST(request: NextRequest, context: Context) {
     const requestKey = request.headers.get("idempotency-key");
     if (requestKey === null) throw new HttpError(400, "INVALID_REQUEST");
     const repository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
+    const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const service = createJobQueueService({
       repository,
-      health: createFreeTierHealthService({
-        repository: repository as never,
-        access: {} as never,
-        files: {} as never,
-        neonLimitBytes: env.neonStorageLimitBytes,
-        softPercent: env.freeTierSoftPercent,
-        staleAfterSeconds: env.quotaStaleAfterSeconds,
-      }),
+      health: createConfiguredFreeTierHealthService(env, driveRepository),
       pipelineBridgeVersion: env.workerPipelineBridgeVersion,
       generateId: crypto.randomUUID,
     });

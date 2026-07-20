@@ -138,6 +138,9 @@ class OfflineSliceRequest:
     proof_checkpoint_id: str = "offline-proof-v1"
     final_checkpoint_id: str = "offline-final-v1"
     fresh_workspace_root: Path | None = None
+    # User-authored static masks from the scene editor.  These are intentionally
+    # immutable for one run and are combined with OCR-derived dynamic masks.
+    blur_regions: tuple[BlurRegion, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -876,6 +879,10 @@ class OfflineSliceRunner:
             )
         if stage is StageName.TRACK:
             ocr = self._document(documents, StageName.OCR, OcrDocument)
+            configured_regions = tuple(
+                BlurRegion(region.kind, FrameInterval(0, ocr.frame_count), region.box)
+                for region in request.blur_regions
+            )
             return TrackDocument(
                 ocr.schema_version,
                 ocr.job_id,
@@ -886,7 +893,7 @@ class OfflineSliceRunner:
                 OCR_ARTIFACT_PATH,
                 self._digest(canonical_document_bytes(ocr)),
                 ocr.cues,
-                tuple(
+                configured_regions + tuple(
                     BlurRegion(RegionKind.DYNAMIC, cue.interval, cue.box)
                     for cue in ocr.cues
                 ),
