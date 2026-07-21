@@ -98,6 +98,23 @@ describe("DashboardShell", () => {
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetcher);
+    const xhr = {
+      abort: vi.fn(),
+      getResponseHeader: vi.fn(() => null),
+      onabort: null,
+      onerror: null,
+      onload: null,
+      open: vi.fn(),
+      send: vi.fn(),
+      setRequestHeader: vi.fn(),
+      status: 200,
+    } as unknown as XMLHttpRequest;
+    vi.mocked(xhr.send).mockImplementation(() => {
+      xhr.onload?.(new ProgressEvent("load"));
+    });
+    vi.stubGlobal("XMLHttpRequest", vi.fn(function XMLHttpRequestMock() {
+      return xhr;
+    }));
     render(<DashboardShell workerOnline={false} drive={{ status: "CONNECTED", accountHint: null, rootReady: true }} health={health} projects={[]} jobs={[]} workers={[]} />);
     const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
 

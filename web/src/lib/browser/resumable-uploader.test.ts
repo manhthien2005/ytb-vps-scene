@@ -575,6 +575,7 @@ describe("ResumableUploader", () => {
     expect(fetcher.requests.every((request) => !request.headers.has("authorization"))).toBe(true);
     expect(fetcher.requests.every((request) => !request.headers.has("content-length"))).toBe(true);
     expect(fetcher.requests.every((request) => request.headers.get("content-type") === file.type)).toBe(true);
+    expect(fetcher.requests.every((request) => request.headers.get("x-upload-content-type") === file.type)).toBe(true);
     expect(fetcher.requests[0]!.body).toHaveProperty("size", 8_388_608);
     expect(fetcher.requests[1]!.body).toHaveProperty("size", 1);
   });
@@ -604,6 +605,7 @@ describe("ResumableUploader", () => {
     await uploader.start(file, session);
 
     expect(fetcher.requests[1]!.headers.get("content-range")).toBe(`*/${file.size}`);
+    expect(fetcher.requests[1]!.headers.get("x-upload-content-type")).toBe(file.type);
     expect(fetcher.requests[1]!.body).toBeNull();
     expect(fetcher.requests[2]!.headers.get("content-range"))
       .toBe(`bytes 262144-${file.size - 1}/${file.size}`);

@@ -256,6 +256,7 @@ export function createResumableUploader(
         const headers = new Headers({
           "content-range": `bytes ${record.nextOffset}-${endExclusive - 1}/${file.size}`,
           "content-type": file.type,
+          "x-upload-content-type": file.type,
         });
         let upload: Response | null = null;
         try {
@@ -455,7 +456,10 @@ export function createResumableUploader(
       try {
         query = await driveFetch(record.sessionUri, {
           method: "PUT",
-          headers: new Headers({ "content-range": `*/${file.size}` }),
+          headers: new Headers({
+            "content-range": `*/${file.size}`,
+            "x-upload-content-type": file.type,
+          }),
         });
       } catch (error) {
         if (error instanceof AppError) throw error;

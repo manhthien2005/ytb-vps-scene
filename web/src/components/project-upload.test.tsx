@@ -70,7 +70,8 @@ describe("ProjectUpload", () => {
         sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
         chunkBytes: 8_388_608,
         expiresAt: "2026-07-26T00:00:00.000Z",
-      }), { status: 200, headers: { "content-type": "application/json" } }));
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 418 }));
     const onProjectsChange = vi.fn();
     const uploaderFactory = vi.fn((_: ResumableUploaderDependencies) => uploader);
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={uploaderFactory} onProjectsChange={onProjectsChange} />);
@@ -112,6 +113,43 @@ describe("ProjectUpload", () => {
       "QUERY_FETCH_REJECTED",
       "QUERY_RANGE_HIDDEN",
     ]);
+
+    const xhr = {
+      abort: vi.fn(),
+      getResponseHeader: vi.fn((name: string) => name.toLowerCase() === "range" ? "bytes=0-7" : null),
+      onabort: null,
+      onerror: null,
+      onload: null,
+      open: vi.fn(),
+      send: vi.fn(),
+      setRequestHeader: vi.fn(),
+      status: 308,
+    } as unknown as XMLHttpRequest;
+    vi.mocked(xhr.send).mockImplementation(() => {
+      xhr.onload?.(new ProgressEvent("load"));
+    });
+    const xhrConstructor = vi.spyOn(globalThis, "XMLHttpRequest").mockImplementation(() => xhr);
+    const driveResponse = await dependencies!.fetcher(
+      "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
+      {
+        method: "PUT",
+        headers: new Headers({
+          "content-range": "bytes 0-7/8",
+          "x-upload-content-type": "video/mp4",
+        }),
+        body: new Blob([new Uint8Array(8)]),
+      },
+    );
+    xhrConstructor.mockRestore();
+    expect(xhr.getResponseHeader).toHaveBeenCalledWith("range");
+    expect(xhr.getResponseHeader("range")).toBe("bytes=0-7");
+    expect(driveResponse.status).toBe(308);
+    expect(driveResponse.headers.get("range")).toBe("bytes=0-7");
+    expect(xhr.open).toHaveBeenCalledWith(
+      "PUT",
+      "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
+      true,
+    );
   });
 
   it("uploads through the coordinator and supports pause/resume controls", async () => {

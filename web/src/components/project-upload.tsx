@@ -13,6 +13,7 @@ import {
   type StoredUploadSession,
   type UploadSessionStore,
 } from "@/lib/browser/upload-store";
+import { createDriveUploadFetcher } from "@/lib/browser/drive-upload-fetcher";
 import {
   canonicalUploadFileName,
   videoTitleFromFileName,
@@ -179,7 +180,7 @@ export function ProjectUpload({
     uploaderRef.current?.dispose();
     if (store === null) throw new Error("INDEXEDDB_UNAVAILABLE");
     const uploader = uploaderFactory({
-      fetcher,
+      fetcher: createDriveUploadFetcher(),
       store,
       api: controlPlaneApi(fetcher),
       now: Date.now,
