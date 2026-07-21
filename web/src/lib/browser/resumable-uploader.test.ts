@@ -767,6 +767,60 @@ describe("ResumableUploader", () => {
     expect(sleep).toHaveBeenCalledWith(1_000);
   });
 
+  it("emits a safe diagnostic when the browser rejects a status query", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const fetcher = queuedFetcher(new TypeError("private browser diagnostic"));
+    fetcher.always(new TypeError("private browser diagnostic"));
+    const diagnostics = vi.fn();
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store: new MemoryUploadSessionStore(),
+      api: controlPlaneApi(),
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+      onDiagnostic: diagnostics,
+    });
+
+    await expect(uploader.resume(file, session)).rejects.toMatchObject({
+      code: "UPLOAD_RETRY_EXHAUSTED",
+    });
+
+    expect(diagnostics).toHaveBeenCalledWith({
+      stage: "query-fetch",
+      outcome: "rejected",
+    });
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private browser diagnostic");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(SESSION_URI);
+  });
+
+  it("emits a safe diagnostic when a status-query 308 Range is not readable", async () => {
+    const file = fileOfSize();
+    const session = sessionFor(file);
+    const fetcher = queuedFetcher(response(308));
+    fetcher.always(new TypeError("private browser diagnostic"));
+    const diagnostics = vi.fn();
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store: new MemoryUploadSessionStore(),
+      api: controlPlaneApi(),
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+      onDiagnostic: diagnostics,
+    });
+
+    await expect(uploader.resume(file, session)).rejects.toBeInstanceOf(AppError);
+
+    expect(diagnostics).toHaveBeenCalledWith({
+      stage: "query-response",
+      status: 308,
+      rangeVisible: false,
+    });
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(SESSION_URI);
+  });
+
   it("delays and retries a rate-limited status query", async () => {
     const file = fileOfSize();
     const session = sessionFor(file);

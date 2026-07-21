@@ -79,6 +79,8 @@ export type ResumableUploaderDependencies = Readonly<{
   onDiagnostic?: (event:
     | Readonly<{ stage: "chunk-fetch"; outcome: "rejected" }>
     | Readonly<{ stage: "chunk-response"; status: 308; rangeVisible: boolean }>
+    | Readonly<{ stage: "query-fetch"; outcome: "rejected" }>
+    | Readonly<{ stage: "query-response"; status: 308; rangeVisible: boolean }>
   ) => void;
 }>;
 
@@ -458,6 +460,10 @@ export function createResumableUploader(
       } catch (error) {
         if (error instanceof AppError) throw error;
         if (disposed || cancelRequested) return;
+        dependencies.onDiagnostic?.({
+          stage: "query-fetch",
+          outcome: "rejected",
+        });
         await recordFailure();
         action = verifying ? "COMPLETE" : "QUERY";
         continue;
@@ -490,7 +496,13 @@ export function createResumableUploader(
       }
       if (query.status !== 308) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       const previousOffset = record.nextOffset;
-      const nextOffset = parseAcknowledgedRange(query.headers.get("range"));
+      const rangeHeader = query.headers.get("range");
+      dependencies.onDiagnostic?.({
+        stage: "query-response",
+        status: 308,
+        rangeVisible: rangeHeader !== null,
+      });
+      const nextOffset = parseAcknowledgedRange(rangeHeader);
       if (nextOffset > file.size) throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       record = { ...record, nextOffset };
       await persist(record);

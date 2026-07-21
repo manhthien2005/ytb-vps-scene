@@ -187,9 +187,15 @@ export function ProjectUpload({
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       onDiagnostic: (event) => {
         console.error("[drive-upload] browser", event);
-        setDiagnostic(event.stage === "chunk-fetch"
-          ? "CHUNK_FETCH_REJECTED"
-          : event.rangeVisible ? "CHUNK_RANGE_VISIBLE" : "CHUNK_RANGE_HIDDEN");
+        if (event.stage === "chunk-fetch") {
+          setDiagnostic("CHUNK_FETCH_REJECTED");
+        } else if (event.stage === "query-fetch") {
+          setDiagnostic("QUERY_FETCH_REJECTED");
+        } else if (event.stage === "chunk-response") {
+          setDiagnostic(event.rangeVisible ? "CHUNK_RANGE_VISIBLE" : "CHUNK_RANGE_HIDDEN");
+        } else {
+          setDiagnostic(event.rangeVisible ? "QUERY_RANGE_VISIBLE" : "QUERY_RANGE_HIDDEN");
+        }
       },
     });
     unsubscribeRef.current = uploader.subscribe((next) => {

@@ -99,12 +99,19 @@ describe("ProjectUpload", () => {
     const dependencies = uploaderFactory.mock.calls[0]?.[0];
     expect(dependencies).toBeDefined();
     const consoleDiagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const diagnosticRegion = screen.getByRole("region", { name: "Video & tải lên" });
     act(() => dependencies?.onDiagnostic?.({ stage: "chunk-fetch", outcome: "rejected" }));
+    const chunkCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
+    act(() => dependencies?.onDiagnostic?.({ stage: "query-fetch", outcome: "rejected" }));
+    const queryFetchCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
+    act(() => dependencies?.onDiagnostic?.({ stage: "query-response", status: 308, rangeVisible: false }));
+    const queryRangeCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
     consoleDiagnostic.mockRestore();
-    expect(screen.getByRole("region", { name: "Video & tải lên" })).toHaveAttribute(
-      "data-upload-diagnostic",
+    expect([chunkCode, queryFetchCode, queryRangeCode]).toEqual([
       "CHUNK_FETCH_REJECTED",
-    );
+      "QUERY_FETCH_REJECTED",
+      "QUERY_RANGE_HIDDEN",
+    ]);
   });
 
   it("uploads through the coordinator and supports pause/resume controls", async () => {
