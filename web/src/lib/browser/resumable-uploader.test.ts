@@ -212,6 +212,34 @@ describe("ResumableUploader", () => {
     expect(uploader.snapshot().phase).toBe("READY");
   });
 
+  it("emits a safe diagnostic when the browser rejects a non-final chunk", async () => {
+    const file = fileOfSize(8_388_609);
+    const session = sessionFor(file);
+    const fetcher = queuedFetcher(new TypeError("private browser diagnostic"));
+    fetcher.always(new TypeError("private browser diagnostic"));
+    const diagnostics = vi.fn();
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store: new MemoryUploadSessionStore(),
+      api: controlPlaneApi(),
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+      onDiagnostic: diagnostics,
+    });
+
+    await expect(uploader.start(file, session)).rejects.toMatchObject({
+      code: "UPLOAD_RETRY_EXHAUSTED",
+    });
+
+    expect(diagnostics).toHaveBeenCalledWith({
+      stage: "chunk-fetch",
+      outcome: "rejected",
+    });
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private browser diagnostic");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(SESSION_URI);
+  });
+
   it("treats a CORS-hidden final response as ambiguous metadata evidence", async () => {
     const file = fileOfSize();
     const session = sessionFor(file);
@@ -356,6 +384,34 @@ describe("ResumableUploader", () => {
     await uploader.start(file, session);
 
     expect(store.puts.map((value) => value.nextOffset)).toEqual([0, 8_388_608]);
+  });
+
+  it("emits a safe diagnostic when a 308 Range is not readable", async () => {
+    const file = fileOfSize(8_388_609);
+    const session = sessionFor(file);
+    const fetcher = queuedFetcher(response(308));
+    fetcher.always(new TypeError("private browser diagnostic"));
+    const diagnostics = vi.fn();
+    const uploader = createResumableUploader({
+      fetcher: fetcher.fetcher,
+      store: new MemoryUploadSessionStore(),
+      api: controlPlaneApi(),
+      now: () => NOW,
+      random: () => 0,
+      sleep: vi.fn(async () => undefined),
+      onDiagnostic: diagnostics,
+    });
+
+    await expect(uploader.start(file, session)).rejects.toMatchObject({
+      code: "UPLOAD_RETRY_EXHAUSTED",
+    });
+
+    expect(diagnostics).toHaveBeenCalledWith({
+      stage: "chunk-response",
+      status: 308,
+      rangeVisible: false,
+    });
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(SESSION_URI);
   });
 
   it("counts repeated no-progress 308 acknowledgements toward the retry ceiling", async () => {

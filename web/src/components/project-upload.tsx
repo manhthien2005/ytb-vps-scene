@@ -184,6 +184,7 @@ export function ProjectUpload({
       now: Date.now,
       random: Math.random,
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      onDiagnostic: (event) => console.error("[drive-upload] browser", event),
     });
     unsubscribeRef.current = uploader.subscribe((next) => {
       setSnapshot(next);

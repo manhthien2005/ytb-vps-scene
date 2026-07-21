@@ -76,6 +76,10 @@ export type ResumableUploaderDependencies = Readonly<{
   now: () => number;
   random: () => number;
   sleep: (milliseconds: number) => Promise<void>;
+  onDiagnostic?: (event:
+    | Readonly<{ stage: "chunk-fetch"; outcome: "rejected" }>
+    | Readonly<{ stage: "chunk-response"; status: 308; rangeVisible: boolean }>
+  ) => void;
 }>;
 
 export interface ResumableUploader {
@@ -261,6 +265,10 @@ export function createResumableUploader(
         } catch (error) {
           if (error instanceof AppError) throw error;
           if (disposed || cancelRequested) return;
+          dependencies.onDiagnostic?.({
+            stage: "chunk-fetch",
+            outcome: "rejected",
+          });
           if (isFinalChunk) {
             // A rejected final request can mean Drive committed the bytes but
             // its CORS response was hidden. Server metadata is authoritative.
@@ -274,7 +282,13 @@ export function createResumableUploader(
         }
         if (cancelRequested) return;
         if (upload?.status === 308) {
-          const nextOffset = parseAcknowledgedRange(upload.headers.get("range"));
+          const rangeHeader = upload.headers.get("range");
+          dependencies.onDiagnostic?.({
+            stage: "chunk-response",
+            status: 308,
+            rangeVisible: rangeHeader !== null,
+          });
+          const nextOffset = parseAcknowledgedRange(rangeHeader);
           if (nextOffset < record.nextOffset || nextOffset > endExclusive) {
             throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
           }
