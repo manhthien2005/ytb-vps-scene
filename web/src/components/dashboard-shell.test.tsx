@@ -119,7 +119,6 @@ describe("DashboardShell", () => {
     const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
 
     fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Tải video lên" }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: /3\. Review/ })).toBeEnabled());
     expect(screen.getByText("Nguồn: Sẵn sàng")).toBeVisible();

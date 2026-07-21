@@ -56,7 +56,7 @@ function service(repo = repository(), secrets = [TOKEN, SESSION]) {
       repository: repo,
       authKey: KEY,
       appOrigin: "https://app.example",
-      releaseRepository: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+      releaseRepository: "https://github.com/manhthien2005/ytb-vps-scene.git",
       releaseCommit: "a".repeat(40),
       pipelineBridgeVersion: "cp3-control-only",
       generateSecret: () => secrets[index++]!,
@@ -73,7 +73,7 @@ describe("WorkerControlService", () => {
     expect(result.command).toMatch(/^curl -fsSL https:\/\//);
     expect(result.command).toContain("bootstrap-worker.sh");
     expect(result.command).toContain(TOKEN);
-    expect(result.expiresAt).toBe("2026-07-20T08:40:00.000Z");
+    expect(result.expiresAt).toBe("2026-07-20T09:00:00.000Z");
     expect(result).not.toHaveProperty("token");
     expect(repo.createEnrollment).toHaveBeenCalledWith(expect.objectContaining({
       tokenDigest: expect.stringMatching(/^[0-9a-f]{64}$/),

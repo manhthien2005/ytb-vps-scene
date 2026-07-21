@@ -105,7 +105,14 @@ export function createConnectorServer(options: ConnectorOptions = {}) {
     if (origin && origin !== allowedOrigin) { responseJson(response, 403, { code: "ORIGIN_NOT_ALLOWED" }); return; }
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "OPTIONS") {
-      response.writeHead(204, { "access-control-allow-origin": allowedOrigin, "access-control-allow-methods": "POST,GET,OPTIONS", "access-control-allow-headers": "content-type" });
+      response.writeHead(204, {
+        "access-control-allow-origin": allowedOrigin,
+        "access-control-allow-methods": "POST,GET,OPTIONS",
+        "access-control-allow-headers": "content-type",
+        // Chrome Private Network Access: an HTTPS page reaching loopback preflights with
+        // Access-Control-Request-Private-Network and requires this opt-in to proceed.
+        "access-control-allow-private-network": "true",
+      });
       response.end();
       return;
     }

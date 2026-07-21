@@ -35,13 +35,39 @@ describe("WorkerCard", () => {
     const connectorFetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ jobId: "job-1" }), { status: 202 }))
       .mockResolvedValueOnce(new Response("event: progress\ndata: {\"stage\":\"READY\",\"percent\":100,\"message\":\"VPS đã sẵn sàng để render.\"}\n\n", { status: 200 }));
-    render(<WorkerCard workers={[]} fetcher={fetcher} connectorFetcher={connectorFetcher} />);
+    const onWorkerChange = vi.fn();
+    render(<WorkerCard workers={[]} fetcher={fetcher} connectorFetcher={connectorFetcher} onWorkerChange={onWorkerChange} />);
     fireEvent.change(screen.getByLabelText("SSH command"), { target: { value: "ssh root@n1.ckey.vn -p 1210" } });
     fireEvent.change(screen.getByLabelText("Mật khẩu VPS"), { target: { value: "secret-password" } });
     fireEvent.click(screen.getByRole("button", { name: "Kết nối và setup VPS" }));
     expect(await screen.findByText("VPS đã sẵn sàng để render.")).toBeVisible();
+    expect(onWorkerChange).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(connectorFetcher).toHaveBeenNthCalledWith(1, "http://127.0.0.1:55871/setup", expect.objectContaining({ method: "POST", body: expect.stringContaining("secret-password") }));
     expect(fetcher.mock.calls[0]?.[1]?.body).toBeUndefined();
+  });
+
+  it("renders intermediate setup stages as they stream in, not just the final one", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ command: "curl -fsSL https://raw.githubusercontent.com/acme/repo/abc/ops/native-v2/bootstrap-worker.sh | sudo bash -s -- 'https://app.example' 'token' 'https://github.com/acme/repo.git' 'abc'", expiresAt: "2026-07-20T09:00:00.000Z" }), { status: 200 }));
+    const encoder = new TextEncoder();
+    let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+    const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });
+    const connectorFetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ jobId: "job-1" }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const onWorkerChange = vi.fn();
+    render(<WorkerCard workers={[]} fetcher={fetcher} connectorFetcher={connectorFetcher} onWorkerChange={onWorkerChange} />);
+    fireEvent.change(screen.getByLabelText("SSH command"), { target: { value: "ssh root@n1.ckey.vn -p 1210" } });
+    fireEvent.change(screen.getByLabelText("Mật khẩu VPS"), { target: { value: "secret-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Kết nối và setup VPS" }));
+
+    controller!.enqueue(encoder.encode("event: progress\ndata: {\"stage\":\"INSTALLING\",\"percent\":35,\"message\":\"Đang cài thành phần render…\"}\n\n"));
+    expect(await screen.findByText("INSTALLING · 35%")).toBeVisible();
+    expect(onWorkerChange).not.toHaveBeenCalled();
+
+    controller!.enqueue(encoder.encode("event: progress\ndata: {\"stage\":\"READY\",\"percent\":100,\"message\":\"VPS đã sẵn sàng để render.\"}\n\n"));
+    controller!.close();
+    expect(await screen.findByText("READY · 100%")).toBeVisible();
+    expect(onWorkerChange).toHaveBeenCalledTimes(1);
   });
 });

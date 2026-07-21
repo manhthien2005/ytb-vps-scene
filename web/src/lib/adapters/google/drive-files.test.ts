@@ -169,10 +169,11 @@ describe("createGoogleDriveFilesAdapter", () => {
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH", message: "DRIVE_REMOTE_MISMATCH" });
   });
 
-  it("ensures only root input/output and one film folder under output", async () => {
+  it("creates project film folders under shared input and output folders", async () => {
     const rootProperties = { ytbVpsRole: "root", schema: "1" };
     const inputProperties = { ytbVpsRole: "input", schema: "1" };
     const outputProperties = { ytbVpsRole: "output", schema: "1" };
+    const projectInputProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "input", schema: "1" };
     const filmProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "film", schema: "1" };
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
@@ -181,22 +182,30 @@ describe("createGoogleDriveFilesAdapter", () => {
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder("drive-input-folder-001", "input", "drive-root-folder-001", inputProperties)))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
+      .mockResolvedValueOnce(jsonResponse(folder("drive-project-input-folder-001", "Tên phim - Phần 1", "drive-input-folder-001", projectInputProperties)))
+      .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder("drive-output-folder-001", "output", "drive-root-folder-001", outputProperties)))
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse(folder("drive-film-folder-001", "Tên phim - Phần 1", "drive-output-folder-001", filmProperties)));
 
     await expect(adapter(fetcher).ensureProjectFolders(ACCESS_TOKEN, PROJECT_ID, "Tên phim / Phần 1")).resolves.toEqual({
       projectFolderId: "drive-film-folder-001",
-      inputFolderId: "drive-input-folder-001",
+      inputFolderId: "drive-project-input-folder-001",
     });
 
     const createdInput = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
-    const createdOutput = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
-    const createdFilm = JSON.parse(String(fetcher.mock.calls[6]![1]?.body));
+    const createdProjectInput = JSON.parse(String(fetcher.mock.calls[4]![1]?.body));
+    const createdOutput = JSON.parse(String(fetcher.mock.calls[6]![1]?.body));
+    const createdFilm = JSON.parse(String(fetcher.mock.calls[8]![1]?.body));
     expect(createdInput).toMatchObject({
       name: "input",
       parents: ["drive-root-folder-001"],
       appProperties: inputProperties,
+    });
+    expect(createdProjectInput).toMatchObject({
+      name: "Tên phim - Phần 1",
+      parents: ["drive-input-folder-001"],
+      appProperties: projectInputProperties,
     });
     expect(createdOutput).toMatchObject({
       name: "output",
@@ -210,6 +219,36 @@ describe("createGoogleDriveFilesAdapter", () => {
     });
   });
 
+  it("reuses an existing per-project input folder", async () => {
+    const rootProperties = { ytbVpsRole: "root", schema: "1" };
+    const inputProperties = { ytbVpsRole: "input", schema: "1" };
+    const outputProperties = { ytbVpsRole: "output", schema: "1" };
+    const projectInputProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "input", schema: "1" };
+    const filmProperties = { ytbVpsProjectId: PROJECT_ID, ytbVpsRole: "film", schema: "1" };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-root-folder-001", "YTB-VPS", MY_DRIVE_ROOT_ID, rootProperties)],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-input-folder-001", "input", "drive-root-folder-001", inputProperties)],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-project-input-folder-001", "Tên phim", "drive-input-folder-001", projectInputProperties)],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-output-folder-001", "output", "drive-root-folder-001", outputProperties)],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        files: [folder("drive-film-folder-001", "Tên phim", "drive-output-folder-001", filmProperties)],
+      }));
+
+    await expect(adapter(fetcher).ensureProjectFolders(ACCESS_TOKEN, PROJECT_ID, "Tên phim")).resolves.toEqual({
+      projectFolderId: "drive-film-folder-001",
+      inputFolderId: "drive-project-input-folder-001",
+    });
+    expect(fetcher.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+  });
+
   it("escapes appProperty and parent query values and reuses one empty source", async () => {
     const parentId = "parent'id\\segment";
     const properties = {
@@ -220,7 +259,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     };
     const source = {
       id: "drive-source-file-001",
-      name: "source.mp4",
+      name: "display-name.mp4",
       mimeType: "video/mp4",
       size: "0",
       parents: [parentId],
@@ -245,12 +284,12 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(query).toContain(`value='${ARTIFACT_ID}'`);
   });
 
-  it("accepts a canonical Vietnamese display filename while keeping provider names private", async () => {
+  it("accepts a canonical Vietnamese source filename", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse({
         id: "drive-source-file-001",
-        name: "source.mp4",
+        name: "Phụ đề tiếng Việt.mp4",
         mimeType: "video/mp4",
         size: "0",
         parents: ["drive-input-folder-001"],
@@ -284,7 +323,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     };
     const source = (id: string) => ({
       id,
-      name: "source.mp4",
+      name: "display-name.mp4",
       mimeType: "video/mp4",
       size: "0",
       parents: ["drive-input-folder-001"],
@@ -308,12 +347,12 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
-  it("creates a normalized private empty source file on zero matches", async () => {
+  it("creates an empty source file using the original filename", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ files: [] }))
       .mockResolvedValueOnce(jsonResponse({
         id: "drive-source-file-001",
-        name: "source.webm",
+        name: "private-display-name.webm",
         mimeType: "video/webm",
         size: "0",
         parents: ["drive-input-folder-001"],
@@ -338,8 +377,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     })).resolves.toBe("drive-source-file-001");
 
     const created = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
-    expect(created.name).toBe("source.webm");
-    expect(JSON.stringify(created)).not.toContain("private-display-name.webm");
+    expect(created.name).toBe("private-display-name.webm");
   });
 
   it.each([
@@ -359,7 +397,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     };
     const created = {
       id: "drive-source-file-001",
-      name: "source.webm",
+      name: "private-display-name.webm",
       mimeType: "video/webm",
       size: "0",
       parents: ["drive-input-folder-001"],
@@ -430,7 +468,8 @@ describe("createGoogleDriveFilesAdapter", () => {
     expect(url.searchParams.get("uploadType")).toBe("resumable");
     expect(init.method).toBe("PATCH");
     expect(init.body).toBeUndefined();
-    const { signal: _signal, ...requestInit } = init;
+    const requestInit = { ...init };
+    delete requestInit.signal;
     const request = new Request(url, requestInit);
     expect(request.headers.get("content-type")).toBeNull();
     expect(request.headers.get("content-length")).toBe("0");

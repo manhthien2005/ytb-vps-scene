@@ -2,7 +2,7 @@ import type { StoredUploadSession, UploadSessionStore } from "./upload-store";
 import { AppError } from "../domain/errors";
 import { nextRetry, parseAcknowledgedRange } from "../domain/upload";
 import { isDriveResumableSessionUri } from "../domain/resumable-session-uri";
-import { canonicalUploadFileName } from "../domain/upload-filename";
+import { canonicalUploadFileName, uploadMimeTypeForFileName } from "../domain/upload-filename";
 
 function snapshotSession(record: StoredUploadSession): StoredUploadSession {
   return {
@@ -205,12 +205,13 @@ export function createResumableUploader(
       if (
         canonicalUploadFileName(file.name) !== initialRecord.fileIdentity.displayName ||
         file.size !== initialRecord.fileIdentity.sizeBytes ||
-        file.type !== initialRecord.fileIdentity.mimeType ||
+        uploadMimeTypeForFileName(file.name) !== initialRecord.fileIdentity.mimeType ||
         file.lastModified !== initialRecord.fileIdentity.lastModified ||
         !isDriveResumableSessionUri(initialRecord.sessionUri)
       ) {
         throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
       }
+      const mimeType = initialRecord.fileIdentity.mimeType;
       currentRecord = initialRecord;
       let record = initialRecord;
       let failedAttempts = 0;
@@ -255,15 +256,15 @@ export function createResumableUploader(
         const isFinalChunk = endExclusive === file.size;
         const headers = new Headers({
           "content-range": `bytes ${record.nextOffset}-${endExclusive - 1}/${file.size}`,
-          "content-type": file.type,
-          "x-upload-content-type": file.type,
+          "content-type": mimeType,
+          "x-upload-content-type": mimeType,
         });
         let upload: Response | null = null;
         try {
           upload = await driveFetch(record.sessionUri, {
             method: "PUT",
             headers,
-            body: file.slice(record.nextOffset, endExclusive, file.type),
+            body: file.slice(record.nextOffset, endExclusive, mimeType),
           });
         } catch (error) {
           if (error instanceof AppError) throw error;
@@ -458,7 +459,7 @@ export function createResumableUploader(
           method: "PUT",
           headers: new Headers({
             "content-range": `*/${file.size}`,
-            "x-upload-content-type": file.type,
+            "x-upload-content-type": mimeType,
           }),
         });
       } catch (error) {

@@ -8,6 +8,11 @@ Type=simple
 User=ytb-vps
 Group=ytb-vps
 WorkingDirectory=/var/lib/ytb-vps
+# The venv bin must precede system paths so the bare `edge-tts` command resolves;
+# the pipeline reads these to use the static FFmpeg 7.0 build instead of system 4.4.
+Environment=PATH=/opt/ytb-vps/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=YTB_VPS_FFMPEG=/usr/local/bin/ffmpeg-v2
+Environment=YTB_VPS_FFPROBE=/usr/local/bin/ffprobe-v2
 ExecStart=/opt/ytb-vps/current/.venv/bin/python -m ytb_vps_v2 worker-run --credential-path /var/lib/ytb-vps/worker-credential.json
 Restart=on-failure
 RestartSec=10

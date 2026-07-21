@@ -47,7 +47,7 @@ const artifact: Artifact = {
 function exactRemoteFile(sizeBytes = validIntent.sizeBytes): VerifiedDriveFile {
   return {
     id: SOURCE_FILE_ID,
-    name: "source.mp4",
+    name: "private-source.mp4",
     mimeType: validIntent.mimeType,
     sizeBytes,
     parentIds: [INPUT_FOLDER_ID],
@@ -68,7 +68,7 @@ function mismatchedRemoteFile(
   switch (kind) {
     case "id": return { ...exact, id: "wrong-drive-file" };
     case "parent": return { ...exact, parentIds: [INPUT_FOLDER_ID, "ambiguous-parent"] };
-    case "name": return { ...exact, name: "source.webm" };
+    case "name": return { ...exact, name: "khac-ten.mp4" };
     case "mime": return { ...exact, mimeType: "video/webm" };
     case "properties": return { ...exact, appProperties: { ...exact.appProperties, extra: "ambiguous" } };
     case "trashed": return { ...exact, trashed: true };

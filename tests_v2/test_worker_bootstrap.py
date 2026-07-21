@@ -30,7 +30,7 @@ class WorkerBootstrapContractTests(unittest.TestCase):
 
     def test_bootstrap_installs_only_after_successful_enrollment(self) -> None:
         enrollment = self.script.index("worker-enroll")
-        switch = self.script.index("ln -sfn")
+        switch = self.script.index('ln -sfn "$release" /opt/ytb-vps/current')
         self.assertLess(enrollment, switch)
         self.assertIn("worker-status", self.script)
         self.assertIn("chmod 700", self.script)

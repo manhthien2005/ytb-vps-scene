@@ -22,8 +22,26 @@ if [[ ! "$enrollment_token" =~ ^[A-Za-z0-9_-]{43}$ ]]; then echo "invalid enroll
 if [[ ! "$repository" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]; then echo "invalid release repository" >&2; exit 64; fi
 if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "invalid release commit" >&2; exit 64; fi
 
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git ffmpeg python3.10 python3.10-venv
+# A brand-new VPS often still holds the dpkg lock (cloud-init/unattended-upgrades on first boot).
+# curl + xz-utils are not guaranteed on minimal images; the pipeline needs the static FFmpeg 7.0
+# build because Jammy's system FFmpeg 4.4 lacks the -fps_mode contract the renderer requires.
+apt-get -o DPkg::Lock::Timeout=600 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends ca-certificates curl xz-utils git python3.10 python3.10-venv
+
+ffmpeg_root=/opt/ytb-vps/ffmpeg-static
+ffmpeg_archive=/tmp/ffmpeg-7.0.2-amd64-static.tar.xz
+ffmpeg_url=https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz
+ffmpeg_sha256=abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67
+if [[ ! -x "$ffmpeg_root/ffmpeg" ]]; then
+  if ! echo "$ffmpeg_sha256  $ffmpeg_archive" | sha256sum -c - >/dev/null 2>&1; then
+    curl -fL --retry 3 -o "$ffmpeg_archive" "$ffmpeg_url"
+  fi
+  echo "$ffmpeg_sha256  $ffmpeg_archive" | sha256sum -c -
+  install -d -m 0755 "$ffmpeg_root"
+  tar -xJf "$ffmpeg_archive" -C "$ffmpeg_root" --strip-components=1
+fi
+ln -sfn "$ffmpeg_root/ffmpeg" /usr/local/bin/ffmpeg-v2
+ln -sfn "$ffmpeg_root/ffprobe" /usr/local/bin/ffprobe-v2
 
 id -u ytb-vps >/dev/null 2>&1 || useradd --system --home-dir /var/lib/ytb-vps --create-home --shell /usr/sbin/nologin ytb-vps
 install -d -o ytb-vps -g ytb-vps -m 0700 /var/lib/ytb-vps
@@ -42,6 +60,9 @@ if [[ ! -d "$release/.git" ]]; then
 fi
 
 python3.10 -m venv "$release/.venv"
+# Jammy's ensurepip ships setuptools 59.6, which predates PEP 621 and would silently
+# build this pyproject-only package as an empty UNKNOWN-0.0.0 dist under --no-build-isolation.
+"$release/.venv/bin/pip" install --no-cache-dir --upgrade "pip>=24" "setuptools>=68" wheel
 "$release/.venv/bin/pip" install --no-deps --no-build-isolation "$release"
 # Edge TTS is a free outbound provider; it keeps audio synthesis off Vercel.
 "$release/.venv/bin/pip" install --no-cache-dir edge-tts
@@ -54,8 +75,9 @@ python3.10 -m venv "$release/.venv"
 chown -R ytb-vps:ytb-vps /var/lib/ytb-vps
 chmod 700 /var/lib/ytb-vps
 chmod 600 /var/lib/ytb-vps/worker-credential.json
+# ExecStart resolves through /opt/ytb-vps/current, so the symlink must exist before the first start.
+ln -sfn "$release" /opt/ytb-vps/current
 install -m 0644 -o root -g root "$release/ops/native-v2/ytb-vps-worker.service" /etc/systemd/system/ytb-vps-worker.service
 systemctl daemon-reload
 systemctl enable --now ytb-vps-worker.service
-ln -sfn "$release" /opt/ytb-vps/current
 echo "native worker attached at commit $commit"

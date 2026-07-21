@@ -531,6 +531,12 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         parentId: root.id,
         appProperties: INPUT_PROPERTIES,
       });
+      const projectInput = await ensureExpected(accessToken, {
+        name: filmName,
+        mimeType: FOLDER_MIME,
+        parentId: input.id,
+        appProperties: projectProperties(projectId, "input"),
+      });
       const output = await ensureExpected(accessToken, {
         name: "output",
         mimeType: FOLDER_MIME,
@@ -543,7 +549,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         parentId: output.id,
         appProperties: projectProperties(projectId, "film"),
       });
-      return { projectFolderId: film.id, inputFolderId: input.id };
+      return { projectFolderId: film.id, inputFolderId: projectInput.id };
     },
 
     async ensureSourceFile(accessToken, input) {
@@ -553,7 +559,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         throw stableError("DRIVE_PROVIDER_REJECTED");
       }
       const source = await ensureExpected(accessToken, {
-        name: `source.${input.normalizedExtension}`,
+        name: input.fileName,
         mimeType: input.mimeType,
         parentId: input.parentId,
         appProperties: sourceProperties(input.projectId, input.artifactId),

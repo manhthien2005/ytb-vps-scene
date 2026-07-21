@@ -16,7 +16,7 @@ function rectangleStyle(rectangle: SceneRectangle): React.CSSProperties {
   return { left: `${rectangle.x * 100}%`, top: `${rectangle.y * 100}%`, width: `${rectangle.width * 100}%`, height: `${rectangle.height * 100}%` };
 }
 
-export function SceneEditor({ projectId, fetcher = fetch }: { projectId: string | null; fetcher?: typeof fetch }) {
+export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: { projectId: string | null; sourceFile?: File | null; fetcher?: typeof fetch }) {
   const preview = useRef<HTMLDivElement>(null);
   const [settings, setSettings] = useState<SceneSettings>(DEFAULTS);
   const [kind, setKind] = useState<"sourceSubtitle" | "logo">("sourceSubtitle");
@@ -24,6 +24,19 @@ export function SceneEditor({ projectId, fetcher = fetch }: { projectId: string 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [ttsText, setTtsText] = useState("Xin chào, đây là giọng đọc thử.");
   const [message, setMessage] = useState<string | null>(null);
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
+  const previewUrl = videoUrl ?? sourceUrl;
+
+  useEffect(() => {
+    if (sourceFile === null || typeof URL.createObjectURL !== "function") return;
+    const url = URL.createObjectURL(sourceFile);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- object URLs must be created in an effect so Strict Mode's setup/cleanup cycle recreates what it revokes
+    setSourceUrl(url);
+    return () => {
+      if (typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
+      setSourceUrl((current) => current === url ? null : current);
+    };
+  }, [sourceFile]);
 
   useEffect(() => {
     if (projectId === null) return;
@@ -79,7 +92,7 @@ export function SceneEditor({ projectId, fetcher = fetch }: { projectId: string 
         <input id="scene-video" type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) setVideoUrl(URL.createObjectURL(file)); }} />
       </div>
       <div ref={preview} className="scene-preview" onPointerDown={start} onPointerUp={finish} role="application" aria-label="Kéo để chọn vùng blur">
-        {videoUrl && <video src={videoUrl} controls muted playsInline preload="metadata" />}
+        {previewUrl && <video src={previewUrl} controls muted playsInline preload="metadata" />}
         <span className="scene-rectangle scene-subtitle" style={rectangleStyle(settings.sourceSubtitle)} />
         <span className="scene-rectangle scene-logo" style={rectangleStyle(settings.logo)} />
       </div>

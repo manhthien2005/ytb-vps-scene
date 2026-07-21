@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
+
+
+def _media_binaries() -> tuple[str, str]:
+    # Ubuntu 22.04's system FFmpeg 4.4 lacks the v2 -fps_mode contract, so the
+    # bootstrap installs a static 7.0 build and exports these. Fall back to the
+    # bare names for local development where the modern binary is on PATH.
+    return (
+        os.environ.get("YTB_VPS_FFMPEG", "ffmpeg"),
+        os.environ.get("YTB_VPS_FFPROBE", "ffprobe"),
+    )
 
 from ytb_vps_v2.adapters.drive.media_transfer import DriveMediaTransfer
 from ytb_vps_v2.adapters.ffmpeg.media import FfmpegMediaAdapter
@@ -22,13 +33,13 @@ from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
 from ytb_vps_v2.domain.models import JobId
 
 
-def _canonical_source(source: Path, workspace: Path, media: FfmpegMediaAdapter) -> tuple[Path, Any]:
+def _canonical_source(source: Path, workspace: Path, media: FfmpegMediaAdapter, ffmpeg: str) -> tuple[Path, Any]:
     document = media.probe(source)
     if document.frame_count == 900 and document.source_fps == Fraction(30, 1):
         return source, document
     normalized = workspace / "normalized" / "source.mp4"
     normalized.parent.mkdir(parents=True, exist_ok=True)
-    command = ["ffmpeg", "-y", "-i", str(source), "-t", "30", "-vf", "fps=30", "-frames:v", "900", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    command = [ffmpeg, "-y", "-i", str(source), "-t", "30", "-vf", "fps=30", "-frames:v", "900", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
     command.extend(["-af", "apad,atrim=duration=30", "-c:a", "aac"] if document.has_audio else ["-an"])
     command.extend(["-movflags", "+faststart", str(normalized)])
     try:
@@ -39,8 +50,9 @@ def _canonical_source(source: Path, workspace: Path, media: FfmpegMediaAdapter) 
 
 
 def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, Any], job_id_value: str) -> Path:
-    media = FfmpegMediaAdapter()
-    canonical_source, media_document = _canonical_source(source, workspace, media)
+    ffmpeg, ffprobe = _media_binaries()
+    media = FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe)
+    canonical_source, media_document = _canonical_source(source, workspace, media, ffmpeg)
     blur_regions = scene_blur_regions(settings, media_document.width, media_document.height)
     workspace.mkdir(parents=True, exist_ok=True)
     archive_root, remote_root, snapshot_root = workspace / "archive", workspace / "remote", workspace / "snapshots"
@@ -58,7 +70,7 @@ def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, An
             media,
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(target_language="vi"),
-            EdgeTtsProvider(voice=str(settings.get("voice", "vi-VN-HoaiMyNeural")), rate=float(settings.get("rate", 1))),
+            EdgeTtsProvider(voice=str(settings.get("voice", "vi-VN-HoaiMyNeural")), rate=float(settings.get("rate", 1)), ffmpeg=ffmpeg),
             LocalArtifactWriterFactory(), LocalPartPublisherFactory(), LocalFileDigestVerifier(),
         ).run(OfflineSliceRequest(
             job_id=job_id, source=archived_source, verified_input=archive,

@@ -7,7 +7,7 @@ const { env, requireAdmin, requireMutationOrigin, createService, createRepositor
     sessionSecret: "s".repeat(64),
     appOrigin: "https://app.example",
     workerAuthKeyV1: "A".repeat(43),
-    workerReleaseRepository: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+    workerReleaseRepository: "https://github.com/manhthien2005/ytb-vps-scene.git",
     workerReleaseCommit: "a".repeat(40),
     workerPipelineBridgeVersion: "cp3-control-only",
   },

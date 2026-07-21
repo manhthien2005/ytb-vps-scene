@@ -101,14 +101,10 @@ function sameProperties(
     ));
 }
 
-function expectedSourceName(displayName: string): string {
-  return `source.${displayName.split(".").at(-1)?.toLowerCase() ?? ""}`;
-}
-
 function classifyEvidence(artifact: Artifact, remote: VerifiedDriveFile): "READY" | "PENDING" {
   const identityMatches = remote.id === artifact.driveFileId &&
     remote.parentIds.length === 1 && remote.parentIds[0] === artifact.driveParentId &&
-    remote.name === expectedSourceName(artifact.displayName) &&
+    remote.name === artifact.displayName &&
     remote.mimeType === artifact.mimeType &&
     remote.trashed === false &&
     sameProperties(

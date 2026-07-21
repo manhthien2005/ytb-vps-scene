@@ -61,7 +61,7 @@ describe("HomePage", () => {
       FREE_TIER_SOFT_PERCENT: "90",
       QUOTA_STALE_AFTER_SECONDS: "900",
       WORKER_AUTH_KEY_V1: "A".repeat(43),
-      WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+      WORKER_RELEASE_REPOSITORY: "https://github.com/manhthien2005/ytb-vps-scene.git",
       WORKER_RELEASE_COMMIT: "a".repeat(40),
       WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
     });
@@ -139,7 +139,7 @@ describe("HomePage", () => {
 
     expect(screen.getByText("Đã kết nối")).toBeVisible();
     expect(screen.getByText("a***@example.test")).toBeVisible();
-    expect(screen.getByRole("option", { name: "Test 1 · Chưa tải" })).toBeVisible();
+    expect(screen.getByLabelText("File video")).toBeEnabled();
     expect(container.textContent).not.toContain("secret-root-folder-id");
     expect(container.textContent).not.toContain("secret-project-folder-id");
     expect(container.textContent).not.toContain("secret-envelope");

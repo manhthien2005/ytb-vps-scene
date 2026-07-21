@@ -60,7 +60,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   workspace = { rootFolderId: "fake-root-folder-001" };
   projectFolders = {
     projectFolderId: "fake-project-folder-001",
-    inputFolderId: "fake-input-folder-001",
+    inputFolderId: "fake-project-input-folder-001",
   };
   sourceFileId = "fake-source-file-001";
   outputFileId = "fake-output-file-001";
@@ -73,7 +73,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     name: "source.mp4",
     mimeType: "video/mp4",
     sizeBytes: 100,
-    parentIds: ["fake-input-folder-001"],
+    parentIds: ["fake-project-input-folder-001"],
     trashed: false,
     appProperties: { schema: "1" },
   };
@@ -84,7 +84,11 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   deleteFileError: unknown = null;
   readonly inspectAccountCalls: string[] = [];
   readonly ensureWorkspaceCalls: string[] = [];
-  readonly ensureProjectFoldersCalls: Array<Readonly<{ accessToken: string; projectId: string }>> = [];
+  readonly ensureProjectFoldersCalls: Array<Readonly<{
+    accessToken: string;
+    projectId: string;
+    projectName?: string;
+  }>> = [];
   readonly ensureSourceFileCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly ensureOutputFileCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly resumableSessionCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
@@ -103,13 +107,18 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     return structuredClone(this.workspace);
   }
 
-  async ensureProjectFolders(accessToken: string, projectId: string) {
-    this.ensureProjectFoldersCalls.push({ accessToken, projectId });
+  async ensureProjectFolders(accessToken: string, projectId: string, projectName?: string) {
+    this.ensureProjectFoldersCalls.push({
+      accessToken,
+      projectId,
+      ...(projectName === undefined ? {} : { projectName }),
+    });
     return structuredClone(this.projectFolders);
   }
 
   async ensureSourceFile(accessToken: string, input: Parameters<DriveFilesPort["ensureSourceFile"]>[1]) {
     this.ensureSourceFileCalls.push({ accessToken, input: structuredClone(input) });
+    this.file = { ...this.file, name: input.fileName };
     return this.sourceFileId;
   }
 

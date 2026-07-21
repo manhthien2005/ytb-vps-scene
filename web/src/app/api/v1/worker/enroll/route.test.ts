@@ -5,7 +5,7 @@ const { env, createService, createRepository } = vi.hoisted(() => ({
     databaseUrl: "postgresql://example.invalid/app",
     workerAuthKeyV1: "A".repeat(43),
     appOrigin: "https://app.example",
-    workerReleaseRepository: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+    workerReleaseRepository: "https://github.com/manhthien2005/ytb-vps-scene.git",
     workerReleaseCommit: "a".repeat(40),
     workerPipelineBridgeVersion: "cp3-control-only",
   },

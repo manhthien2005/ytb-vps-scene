@@ -7,6 +7,9 @@ import { digestBearerSecret, generateBearerSecret } from "@/lib/security/worker-
 import type { WorkerControlPlaneRepository } from "@/lib/repositories/worker-control-plane";
 
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+// The single-use token must outlive a full unattended bootstrap: two apt phases can each
+// wait up to the 600s dpkg lock timeout on a slow first-boot VPS, before git/venv/pip run.
+const ENROLLMENT_TOKEN_TTL_MS = 30 * 60_000;
 
 export type WorkerControlDependencies = Readonly<{
   repository: WorkerControlPlaneRepository;
@@ -52,7 +55,7 @@ export function createWorkerControlService(dependencies: WorkerControlDependenci
   return {
     async createEnrollment(now: Date): Promise<EnrollmentCommand> {
       const token = makeSecret();
-      const expiresAt = new Date(now.getTime() + 10 * 60_000);
+      const expiresAt = new Date(now.getTime() + ENROLLMENT_TOKEN_TTL_MS);
       await dependencies.repository.createEnrollment({
         tokenDigest: digestBearerSecret(token, dependencies.authKey),
         expiresAt,

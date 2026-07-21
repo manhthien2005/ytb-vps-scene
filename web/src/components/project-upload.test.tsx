@@ -17,10 +17,10 @@ const PROJECT: PublicProject = {
   createdAt: "2026-07-19T00:00:00.000Z",
   updatedAt: "2026-07-19T00:00:00.000Z",
 };
-const FAILED_PROJECT: PublicProject = {
+const SECOND_PROJECT: PublicProject = {
   ...PROJECT,
-  name: "Video lỗi",
-  sourceStatus: "UPLOAD_FAILED",
+  id: "10000000-0000-4000-8000-000000000002",
+  name: "Test 2",
 };
 const HEALTHY: FreeTierHealthView = {
   mode: "READ_WRITE",
@@ -29,26 +29,48 @@ const HEALTHY: FreeTierHealthView = {
   drive: { usedBytes: 100, limitBytes: 1_000, appManagedBytes: 20, observedAt: "2026-07-19T00:00:00.000Z" },
   neon: { usedBytes: 10, limitBytes: 1_000, appManagedBytes: 0, observedAt: "2026-07-19T00:00:00.000Z" },
 };
+const EMPTY_SNAPSHOT: UploadSnapshot = {
+  phase: "IDLE",
+  committedBytes: 0,
+  totalBytes: 0,
+  bytesPerSecond: 0,
+  publicCode: null,
+};
 
-function memoryStore(initial: StoredUploadSession | null = null): UploadSessionStore {
-  let value: StoredUploadSession | null = initial;
+function memoryStore(initial: readonly StoredUploadSession[] = []): UploadSessionStore {
+  const rows = new Map(initial.map((row) => [`${row.projectId}:${row.artifactId}`, row]));
   return {
-    get: async () => value,
-    put: async (next) => { value = next; },
-    delete: async () => { value = null; },
-    list: async () => value === null ? [] : [value],
+    get: async (projectId, artifactId) => rows.get(`${projectId}:${artifactId}`) ?? null,
+    put: async (next) => { rows.set(`${next.projectId}:${next.artifactId}`, next); },
+    delete: async (projectId, artifactId) => { rows.delete(`${projectId}:${artifactId}`); },
+    list: async () => [...rows.values()],
   };
+}
+
+function sessionBody(artifactId: string) {
+  return new Response(JSON.stringify({
+    artifactId,
+    sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
+    chunkBytes: 8_388_608,
+    expiresAt: "2026-07-26T00:00:00.000Z",
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function projectBody(project: PublicProject) {
+  return new Response(JSON.stringify({ project }), {
+    status: 201,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 describe("ProjectUpload", () => {
   it("disables new work when quota evidence is stale", () => {
     render(<ProjectUpload health={{ ...HEALTHY, mode: "READ_ONLY", reasons: ["DRIVE_QUOTA_STALE"] }} projects={[]} />);
-    expect(screen.queryByRole("button", { name: "Tạo dự án" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Tải video lên" })).toBeDisabled();
+    expect(screen.getByLabelText("File video")).toBeDisabled();
     expect(screen.getByText("Chưa xác minh được dung lượng Google Drive.")).toBeVisible();
   });
 
-  it("creates the internal project automatically from the selected video", async () => {
+  it("auto-creates a project and uploads with a progress bar when a file is picked", async () => {
     let listener: ((snapshot: UploadSnapshot) => void) | null = null;
     const snapshot: UploadSnapshot = { phase: "UPLOADING", committedBytes: 50, totalBytes: 100, bytesPerSecond: 25, publicCode: null };
     const uploader: ResumableUploader = {
@@ -61,28 +83,17 @@ describe("ProjectUpload", () => {
       snapshot: vi.fn(() => snapshot),
     };
     const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ project: PROJECT }), {
-        status: 201,
-        headers: { "content-type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        artifactId: PROJECT.id,
-        sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
-        chunkBytes: 8_388_608,
-        expiresAt: "2026-07-26T00:00:00.000Z",
-      }), { status: 200, headers: { "content-type": "application/json" } }))
-      .mockResolvedValueOnce(new Response(null, { status: 418 }));
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
     const onProjectsChange = vi.fn();
-    const uploaderFactory = vi.fn((_: ResumableUploaderDependencies) => uploader);
+    const uploaderFactory = vi.fn<(dependencies: ResumableUploaderDependencies) => ResumableUploader>(() => uploader);
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={uploaderFactory} onProjectsChange={onProjectsChange} />);
     const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
 
-    expect(screen.queryByRole("button", { name: "Tạo dự án" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Video")).toHaveValue("");
     fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Tải video lên" }));
 
     expect(await screen.findByText("50%")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Tiến trình Phim thử nghiệm" })).toHaveAttribute("aria-valuenow", "50");
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
       "/api/v1/projects",
@@ -97,124 +108,117 @@ describe("ProjectUpload", () => {
       expect.any(Object),
     );
     expect(onProjectsChange).toHaveBeenCalledWith([PROJECT]);
-    const dependencies = uploaderFactory.mock.calls[0]?.[0];
-    expect(dependencies).toBeDefined();
-    const consoleDiagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const diagnosticRegion = screen.getByRole("region", { name: "Video & tải lên" });
-    act(() => dependencies?.onDiagnostic?.({ stage: "chunk-fetch", outcome: "rejected" }));
-    const chunkCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
-    act(() => dependencies?.onDiagnostic?.({ stage: "query-fetch", outcome: "rejected" }));
-    const queryFetchCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
-    act(() => dependencies?.onDiagnostic?.({ stage: "query-response", status: 308, rangeVisible: false }));
-    const queryRangeCode = diagnosticRegion.getAttribute("data-upload-diagnostic");
-    consoleDiagnostic.mockRestore();
-    expect([chunkCode, queryFetchCode, queryRangeCode]).toEqual([
-      "CHUNK_FETCH_REJECTED",
-      "QUERY_FETCH_REJECTED",
-      "QUERY_RANGE_HIDDEN",
-    ]);
+  });
 
-    const xhr = {
-      abort: vi.fn(),
-      getResponseHeader: vi.fn((name: string) => name.toLowerCase() === "range" ? "bytes=0-7" : null),
-      onabort: null,
-      onerror: null,
-      onload: null,
-      open: vi.fn(),
-      send: vi.fn(),
-      setRequestHeader: vi.fn(),
-      status: 308,
-    } as unknown as XMLHttpRequest;
-    vi.mocked(xhr.send).mockImplementation(() => {
-      xhr.onload?.(new ProgressEvent("load"));
-    });
-    const xhrConstructor = vi.spyOn(globalThis, "XMLHttpRequest").mockImplementation(() => xhr);
-    const driveResponse = await dependencies!.fetcher(
-      "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
-      {
-        method: "PUT",
-        headers: new Headers({
-          "content-range": "bytes 0-7/8",
-          "x-upload-content-type": "video/mp4",
+  it("sends the extension-derived MIME type even when the browser reports none", async () => {
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => undefined),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "phim.mkv", { type: "", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      `/api/v1/projects/${PROJECT.id}/upload-session`,
+      expect.objectContaining({
+        body: JSON.stringify({
+          fileName: "phim.mkv",
+          mimeType: "video/x-matroska",
+          sizeBytes: 100,
+          lastModified: 1,
         }),
-        body: new Blob([new Uint8Array(8)]),
-      },
-    );
-    xhrConstructor.mockRestore();
-    expect(xhr.getResponseHeader).toHaveBeenCalledWith("range");
-    expect(xhr.getResponseHeader("range")).toBe("bytes=0-7");
-    expect(driveResponse.status).toBe(308);
-    expect(driveResponse.headers.get("range")).toBe("bytes=0-7");
-    expect(xhr.open).toHaveBeenCalledWith(
-      "PUT",
-      "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
-      true,
+      }),
     );
   });
 
-  it("uploads through the coordinator and supports pause/resume controls", async () => {
+  it("queues multiple files and uploads them sequentially", async () => {
+    const listeners = new Map<ResumableUploader, (snapshot: UploadSnapshot) => void>();
+    const started: string[] = [];
+    function makeUploader(): ResumableUploader {
+      const uploader: ResumableUploader = {
+        start: vi.fn(async (file: File) => {
+          started.push(file.name);
+          listeners.get(uploader)?.({ phase: "READY", committedBytes: file.size, totalBytes: file.size, bytesPerSecond: 0, publicCode: null });
+        }),
+        resume: vi.fn(),
+        pause: vi.fn(),
+        cancel: vi.fn(),
+        subscribe: vi.fn((next) => { listeners.set(uploader, next); return () => listeners.delete(uploader); }),
+        dispose: vi.fn(),
+        snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+      };
+      return uploader;
+    }
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id))
+      .mockResolvedValueOnce(projectBody(SECOND_PROJECT))
+      .mockResolvedValueOnce(sessionBody(SECOND_PROJECT.id));
+    const onSourceFile = vi.fn();
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={makeUploader} onSourceFile={onSourceFile} />);
+    const first = new File([new Uint8Array(100)], "Video một.mp4", { type: "video/mp4", lastModified: 1 });
+    const second = new File([new Uint8Array(80)], "Video hai.mp4", { type: "video/mp4", lastModified: 2 });
+
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [first, second] } });
+
+    await waitFor(() => expect(screen.getAllByText("Đã lên Drive")).toHaveLength(2));
+    expect(started).toEqual(["Video một.mp4", "Video hai.mp4"]);
+    expect(screen.getByText("Video một")).toBeVisible();
+    expect(screen.getByText("Video hai")).toBeVisible();
+    expect(onSourceFile).toHaveBeenNthCalledWith(1, PROJECT.id, first);
+    expect(onSourceFile).toHaveBeenNthCalledWith(2, SECOND_PROJECT.id, second);
+    expect(screen.getByLabelText("File video")).toBeEnabled();
+  });
+
+  it("marks unsupported files as failed without calling the server", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} />);
+    const file = new File([new Uint8Array(10)], "tài liệu.pdf", { type: "application/pdf", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+
+    expect(await screen.findByText("Chỉ nhận video MP4, MOV, MKV hoặc WEBM.")).toBeVisible();
+    expect(screen.getByText("Tải lỗi")).toBeVisible();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("supports pause and resume on the active item", async () => {
     let listener: ((snapshot: UploadSnapshot) => void) | null = null;
     const snapshot: UploadSnapshot = { phase: "UPLOADING", committedBytes: 50, totalBytes: 100, bytesPerSecond: 25, publicCode: null };
     const uploader: ResumableUploader = {
       start: vi.fn(async () => { listener?.(snapshot); }),
       resume: vi.fn(async () => { listener?.(snapshot); }),
       pause: vi.fn(() => { listener?.({ ...snapshot, phase: "PAUSED" }); }),
-      cancel: vi.fn(async () => { listener?.({ ...snapshot, phase: "CANCELLED" }); }),
-      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
-      dispose: vi.fn(),
-      snapshot: vi.fn(() => snapshot),
-    };
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      artifactId: "20000000-0000-4000-8000-000000000002",
-      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
-      chunkBytes: 8_388_608,
-      expiresAt: "2026-07-26T00:00:00.000Z",
-    }), { status: 200, headers: { "content-type": "application/json" } }));
-    render(<ProjectUpload health={HEALTHY} projects={[PROJECT]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
-    const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
-
-    fireEvent.change(screen.getByLabelText("Video"), { target: { value: PROJECT.id } });
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Tải video lên" }));
-    expect(await screen.findByText("50%")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Tải video lên" })).toBeDisabled();
-    expect(screen.getByLabelText("Video")).toBeDisabled();
-    expect(screen.getByLabelText("File video")).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Tạm dừng" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục" })).toBeEnabled());
-  });
-
-  it("retries a failed video without creating another internal project", async () => {
-    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
-    const snapshot: UploadSnapshot = { phase: "UPLOADING", committedBytes: 50, totalBytes: 100, bytesPerSecond: 25, publicCode: null };
-    const uploader: ResumableUploader = {
-      start: vi.fn(async () => { listener?.(snapshot); }),
-      resume: vi.fn(),
-      pause: vi.fn(),
       cancel: vi.fn(),
       subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
       dispose: vi.fn(),
       snapshot: vi.fn(() => snapshot),
     };
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      artifactId: FAILED_PROJECT.id,
-      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
-      chunkBytes: 8_388_608,
-      expiresAt: "2026-07-26T00:00:00.000Z",
-    }), { status: 200, headers: { "content-type": "application/json" } }));
-    render(<ProjectUpload health={HEALTHY} projects={[FAILED_PROJECT]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("Video"), { target: { value: FAILED_PROJECT.id } });
     fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Chọn lại file và thử lại" }));
 
     expect(await screen.findByText("50%")).toBeVisible();
-    expect(fetcher).toHaveBeenCalledOnce();
-    expect(fetcher).toHaveBeenCalledWith(
-      `/api/v1/projects/${FAILED_PROJECT.id}/upload-session`,
-      expect.any(Object),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Tạm dừng" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Tiếp tục" }));
+    await waitFor(() => expect(uploader.resume).toHaveBeenCalled());
   });
 
   it("resumes a matching persisted session without creating a second provider session", async () => {
@@ -249,23 +253,43 @@ describe("ProjectUpload", () => {
       snapshot: vi.fn(() => EMPTY_SNAPSHOT),
     };
     const fetcher = vi.fn<typeof fetch>();
-    render(<ProjectUpload health={HEALTHY} projects={[PROJECT]} fetcher={fetcher} store={memoryStore(persisted)} uploaderFactory={() => uploader} />);
+    render(<ProjectUpload health={HEALTHY} projects={[PROJECT]} fetcher={fetcher} store={memoryStore([persisted])} uploaderFactory={() => uploader} />);
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
     expect(await screen.findByText(/Có phiên tải dở/)).toBeVisible();
-    fireEvent.change(screen.getByLabelText("Video"), { target: { value: PROJECT.id } });
     fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
-    fireEvent.click(screen.getByRole("button", { name: "Tiếp tục tải dở" }));
 
     await waitFor(() => expect(uploader.resume).toHaveBeenCalledWith(file, persisted));
     expect(fetcher).not.toHaveBeenCalled();
   });
-});
 
-const EMPTY_SNAPSHOT: UploadSnapshot = {
-  phase: "IDLE",
-  committedBytes: 0,
-  totalBytes: 0,
-  bytesPerSecond: 0,
-  publicCode: null,
-};
+  it("exposes upload diagnostics on the section element", async () => {
+    let dependencies: ResumableUploaderDependencies | null = null;
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => undefined),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn(() => () => undefined),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={(value) => { dependencies = value; return uploader; }} />);
+    const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    await waitFor(() => expect(dependencies).not.toBeNull());
+
+    const consoleDiagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const region = screen.getByRole("region", { name: "Tải video lên Drive" });
+    act(() => dependencies?.onDiagnostic?.({ stage: "chunk-fetch", outcome: "rejected" }));
+    const chunkCode = region.getAttribute("data-upload-diagnostic");
+    act(() => dependencies?.onDiagnostic?.({ stage: "query-response", status: 308, rangeVisible: false }));
+    const queryRangeCode = region.getAttribute("data-upload-diagnostic");
+    consoleDiagnostic.mockRestore();
+    expect([chunkCode, queryRangeCode]).toEqual(["CHUNK_FETCH_REJECTED", "QUERY_RANGE_HIDDEN"]);
+  });
+});

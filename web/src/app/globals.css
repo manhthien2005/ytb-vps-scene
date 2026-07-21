@@ -75,6 +75,21 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .upload-progress { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: center; margin-top: 18px; padding: 14px; border-radius: 14px; background: var(--surface); }
 .upload-progress strong { grid-row: 1 / span 3; color: var(--accent); font-size: 1.6rem; }
 .upload-progress span { color: var(--muted); overflow-wrap: anywhere; }
+.upload-queue { display: grid; gap: 12px; margin: 18px 0 0; padding: 0; list-style: none; }
+.upload-item { display: grid; gap: 8px; padding: 14px; border: 1px solid #263d59; border-radius: 14px; background: var(--surface); }
+.upload-item-heading { display: flex; justify-content: space-between; gap: 12px; }
+.upload-item-heading strong { overflow-wrap: anywhere; }
+.upload-item-heading span { flex-shrink: 0; color: var(--muted); font-size: .85rem; font-weight: 800; }
+.upload-item-done .upload-item-heading span { color: var(--accent); }
+.upload-item-failed .upload-item-heading span { color: var(--danger); }
+.upload-bar { overflow: hidden; height: 10px; border-radius: 999px; background: #081524; }
+.upload-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width .3s ease; }
+.upload-bar-fill[data-phase="PAUSED"], .upload-bar-fill[data-phase="PAUSED_ERROR"], .upload-bar-fill[data-phase="PAUSED_VERIFYING"] { background: var(--warning); }
+.upload-item-failed .upload-bar-fill { background: var(--danger); }
+.setup-progress { display: grid; gap: 6px; margin-top: 10px; }
+.setup-progress p { margin: 0; font-size: 13px; color: var(--muted); }
+.upload-item-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: .85rem; }
+.upload-item .button-row { margin-top: 4px; }
 .recent-jobs { margin-top: 30px; }
 .dashboard ul { display: grid; gap: 10px; padding: 0; list-style: none; }
 .dashboard li { display: flex; justify-content: space-between; gap: 18px; padding: 16px 18px; border: 1px solid #263d59; border-radius: 14px; background: #0d1a2b; }

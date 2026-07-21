@@ -8,7 +8,7 @@ export type SetupInput = Readonly<{ ssh: SshTarget; password: string; bootstrapC
 
 const stages: ReadonlyArray<Readonly<{ stage: Exclude<SetupStage, "FAILED" | "READY">; percent: number; command?: string }>> = [
   { stage: "CONNECTING", percent: 10 },
-  { stage: "INSTALLING", percent: 35, command: "apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git ffmpeg python3.10 python3.10-venv" },
+  { stage: "INSTALLING", percent: 35, command: "apt-get -o DPkg::Lock::Timeout=600 update -y && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends ca-certificates git ffmpeg python3.10 python3.10-venv" },
   { stage: "CONFIGURING", percent: 65 },
   { stage: "VERIFYING", percent: 90, command: "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader" },
 ];

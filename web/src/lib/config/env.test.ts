@@ -15,7 +15,7 @@ const cp2Valid = {
   FREE_TIER_SOFT_PERCENT: "90",
   QUOTA_STALE_AFTER_SECONDS: "900",
   WORKER_AUTH_KEY_V1: "A".repeat(43),
-  WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+  WORKER_RELEASE_REPOSITORY: "https://github.com/manhthien2005/ytb-vps-scene.git",
   WORKER_RELEASE_COMMIT: "a".repeat(40),
   WORKER_PIPELINE_BRIDGE_VERSION: "cp4-media-v1",
 };
@@ -34,7 +34,7 @@ describe("parseServerEnv", () => {
   it("accepts the canonical worker release and security configuration", () => {
     const env = parseServerEnv(cp2Valid);
     expect(env.workerAuthKeyV1).toHaveLength(43);
-    expect(env.workerReleaseRepository).toBe("https://github.com/Vanvuong2005827/REUP-RENDER.git");
+    expect(env.workerReleaseRepository).toBe("https://github.com/manhthien2005/ytb-vps-scene.git");
     expect(env.workerReleaseCommit).toHaveLength(40);
     expect(env.workerPipelineBridgeVersion).toBe("cp4-media-v1");
   });

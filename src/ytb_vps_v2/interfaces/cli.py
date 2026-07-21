@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -72,8 +73,12 @@ def _evidence() -> tuple[dict[str, Any], dict[str, Any]]:
         name, memory, _driver = [part.strip() for part in result.stdout.splitlines()[0].split(",", 2)]
         gpu_name = name[:160]
         vram_mib = max(256, min(1_048_576, int(float(memory))))
-        cuda_result = subprocess.run(["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"], check=True, capture_output=True, text=True, timeout=3)
-        cuda_version = cuda_result.stdout.strip().splitlines()[0][:7]
+        # nvidia-smi exposes no queryable cuda_version field; it appears only in the banner
+        # header ("CUDA Version: 12.4"). Parse best-effort so a banner change cannot fail probe.
+        banner = subprocess.run(["nvidia-smi"], check=True, capture_output=True, text=True, timeout=3)
+        match = __import__("re").search(r"CUDA Version:\s*(\d{1,3}\.\d{1,3})", banner.stdout)
+        if match:
+            cuda_version = match.group(1)
         reason_codes.extend(["CUDA_AVAILABLE", "NVENC_AVAILABLE"])
         status = "PASS"
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
