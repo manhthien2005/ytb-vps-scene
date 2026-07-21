@@ -1,6 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ResumableUploader, UploadSnapshot } from "@/lib/browser/resumable-uploader";
+import type {
+  ResumableUploader,
+  ResumableUploaderDependencies,
+  UploadSnapshot,
+} from "@/lib/browser/resumable-uploader";
 import type { StoredUploadSession, UploadSessionStore } from "@/lib/browser/upload-store";
 import { ProjectUpload } from "./project-upload";
 import type { FreeTierHealthView, PublicProject } from "./dashboard-types";
@@ -68,7 +72,8 @@ describe("ProjectUpload", () => {
         expiresAt: "2026-07-26T00:00:00.000Z",
       }), { status: 200, headers: { "content-type": "application/json" } }));
     const onProjectsChange = vi.fn();
-    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} onProjectsChange={onProjectsChange} />);
+    const uploaderFactory = vi.fn((_: ResumableUploaderDependencies) => uploader);
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={uploaderFactory} onProjectsChange={onProjectsChange} />);
     const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
 
     expect(screen.queryByRole("button", { name: "Tạo dự án" })).not.toBeInTheDocument();
@@ -91,6 +96,15 @@ describe("ProjectUpload", () => {
       expect.any(Object),
     );
     expect(onProjectsChange).toHaveBeenCalledWith([PROJECT]);
+    const dependencies = uploaderFactory.mock.calls[0]?.[0];
+    expect(dependencies).toBeDefined();
+    const consoleDiagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    act(() => dependencies?.onDiagnostic?.({ stage: "chunk-fetch", outcome: "rejected" }));
+    consoleDiagnostic.mockRestore();
+    expect(screen.getByRole("region", { name: "Video & tải lên" })).toHaveAttribute(
+      "data-upload-diagnostic",
+      "CHUNK_FETCH_REJECTED",
+    );
   });
 
   it("uploads through the coordinator and supports pause/resume controls", async () => {

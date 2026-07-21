@@ -124,6 +124,7 @@ export function ProjectUpload({
   const [artifactId, setArtifactId] = useState<string | null>(null);
   const [recoveries, setRecoveries] = useState<readonly StoredUploadSession[]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const uploaderRef = useRef<ResumableUploader | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -184,7 +185,12 @@ export function ProjectUpload({
       now: Date.now,
       random: Math.random,
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      onDiagnostic: (event) => console.error("[drive-upload] browser", event),
+      onDiagnostic: (event) => {
+        console.error("[drive-upload] browser", event);
+        setDiagnostic(event.stage === "chunk-fetch"
+          ? "CHUNK_FETCH_REJECTED"
+          : event.rangeVisible ? "CHUNK_RANGE_VISIBLE" : "CHUNK_RANGE_HIDDEN");
+      },
     });
     unsubscribeRef.current = uploader.subscribe((next) => {
       setSnapshot(next);
@@ -283,7 +289,7 @@ export function ProjectUpload({
       ? "Chọn lại file và thử lại"
       : "Tải video lên";
   return (
-    <section className="workspace-card project-upload" aria-labelledby="project-upload-title">
+    <section className="workspace-card project-upload" aria-labelledby="project-upload-title" data-upload-diagnostic={diagnostic ?? undefined}>
       <div className="card-heading">
         <div><p className="eyebrow">Chuẩn bị video</p><h2 id="project-upload-title">Video & tải lên</h2></div>
         <span className={`mode-badge mode-${health.mode.toLowerCase()}`}>{health.mode === "READ_WRITE" ? "Sẵn sàng" : "Chỉ đọc"}</span>
