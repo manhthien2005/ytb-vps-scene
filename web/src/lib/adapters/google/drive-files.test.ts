@@ -414,11 +414,14 @@ describe("createGoogleDriveFilesAdapter", () => {
       headers: { location: sessionUri },
     }));
 
-    await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, {
+    const sessionInput = {
       fileId: "drive-source-file-001",
       mimeType: "video/mp4",
       sizeBytes: 8_388_608,
-    })).resolves.toEqual({ sessionUri, expiresAt: "2026-07-26T00:00:00.000Z" });
+      origin: "https://ytb-vps-scene.vercel.app",
+    };
+    await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, sessionInput))
+      .resolves.toEqual({ sessionUri, expiresAt: "2026-07-26T00:00:00.000Z" });
 
     const { url, init } = requestDetails(fetcher);
     expect(url.origin + url.pathname).toBe(
@@ -431,6 +434,7 @@ describe("createGoogleDriveFilesAdapter", () => {
     const request = new Request(url, requestInit);
     expect(request.headers.get("content-type")).toBeNull();
     expect(request.headers.get("content-length")).toBe("0");
+    expect(request.headers.get("origin")).toBe("https://ytb-vps-scene.vercel.app");
     expect(request.headers.get("x-upload-content-length")).toBe("8388608");
     expect(request.headers.get("x-upload-content-type")).toBe("video/mp4");
   });
@@ -544,16 +548,22 @@ describe("createGoogleDriveFilesAdapter", () => {
     ["https://www.googleapis.com/upload/drive/v3/files/file?upload_id=x&access_token=credential"],
     ["https://www.googleapis.com/upload/drive/v3/files/file?upload_id=x#fragment"],
   ])("rejects an untrusted resumable Location %#", async (location) => {
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, {
       status: 200,
       headers: { location },
     }));
 
-    await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, {
-      fileId: "drive-source-file-001",
-      mimeType: "video/mp4",
-      sizeBytes: 1,
-    })).rejects.toThrow("DRIVE_PROVIDER_REJECTED");
+    try {
+      await expect(adapter(fetcher).createResumableUpdateSession(ACCESS_TOKEN, {
+        fileId: "drive-source-file-001",
+        mimeType: "video/mp4",
+        sizeBytes: 1,
+      })).rejects.toThrow("DRIVE_PROVIDER_REJECTED");
+      expect(diagnostic).toHaveBeenCalledOnce();
+    } finally {
+      diagnostic.mockRestore();
+    }
   });
 
   it("preserves 401 mapping when response cancellation itself fails", async () => {

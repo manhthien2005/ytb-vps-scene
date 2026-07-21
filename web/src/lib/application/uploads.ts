@@ -55,6 +55,7 @@ type UploadDependencies = Readonly<{
   maximumBytes: number;
   softPercent: number;
   staleAfterSeconds: number;
+  browserOrigin?: string;
   onDiagnostic?: (event: Readonly<{
     stage: "get-access-token" | "ensure-source-file" | "inspect-source-file" | "create-resumable-session";
     code: string;
@@ -362,6 +363,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
               fileId: selected.driveFileId,
               mimeType: selected.mimeType,
               sizeBytes: selected.expectedSizeBytes,
+              origin: dependencies.browserOrigin,
             }),
           );
         } catch (error) {

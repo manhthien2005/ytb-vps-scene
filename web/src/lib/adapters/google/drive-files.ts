@@ -81,6 +81,23 @@ function boundedDriveName(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 255 && !/[\u0000-\u001F\u007F]/.test(value);
 }
 
+function browserOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || value.length < 8 || value.length > 2_048) return null;
+  try {
+    const url = new URL(value);
+    const localHttp = url.protocol === "http:" &&
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+    if (
+      value !== url.origin ||
+      (url.protocol !== "https:" && !localHttp) ||
+      url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== ""
+    ) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
 function projectFolderName(projectName: string | undefined, projectId: string): string {
   if (projectName === undefined) return projectId;
   const normalized = projectName.trim().replace(/[\\/]+/g, " - ").replace(/\s+/g, " ").slice(0, 160);
@@ -561,11 +578,13 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     },
 
     async createResumableUpdateSession(accessToken, input) {
+      const origin = input.origin === undefined ? null : browserOrigin(input.origin);
       if (
         !boundedDriveId(input.fileId) ||
         !boundedAscii(input.mimeType, 1, 127) ||
         Number.isSafeInteger(input.sizeBytes) === false ||
-        input.sizeBytes < 1
+        input.sizeBytes < 1 ||
+        (input.origin !== undefined && origin === null)
       ) {
         throw stableError("DRIVE_PROVIDER_REJECTED");
       }
@@ -582,6 +601,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
             headers: {
               ...headers(accessToken),
               "content-length": "0",
+              ...(origin === null ? {} : { origin }),
               "x-upload-content-length": String(input.sizeBytes),
               "x-upload-content-type": input.mimeType,
             },

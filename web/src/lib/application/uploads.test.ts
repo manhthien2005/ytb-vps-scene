@@ -156,6 +156,7 @@ describe("UploadService sessions", () => {
       maximumBytes: MAXIMUM_BYTES,
       softPercent: 90,
       staleAfterSeconds: 900,
+      browserOrigin: "https://ytb-vps-scene.vercel.app",
       onDiagnostic: diagnostics,
     });
   });
@@ -361,6 +362,7 @@ describe("UploadService sessions", () => {
         fileId: artifact.driveFileId,
         mimeType: artifact.mimeType,
         sizeBytes: artifact.expectedSizeBytes,
+        origin: "https://ytb-vps-scene.vercel.app",
       },
     }]);
     expect(health.assertUploadAllowed).toHaveBeenCalledWith(0, NOW);

@@ -33,7 +33,7 @@ export interface DriveFilesPort {
     parentId: string;
   }>): Promise<string>;
   createResumableUpdateSession(accessToken: string, input: Readonly<{
-    fileId: string; mimeType: string; sizeBytes: number;
+    fileId: string; mimeType: string; sizeBytes: number; origin?: string;
   }>): Promise<Readonly<{ sessionUri: string; expiresAt: string }>>;
   inspectFile(accessToken: string, fileId: string): Promise<VerifiedDriveFile>;
   deleteFile(accessToken: string, fileId: string): Promise<void>;
