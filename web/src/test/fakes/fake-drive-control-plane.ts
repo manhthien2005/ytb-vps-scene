@@ -4,6 +4,7 @@ import type { AuditEvent } from "@/lib/repositories/control-plane";
 import {
   PROJECT_TREE_CLAIM_ID,
   type DriveControlPlaneRepository,
+  type ManagedArtifactRecord,
   type ProjectReservation,
   type ProjectReservationResult,
   type ProvisioningKind,
@@ -32,6 +33,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
   private readonly nonces = new Map<string, number>();
   private readonly projects = new Map<string, StoredProject>();
   private readonly artifacts = new Map<string, Artifact>();
+  private readonly managedArtifactMetadata = new Map<string, Readonly<{ jobId: string | null; verifiedAt: string | null }>>();
   private readonly sourceCapacities = new Map<string, StoredSourceCapacity>();
   private readonly usage = new Map<"DRIVE" | "NEON", UsageSnapshot>();
   private readonly provisioningClaims = new Map<string, Readonly<{ token: string; expiresAt: number }>>();
@@ -213,6 +215,73 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
   }
 
+  async listManagedArtifacts(): Promise<readonly ManagedArtifactRecord[]> {
+    return [...this.artifacts.values()]
+      .filter((artifact) => (artifact.kind === "SOURCE" || artifact.kind === "OUTPUT") && artifact.status !== "DELETED")
+      .map((artifact) => {
+        const project = this.projects.get(artifact.projectId)?.project;
+        if (!project) throw new Error("Managed artifact project unavailable");
+        const metadata = this.managedArtifactMetadata.get(artifact.id) ?? { jobId: null, verifiedAt: null };
+        return {
+          artifact: structuredClone(artifact),
+          projectName: project.name,
+          jobId: metadata.jobId,
+          verifiedAt: metadata.verifiedAt,
+        };
+      })
+      .sort((left, right) => {
+        const leftProject = this.projects.get(left.artifact.projectId)!.project;
+        const rightProject = this.projects.get(right.artifact.projectId)!.project;
+        return leftProject.createdAt.localeCompare(rightProject.createdAt) ||
+          left.projectName.localeCompare(right.projectName) ||
+          left.artifact.id.localeCompare(right.artifact.id);
+      });
+  }
+
+  seedManagedArtifact(record: ManagedArtifactRecord): void {
+    const project = this.projects.get(record.artifact.projectId)?.project;
+    if (!project || project.name !== record.projectName) throw new Error("Managed artifact project unavailable");
+    this.artifacts.set(record.artifact.id, structuredClone(record.artifact));
+    this.managedArtifactMetadata.set(record.artifact.id, {
+      jobId: record.jobId,
+      verifiedAt: record.verifiedAt,
+    });
+  }
+
+  async claimManagedArtifactDeletion(artifactId: string): Promise<"CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT"> {
+    const artifact = this.artifacts.get(artifactId);
+    if (!artifact || (artifact.kind !== "SOURCE" && artifact.kind !== "OUTPUT")) return "CONFLICT";
+    if (artifact.status === "DELETING") return "RECONCILE";
+    if (artifact.status === "DELETED") return "DELETED";
+    if (artifact.status !== "READY" && artifact.status !== "INVALID") return "CONFLICT";
+    this.artifacts.set(artifactId, { ...artifact, status: "DELETING" });
+    return "CLAIMED";
+  }
+
+  async markManagedArtifactDeleted(artifactId: string): Promise<"CHANGED" | "REPLAY"> {
+    const artifact = this.artifacts.get(artifactId);
+    if (!artifact || (artifact.kind !== "SOURCE" && artifact.kind !== "OUTPUT")) {
+      throw new Error("Managed artifact cannot be marked deleted");
+    }
+    if (artifact.status === "DELETED") return "REPLAY";
+    if (artifact.status !== "DELETING") throw new Error("Managed artifact cannot be marked deleted");
+    this.artifacts.set(artifactId, { ...artifact, status: "DELETED" });
+    this.releaseSourceCapacity(artifactId);
+    if (artifact.kind === "SOURCE") this.updateProject(artifact.projectId, { sourceStatus: "NO_SOURCE" });
+    this.auditEvents.push({
+      eventType: "DRIVE_FILE_DELETED",
+      targetId: artifact.id,
+      actorClass: "admin",
+      payload: {
+        projectId: artifact.projectId,
+        artifactId: artifact.id,
+        kind: artifact.kind,
+        status: "DELETED",
+      },
+    });
+    return "CHANGED";
+  }
+
   async reserveSourceCapacity(input: SourceCapacityReservation): Promise<SourceCapacityOutcome> {
     const quota = this.usage.get("DRIVE");
     if (!quota) return "DRIVE_QUOTA_STALE";
@@ -324,6 +393,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
           actualSizeBytes: null,
         };
         this.artifacts.set(replacement.id, replacement);
+        this.managedArtifactMetadata.set(replacement.id, { jobId: null, verifiedAt: null });
         this.updateProject(input.projectId, { sourceStatus: "UPLOAD_PENDING" });
         return structuredClone(replacement);
       }
@@ -352,6 +422,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       actualSizeBytes: null,
     };
     this.artifacts.set(artifact.id, artifact);
+    this.managedArtifactMetadata.set(artifact.id, { jobId: null, verifiedAt: null });
     this.updateProject(input.projectId, { sourceStatus: "UPLOAD_PENDING" });
     return structuredClone(artifact);
   }
@@ -385,6 +456,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       !Number.isFinite(verifiedAt.getTime())
     ) throw new Error("Source cannot be marked ready");
     this.artifacts.set(artifactId, { ...artifact, status: "READY", actualSizeBytes });
+    this.managedArtifactMetadata.set(artifactId, { jobId: null, verifiedAt: verifiedAt.toISOString() });
     this.releaseSourceCapacity(artifactId, true);
     this.updateProject(artifact.projectId, { sourceStatus: "SOURCE_READY" });
     this.auditEvents.push({

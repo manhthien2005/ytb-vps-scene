@@ -69,6 +69,15 @@ export type SourceCapacityOutcome =
 
 export type SourceTerminalOutcome = "CHANGED" | "REPLAY";
 
+export type ManagedArtifactRecord = Readonly<{
+  artifact: Artifact;
+  projectName: string;
+  jobId: string | null;
+  verifiedAt: string | null;
+}>;
+
+export type ManagedDeletionClaim = "CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT";
+
 export type ProvisioningKind = "PROJECT" | "SOURCE";
 export const PROJECT_TREE_CLAIM_ID = "00000000-0000-4000-8000-000000000000" as const;
 
@@ -92,6 +101,9 @@ export interface DriveControlPlaneRepository {
     claimToken: string,
   ): Promise<Project>;
   listProjects(): Promise<readonly Project[]>;
+  listManagedArtifacts(): Promise<readonly ManagedArtifactRecord[]>;
+  claimManagedArtifactDeletion(artifactId: string): Promise<ManagedDeletionClaim>;
+  markManagedArtifactDeleted(artifactId: string): Promise<"CHANGED" | "REPLAY">;
   reserveSourceCapacity(input: SourceCapacityReservation): Promise<SourceCapacityOutcome>;
   observeSourceProgress(
     artifactId: string,

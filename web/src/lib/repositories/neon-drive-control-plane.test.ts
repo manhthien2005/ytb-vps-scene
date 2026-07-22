@@ -20,6 +20,9 @@ const HASH_B = "b".repeat(64);
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const ARTIFACT_ID = "20000000-0000-4000-8000-000000000001";
 const CLAIM_TOKEN = "30000000-0000-4000-8000-000000000001";
+const SOURCE_ID = "20000000-0000-4000-8000-000000000002";
+const OUTPUT_ID = "20000000-0000-4000-8000-000000000003";
+const DELETED_ID = "20000000-0000-4000-8000-000000000004";
 
 describe("Drive control-plane repository", () => {
   let db: PGlite;
@@ -94,6 +97,62 @@ describe("Drive control-plane repository", () => {
     }, CLAIM_TOKEN);
     return { project, repository, capacityInput };
   }
+
+  async function seedManagedArtifacts() {
+    const project = await readyProject();
+    await db.query("update projects set name='Phim A',source_status='SOURCE_READY' where id=$1", [project.id]);
+    for (const [id, kind, status] of [
+      [SOURCE_ID, "SOURCE", "READY"],
+      [OUTPUT_ID, "OUTPUT", "READY"],
+      [DELETED_ID, "SOURCE", "DELETED"],
+    ] as const) {
+      await db.query(
+        `insert into artifacts(
+           id,project_id,kind,status,drive_file_id,drive_parent_id,display_name,mime_type,
+           expected_size_bytes,actual_size_bytes,verified_at
+         ) values ($1,$2,$3,$4,$5,$6,$7,'video/mp4',100,100,$8)`,
+        [
+          id, project.id, kind, status, `drive-file-${id.slice(-3)}`,
+          project.driveInputFolderId!, `${kind.toLowerCase()}.mp4`, NOW,
+        ],
+      );
+    }
+    return { project, repository: repo() };
+  }
+
+  it("lists live source and output videos with project and verification metadata", async () => {
+    const { repository } = await seedManagedArtifacts();
+
+    const records = await repository.listManagedArtifacts();
+
+    expect(records.map((record) => ({
+      id: record.artifact.id,
+      kind: record.artifact.kind,
+      projectName: record.projectName,
+      verifiedAt: record.verifiedAt,
+    }))).toEqual([
+      { id: SOURCE_ID, kind: "SOURCE", projectName: "Phim A", verifiedAt: NOW.toISOString() },
+      { id: OUTPUT_ID, kind: "OUTPUT", projectName: "Phim A", verifiedAt: NOW.toISOString() },
+    ]);
+  });
+
+  it("deletes a ready source and resets only its project source state", async () => {
+    const { project, repository } = await seedManagedArtifacts();
+
+    await expect(repository.claimManagedArtifactDeletion(SOURCE_ID)).resolves.toBe("CLAIMED");
+    await expect(repository.markManagedArtifactDeleted(SOURCE_ID)).resolves.toBe("CHANGED");
+
+    expect((await repository.getProject(project.id))?.sourceStatus).toBe("NO_SOURCE");
+  });
+
+  it("deletes a ready output without changing project source state", async () => {
+    const { project, repository } = await seedManagedArtifacts();
+
+    await expect(repository.claimManagedArtifactDeletion(OUTPUT_ID)).resolves.toBe("CLAIMED");
+    await expect(repository.markManagedArtifactDeleted(OUTPUT_ID)).resolves.toBe("CHANGED");
+
+    expect((await repository.getProject(project.id))?.sourceStatus).toBe("SOURCE_READY");
+  });
 
   it("consumes a saved OAuth nonce once and prunes expired entries", async () => {
     const repository = repo();
@@ -1094,6 +1153,49 @@ describe("FakeDriveControlPlaneRepository", () => {
       driveFileId: "drive-source-file-002",
       sizeBytes: 200,
     }, CLAIM_TOKEN)).resolves.toMatchObject({ status: "PENDING", expectedSizeBytes: 200 });
+  });
+
+  it("models listed output deletion with metadata and replay semantics", async () => {
+    const fake = new FakeDriveControlPlaneRepository();
+    const reserved = await fake.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Phim A",
+    });
+    if (reserved.outcome === "CONFLICT") throw new Error("unexpected conflict");
+    await fake.claimProvisioning("PROJECT", PROJECT_TREE_CLAIM_ID, CLAIM_TOKEN);
+    const project = await fake.completeProjectFolders(
+      reserved.project.id,
+      "drive-project-folder-001",
+      "drive-input-folder-001",
+      CLAIM_TOKEN,
+    );
+    fake.seedManagedArtifact({
+      artifact: {
+        id: OUTPUT_ID,
+        projectId: project.id,
+        kind: "OUTPUT",
+        status: "READY",
+        driveFileId: "drive-output-file-001",
+        driveParentId: project.driveProjectFolderId!,
+        displayName: "output.mp4",
+        mimeType: "video/mp4",
+        expectedSizeBytes: 100,
+        actualSizeBytes: 100,
+      },
+      projectName: "Phim A",
+      jobId: null,
+      verifiedAt: NOW.toISOString(),
+    });
+
+    await expect(fake.listManagedArtifacts()).resolves.toEqual([
+      expect.objectContaining({ artifact: expect.objectContaining({ id: OUTPUT_ID }), verifiedAt: NOW.toISOString() }),
+    ]);
+    await expect(fake.claimManagedArtifactDeletion(OUTPUT_ID)).resolves.toBe("CLAIMED");
+    await expect(fake.claimManagedArtifactDeletion(OUTPUT_ID)).resolves.toBe("RECONCILE");
+    await expect(fake.markManagedArtifactDeleted(OUTPUT_ID)).resolves.toBe("CHANGED");
+    await expect(fake.markManagedArtifactDeleted(OUTPUT_ID)).resolves.toBe("REPLAY");
+    expect((await fake.getProject(project.id))?.sourceStatus).toBe("NO_SOURCE");
   });
 
   it("rejects reactivating a deleted source when another source is live", async () => {

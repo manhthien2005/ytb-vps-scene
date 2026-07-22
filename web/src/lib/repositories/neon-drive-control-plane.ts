@@ -8,6 +8,7 @@ import type { AuditEvent } from "./control-plane";
 import {
   PROJECT_TREE_CLAIM_ID,
   type DriveControlPlaneRepository,
+  type ManagedArtifactRecord,
   type ProjectReservation,
   type ProjectReservationResult,
   type SourceReservation,
@@ -157,6 +158,17 @@ function parseArtifact(row: Record<string, unknown>): Artifact {
   };
 }
 
+function parseManagedArtifact(row: Record<string, unknown>): ManagedArtifactRecord {
+  const projectName = boundedText(row.project_name, 1, 160, true);
+  const jobId = nullableBoundedText(row.job_id, 36, 36);
+  const verifiedAt = row.verified_at === null ? null : isoDate(row.verified_at);
+  if (
+    !projectName || jobId === undefined || (jobId !== null && !UUID_PATTERN.test(jobId)) ||
+    (row.verified_at !== null && !verifiedAt)
+  ) fail("managed artifact");
+  return { artifact: parseArtifact(row), projectName, jobId, verifiedAt };
+}
+
 function parseCredential(row: Record<string, unknown>): StoredDriveCredential {
   if (!isOneOf(row.status, CREDENTIAL_STATUSES)) fail("credential");
   const accountHash = row.account_permission_id_hash === null
@@ -231,9 +243,10 @@ function parseUsage(row: Record<string, unknown>): UsageSnapshot {
   };
 }
 
-function artifactColumns(): string {
-  return `id,project_id,kind,status,drive_file_id,drive_parent_id,display_name,mime_type,
-    expected_size_bytes,actual_size_bytes,checksum_sha256,created_at,updated_at,verified_at`;
+function artifactColumns(tableAlias?: string): string {
+  const prefix = tableAlias === undefined ? "" : `${tableAlias}.`;
+  return `${prefix}id,${prefix}project_id,${prefix}kind,${prefix}status,${prefix}drive_file_id,${prefix}drive_parent_id,${prefix}display_name,${prefix}mime_type,
+    ${prefix}expected_size_bytes,${prefix}actual_size_bytes,${prefix}checksum_sha256,${prefix}created_at,${prefix}updated_at,${prefix}verified_at`;
 }
 
 function projectColumns(): string {
@@ -439,6 +452,78 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
     async listProjects() {
       const result = await sql.query(`select ${projectColumns()} from projects order by created_at desc,id desc`);
       return result.rows.map(parseProject);
+    },
+
+    async listManagedArtifacts() {
+      const result = await sql.query(
+        `select ${artifactColumns("a")},a.job_id,p.name as project_name
+         from artifacts a join projects p on p.id=a.project_id
+         where a.kind in ('SOURCE','OUTPUT') and a.status <> 'DELETED'
+         order by p.created_at,p.name,a.created_at,a.id`,
+      );
+      return result.rows.map(parseManagedArtifact);
+    },
+
+    async claimManagedArtifactDeletion(artifactId) {
+      const result = await sql.query(
+        `with changed as (
+           update artifacts set status='DELETING',updated_at=now()
+           where id=$1 and kind in ('SOURCE','OUTPUT') and status in ('READY','INVALID')
+           returning id
+         )
+         select case
+           when exists(select 1 from changed) then 'CLAIMED'
+           when exists(select 1 from artifacts where id=$1 and kind in ('SOURCE','OUTPUT') and status='DELETING') then 'RECONCILE'
+           when exists(select 1 from artifacts where id=$1 and kind in ('SOURCE','OUTPUT') and status='DELETED') then 'DELETED'
+           else 'CONFLICT'
+         end as outcome`,
+        [artifactId],
+      );
+      const outcome = result.rows[0]?.outcome;
+      if (
+        outcome !== "CLAIMED" && outcome !== "RECONCILE" &&
+        outcome !== "DELETED" && outcome !== "CONFLICT"
+      ) return "CONFLICT";
+      return outcome;
+    },
+
+    async markManagedArtifactDeleted(artifactId) {
+      const result = await sql.query(
+        `with changed as (
+           update artifacts set status='DELETED',updated_at=now()
+           where id=$1 and kind in ('SOURCE','OUTPUT') and status='DELETING'
+           returning id,project_id,kind
+         ), project_updated as (
+           update projects set source_status='NO_SOURCE',updated_at=now()
+           where id=(select project_id from changed where kind='SOURCE')
+           returning id
+         ), released as (
+           update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
+           where artifact_id=$1 and released_at is null and exists(select 1 from changed)
+           returning artifact_id
+         ), audited as (
+           insert into audit_events(event_type,target_id,actor_class,payload)
+           select 'DRIVE_FILE_DELETED',changed.id,'admin',jsonb_build_object(
+             'projectId',changed.project_id,
+             'artifactId',changed.id,
+             'kind',changed.kind,
+             'status','DELETED'
+           )
+           from changed
+           returning id
+         )
+         select exists(select 1 from changed) as changed,
+                exists(select 1 from audited) as audited`,
+        [artifactId],
+      );
+      if (result.rows[0]?.changed === true && result.rows[0]?.audited === true) return "CHANGED";
+      if (result.rows[0]?.changed === true) throw new Error("Managed artifact deletion transition was incomplete");
+      const replay = await sql.query(
+        "select status from artifacts where id=$1 and kind in ('SOURCE','OUTPUT')",
+        [artifactId],
+      );
+      if (replay.rows[0]?.status === "DELETED") return "REPLAY";
+      throw new Error("Managed artifact cannot be marked deleted");
     },
 
     async reserveSourceCapacity(input) {
