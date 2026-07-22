@@ -182,11 +182,23 @@ function parseDriveFile(value: unknown): DriveFile | null {
 }
 
 function boundedDriveTimestamp(value: unknown): value is string {
-  return (
-    boundedAscii(value, 20, 64) &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
-    Number.isFinite(Date.parse(value))
-  );
+  if (!boundedAscii(value, 20, 64)) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+  if (!match) return false;
+  const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = match
+    .slice(1)
+    .map((part) => part === undefined ? undefined : Number(part));
+  if (
+    year === undefined || month === undefined || day === undefined || hour === undefined ||
+    minute === undefined || second === undefined ||
+    month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 ||
+    (offsetHour !== undefined && (offsetHour > 23 || offsetMinute === undefined || offsetMinute > 59))
+  ) {
+    return false;
+  }
+  const daysInMonth = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+    31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]!;
+  return day >= 1 && day <= daysInMonth;
 }
 
 function parseVideoMediaMetadata(value: unknown): VideoMediaMetadata | null {

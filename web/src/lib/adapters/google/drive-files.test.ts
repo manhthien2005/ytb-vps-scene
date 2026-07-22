@@ -98,6 +98,64 @@ describe("createGoogleDriveFilesAdapter", () => {
       .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
   });
 
+  it("rejects an impossible Drive metadata calendar date", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      ...READY_VIDEO_FILE,
+      createdTime: "2026-02-30T07:30:00.000Z",
+    }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
+  });
+
+  it.each([
+    ["a malformed timestamp", { modifiedTime: "2026-07-22 07:35:00Z" }],
+    ["a non-leap-day timestamp", { modifiedTime: "2026-02-29T07:35:00.000Z" }],
+    ["an out-of-range timestamp time", { modifiedTime: "2026-07-22T24:35:00.000Z" }],
+    ["a zero dimension", {
+      videoMediaMetadata: { width: 0, height: 1080, durationMillis: "5076000" },
+    }],
+    ["a fractional dimension", {
+      videoMediaMetadata: { width: 1920.5, height: 1080, durationMillis: "5076000" },
+    }],
+    ["an unsafe dimension", {
+      videoMediaMetadata: { width: Number.MAX_SAFE_INTEGER + 1, height: 1080, durationMillis: "5076000" },
+    }],
+    ["a negative duration", {
+      videoMediaMetadata: { width: 1920, height: 1080, durationMillis: "-1" },
+    }],
+    ["a non-integer duration", {
+      videoMediaMetadata: { width: 1920, height: 1080, durationMillis: "5076.5" },
+    }],
+    ["an unsafe duration", {
+      videoMediaMetadata: { width: 1920, height: 1080, durationMillis: "9007199254740992" },
+    }],
+  ])("rejects present video metadata with %s", async (_reason, overrides) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      ...READY_VIDEO_FILE,
+      ...overrides,
+    }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
+  });
+
+  it.each([
+    ["embedded credentials", "https://user:password@drive.google.com/file/d/drive-video-001/view"],
+    ["a fragment", "https://drive.google.com/file/d/drive-video-001/view#private"],
+    ["a non-default port", "https://drive.google.com:8443/file/d/drive-video-001/view"],
+    ["an insecure protocol", "http://drive.google.com/file/d/drive-video-001/view"],
+    ["a non-Drive host", "https://evil.test/file/d/drive-video-001/view"],
+  ])("rejects a browser link with %s", async (_reason, webViewLink) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      ...READY_VIDEO_FILE,
+      webViewLink,
+    }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
+  });
+
   it("inspects exact account fields and masks the returned email", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       storageQuota: { limit: "1000000", usage: "125000" },
