@@ -1198,6 +1198,49 @@ describe("FakeDriveControlPlaneRepository", () => {
     expect((await fake.getProject(project.id))?.sourceStatus).toBe("NO_SOURCE");
   });
 
+  it("lists managed artifacts in their creation order instead of UUID order", async () => {
+    const fake = new FakeDriveControlPlaneRepository();
+    const reserved = await fake.reserveProject({
+      idempotencyKeyHash: HASH_A,
+      requestHash: HASH_B,
+      name: "Phim A",
+    });
+    if (reserved.outcome === "CONFLICT") throw new Error("unexpected conflict");
+    await fake.claimProvisioning("PROJECT", PROJECT_TREE_CLAIM_ID, CLAIM_TOKEN);
+    const project = await fake.completeProjectFolders(
+      reserved.project.id,
+      "drive-project-folder-001",
+      "drive-input-folder-001",
+      CLAIM_TOKEN,
+    );
+    const firstId = "20000000-0000-4000-8000-000000000006";
+    const secondId = "20000000-0000-4000-8000-000000000005";
+    for (const id of [firstId, secondId]) {
+      fake.seedManagedArtifact({
+        artifact: {
+          id,
+          projectId: project.id,
+          kind: "OUTPUT",
+          status: "READY",
+          driveFileId: `drive-output-file-${id.slice(-3)}`,
+          driveParentId: project.driveProjectFolderId!,
+          displayName: `${id}.mp4`,
+          mimeType: "video/mp4",
+          expectedSizeBytes: 100,
+          actualSizeBytes: 100,
+        },
+        projectName: "Phim A",
+        jobId: null,
+        verifiedAt: NOW.toISOString(),
+      });
+    }
+
+    await expect(fake.listManagedArtifacts()).resolves.toMatchObject([
+      { artifact: { id: firstId } },
+      { artifact: { id: secondId } },
+    ]);
+  });
+
   it("rejects reactivating a deleted source when another source is live", async () => {
     const fake = new FakeDriveControlPlaneRepository();
     const reserved = await fake.reserveProject({

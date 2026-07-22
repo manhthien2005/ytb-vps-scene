@@ -28,17 +28,25 @@ type StoredSourceCapacity = Readonly<{
   released: boolean;
 }>;
 
+type ManagedArtifactMetadata = Readonly<{
+  jobId: string | null;
+  verifiedAt: string | null;
+  createdAt: string;
+  creationOrder: number;
+}>;
+
 export class FakeDriveControlPlaneRepository implements DriveControlPlaneRepository {
   readonly auditEvents: AuditEvent[] = [];
   private readonly nonces = new Map<string, number>();
   private readonly projects = new Map<string, StoredProject>();
   private readonly artifacts = new Map<string, Artifact>();
-  private readonly managedArtifactMetadata = new Map<string, Readonly<{ jobId: string | null; verifiedAt: string | null }>>();
+  private readonly managedArtifactMetadata = new Map<string, ManagedArtifactMetadata>();
   private readonly sourceCapacities = new Map<string, StoredSourceCapacity>();
   private readonly usage = new Map<"DRIVE" | "NEON", UsageSnapshot>();
   private readonly provisioningClaims = new Map<string, Readonly<{ token: string; expiresAt: number }>>();
   private credential: StoredDriveCredential | null = null;
   private nextProjectNumber = 1;
+  private nextManagedArtifactOrder = 1;
 
   constructor(
     private readonly now: () => Date = () => new Date("2026-07-19T00:00:00.000Z"),
@@ -55,6 +63,18 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     const project = structuredClone({ ...stored.project, ...update, updatedAt: this.timestamp() });
     this.projects.set(projectId, { ...stored, project });
     return structuredClone(project);
+  }
+
+  private storeManagedArtifactMetadata(
+    artifactId: string,
+    metadata: Readonly<{ jobId: string | null; verifiedAt: string | null }>,
+  ): void {
+    const existing = this.managedArtifactMetadata.get(artifactId);
+    this.managedArtifactMetadata.set(artifactId, {
+      ...metadata,
+      createdAt: existing?.createdAt ?? this.timestamp(),
+      creationOrder: existing?.creationOrder ?? this.nextManagedArtifactOrder++,
+    });
   }
 
   async saveOAuthNonce(hash: string, expiresAt: Date): Promise<void> {
@@ -221,7 +241,8 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       .map((artifact) => {
         const project = this.projects.get(artifact.projectId)?.project;
         if (!project) throw new Error("Managed artifact project unavailable");
-        const metadata = this.managedArtifactMetadata.get(artifact.id) ?? { jobId: null, verifiedAt: null };
+        const metadata = this.managedArtifactMetadata.get(artifact.id);
+        if (!metadata) throw new Error("Managed artifact metadata unavailable");
         return {
           artifact: structuredClone(artifact),
           projectName: project.name,
@@ -232,8 +253,12 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       .sort((left, right) => {
         const leftProject = this.projects.get(left.artifact.projectId)!.project;
         const rightProject = this.projects.get(right.artifact.projectId)!.project;
+        const leftMetadata = this.managedArtifactMetadata.get(left.artifact.id)!;
+        const rightMetadata = this.managedArtifactMetadata.get(right.artifact.id)!;
         return leftProject.createdAt.localeCompare(rightProject.createdAt) ||
           left.projectName.localeCompare(right.projectName) ||
+          leftMetadata.createdAt.localeCompare(rightMetadata.createdAt) ||
+          leftMetadata.creationOrder - rightMetadata.creationOrder ||
           left.artifact.id.localeCompare(right.artifact.id);
       });
   }
@@ -242,7 +267,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     const project = this.projects.get(record.artifact.projectId)?.project;
     if (!project || project.name !== record.projectName) throw new Error("Managed artifact project unavailable");
     this.artifacts.set(record.artifact.id, structuredClone(record.artifact));
-    this.managedArtifactMetadata.set(record.artifact.id, {
+    this.storeManagedArtifactMetadata(record.artifact.id, {
       jobId: record.jobId,
       verifiedAt: record.verifiedAt,
     });
@@ -393,7 +418,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
           actualSizeBytes: null,
         };
         this.artifacts.set(replacement.id, replacement);
-        this.managedArtifactMetadata.set(replacement.id, { jobId: null, verifiedAt: null });
+        this.storeManagedArtifactMetadata(replacement.id, { jobId: null, verifiedAt: null });
         this.updateProject(input.projectId, { sourceStatus: "UPLOAD_PENDING" });
         return structuredClone(replacement);
       }
@@ -422,7 +447,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       actualSizeBytes: null,
     };
     this.artifacts.set(artifact.id, artifact);
-    this.managedArtifactMetadata.set(artifact.id, { jobId: null, verifiedAt: null });
+    this.storeManagedArtifactMetadata(artifact.id, { jobId: null, verifiedAt: null });
     this.updateProject(input.projectId, { sourceStatus: "UPLOAD_PENDING" });
     return structuredClone(artifact);
   }
@@ -456,7 +481,7 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       !Number.isFinite(verifiedAt.getTime())
     ) throw new Error("Source cannot be marked ready");
     this.artifacts.set(artifactId, { ...artifact, status: "READY", actualSizeBytes });
-    this.managedArtifactMetadata.set(artifactId, { jobId: null, verifiedAt: verifiedAt.toISOString() });
+    this.storeManagedArtifactMetadata(artifactId, { jobId: null, verifiedAt: verifiedAt.toISOString() });
     this.releaseSourceCapacity(artifactId, true);
     this.updateProject(artifact.projectId, { sourceStatus: "SOURCE_READY" });
     this.auditEvents.push({
