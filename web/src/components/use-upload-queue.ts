@@ -35,6 +35,7 @@ const VI_MESSAGES: Readonly<Record<string, string>> = {
   UPLOAD_RETRY_EXHAUSTED: "Đường truyền chưa ổn định. Tiến trình đã được giữ để thử lại.",
   UPLOAD_TOO_LARGE: "Video vượt quá giới hạn 10 GiB.",
   UPLOAD_TYPE_REJECTED: "Chỉ nhận video MP4, MOV, MKV hoặc WEBM.",
+  UPLOAD_LOCAL_CLEANUP_FAILED: "Chưa thể dọn phiên tải cục bộ. Hãy bấm Dừng và huỷ để thử lại.",
 };
 
 const EMPTY_SNAPSHOT: UploadSnapshot = {
@@ -76,6 +77,12 @@ type UseUploadQueueOptions = Readonly<{
   uploaderFactory?: (dependencies: ResumableUploaderDependencies) => ResumableUploader;
   onProjectsChange?: (projects: readonly PublicProject[]) => void;
   onSourceFile?: (projectId: string, file: File) => void;
+}>;
+
+type PendingCancellation = Readonly<{
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }>;
 
 export function uploadMessageForCode(code: string | null): string | null {
@@ -156,21 +163,36 @@ export function useUploadQueue({
   const itemsRef = useRef<readonly UploadQueueItem[]>([]);
   const projectsRef = useRef([...initialProjects]);
   const [recoveries, setRecoveries] = useState<readonly StoredUploadSession[]>([]);
+  const [recoveryReady, setRecoveryReady] = useState(false);
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const uploadersRef = useRef(new Map<string, ResumableUploader>());
   const unsubscribesRef = useRef(new Map<string, () => void>());
   const pumpingRef = useRef(false);
   const recoveriesRef = useRef<readonly StoredUploadSession[]>([]);
+  const pendingCancellationsRef = useRef(new Map<string, PendingCancellation>());
+  const cleanupRequiredRef = useRef(new Set<string>());
 
   const anyUploading = items.some((item) => item.state === "ACTIVE" && item.snapshot.phase === "UPLOADING");
 
   useEffect(() => {
     let active = true;
-    store?.list().then((rows) => {
-      if (!active) return;
-      recoveriesRef.current = rows;
-      setRecoveries(rows);
-    }).catch(() => undefined);
+    const loadRecoveries = async () => {
+      try {
+        const rows = store === null ? [] : await store.list();
+        if (!active) return;
+        recoveriesRef.current = rows;
+        setRecoveries(rows);
+      } catch {
+        if (!active) return;
+        recoveriesRef.current = [];
+        setRecoveries([]);
+      } finally {
+        if (active) {
+          setRecoveryReady(true);
+        }
+      }
+    };
+    void loadRecoveries();
     return () => { active = false; };
   }, [store]);
 
@@ -180,6 +202,10 @@ export function useUploadQueue({
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [anyUploading]);
+
+  useEffect(() => {
+    if (recoveryReady) void pump();
+  });
 
   useEffect(() => () => {
     for (const unsubscribe of unsubscribesRef.current.values()) unsubscribe();
@@ -197,6 +223,62 @@ export function useUploadQueue({
 
   function currentItem(id: string): UploadQueueItem | null {
     return itemsRef.current.find((item) => item.id === id) ?? null;
+  }
+
+  function requestPendingCancellation(id: string): Promise<void> {
+    const existing = pendingCancellationsRef.current.get(id);
+    if (existing !== undefined) return existing.promise;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    pendingCancellationsRef.current.set(id, { promise, resolve, reject });
+    return promise;
+  }
+
+  function finishPendingCancellation(id: string): void {
+    const pending = pendingCancellationsRef.current.get(id);
+    cleanupRequiredRef.current.delete(id);
+    patchItem(id, { state: "CANCELLED", message: null });
+    pendingCancellationsRef.current.delete(id);
+    pending?.resolve();
+  }
+
+  async function settleProvisioningCancellation(
+    id: string,
+    projectId: string,
+    artifactId: string | null,
+  ): Promise<void> {
+    const pending = pendingCancellationsRef.current.get(id);
+    if (pending === undefined) return;
+    let remoteCancelled = false;
+    try {
+      if (artifactId !== null) {
+        patchItem(id, { projectId, artifactId });
+        await controlPlaneApi(fetcher).cancel(projectId, artifactId);
+        remoteCancelled = true;
+        await store?.delete(projectId, artifactId);
+      }
+      finishPendingCancellation(id);
+    } catch (error) {
+      pendingCancellationsRef.current.delete(id);
+      if (remoteCancelled) cleanupRequiredRef.current.add(id);
+      const snapshot = currentItem(id)?.snapshot ?? EMPTY_SNAPSHOT;
+      patchItem(id, {
+        projectId,
+        artifactId,
+        ...(remoteCancelled ? {
+          snapshot: { ...snapshot, phase: "CANCELLED" as const, publicCode: null },
+        } : {}),
+        state: remoteCancelled ? "ACTIVE" : "FAILED",
+        message: uploadMessageForCode(
+          remoteCancelled ? "UPLOAD_LOCAL_CLEANUP_FAILED" : error instanceof Error ? error.message : null,
+        ),
+      });
+      pending.reject(error);
+    }
   }
 
   function publishProjects(next: readonly PublicProject[]): void {
@@ -270,6 +352,7 @@ export function useUploadQueue({
       return true;
     }
     if (settled.snapshot.phase === "CANCELLED") {
+      if (cleanupRequiredRef.current.has(id)) return true;
       patchItem(id, { state: "CANCELLED" });
       return true;
     }
@@ -294,6 +377,10 @@ export function useUploadQueue({
         const project = await ensureProject(item);
         projectId = project.id;
         patchItem(item.id, { projectId });
+        if (pendingCancellationsRef.current.has(item.id)) {
+          await settleProvisioningCancellation(item.id, project.id, null);
+          return;
+        }
         if (project.status !== "READY") throw new Error("DRIVE_TEMPORARILY_UNAVAILABLE");
         const body = await jsonRequest(fetcher, `/api/v1/projects/${project.id}/upload-session`, {
           fileName: identity.displayName,
@@ -301,6 +388,14 @@ export function useUploadQueue({
           sizeBytes: identity.sizeBytes,
           lastModified: identity.lastModified,
         });
+        if (pendingCancellationsRef.current.has(item.id)) {
+          await settleProvisioningCancellation(
+            item.id,
+            project.id,
+            typeof body.artifactId === "string" ? body.artifactId : null,
+          );
+          return;
+        }
         if (body.status === "SOURCE_READY") {
           patchItem(item.id, {
             snapshot: {
@@ -327,12 +422,25 @@ export function useUploadQueue({
           chunkBytes: 8_388_608,
           expiresAt: body.expiresAt,
         };
-        await store.put(record);
         patchItem(item.id, { artifactId: record.artifactId });
+        await store.put(record);
+        if (pendingCancellationsRef.current.has(item.id)) {
+          await settleProvisioningCancellation(item.id, project.id, record.artifactId);
+          return;
+        }
         await attachUploader(item.id).start(item.file, record);
       }
       settleItem(item.id, projectId);
     } catch (error) {
+      if (pendingCancellationsRef.current.has(item.id)) {
+        const artifactId = currentItem(item.id)?.artifactId ?? null;
+        if (projectId !== null) {
+          await settleProvisioningCancellation(item.id, projectId, artifactId);
+        } else {
+          finishPendingCancellation(item.id);
+        }
+        return;
+      }
       if (settleItem(item.id, projectId)) return;
       const code = error instanceof Error ? error.message : null;
       if (projectId !== null && code === "DRIVE_PROVIDER_REJECTED") {
@@ -347,13 +455,17 @@ export function useUploadQueue({
   }
 
   async function pump(): Promise<void> {
-    if (pumpingRef.current) return;
+    if (
+      pumpingRef.current || !recoveryReady ||
+      itemsRef.current.some((item) => item.state === "ACTIVE")
+    ) return;
     pumpingRef.current = true;
     try {
       while (true) {
         const next = itemsRef.current.find((item) => item.state === "QUEUED");
         if (next === undefined) return;
         await runItem(next);
+        if (currentItem(next.id)?.state === "ACTIVE") return;
       }
     } finally {
       pumpingRef.current = false;
@@ -423,31 +535,64 @@ export function useUploadQueue({
       await uploader.resume(item.file, record);
       settleItem(id, item.projectId);
     } catch (error) {
-      if (settleItem(id, item.projectId)) return;
+      if (settleItem(id, item.projectId)) {
+        await pump();
+        return;
+      }
       patchItem(id, { message: uploadMessageForCode(error instanceof Error ? error.message : null) });
     }
+    if (currentItem(id)?.state !== "ACTIVE") await pump();
   }
 
   async function cancel(id: string): Promise<void> {
     const item = currentItem(id);
     if (item === null) return;
-    if (item.state === "QUEUED" || item.artifactId === null || item.projectId === null) {
+    if (item.state === "QUEUED") {
       patchItem(id, { state: "CANCELLED" });
+      return;
+    }
+    if (item.artifactId === null || item.projectId === null) {
+      if (item.state === "ACTIVE") {
+        await requestPendingCancellation(id);
+        return;
+      }
+      patchItem(id, { state: "CANCELLED" });
+      await pump();
+      return;
+    }
+    if (
+      item.state === "ACTIVE" && item.snapshot.phase !== "CANCELLED" &&
+      uploadersRef.current.get(id) === undefined
+    ) {
+      await requestPendingCancellation(id);
       return;
     }
     try {
       const uploader = uploadersRef.current.get(id);
-      if (uploader !== undefined) {
+      if (item.snapshot.phase === "CANCELLED") {
+        await store?.delete(item.projectId, item.artifactId);
+      } else if (uploader !== undefined) {
         await uploader.cancel();
       } else {
         await controlPlaneApi(fetcher).cancel(item.projectId, item.artifactId);
         await store?.delete(item.projectId, item.artifactId);
       }
+      cleanupRequiredRef.current.delete(id);
       patchItem(id, { state: "CANCELLED", message: null });
     } catch (error) {
+      if (currentItem(id)?.snapshot.phase === "CANCELLED") {
+        cleanupRequiredRef.current.add(id);
+        patchItem(id, {
+          state: "ACTIVE",
+          message: uploadMessageForCode("UPLOAD_LOCAL_CLEANUP_FAILED"),
+        });
+        return;
+      }
       if (settleItem(id, item.projectId)) return;
       patchItem(id, { message: uploadMessageForCode(error instanceof Error ? error.message : null) });
+      return;
     }
+    await pump();
   }
 
   async function retry(id: string): Promise<void> {

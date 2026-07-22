@@ -63,6 +63,16 @@ function projectBody(project: PublicProject) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 describe("ProjectUpload", () => {
   it("disables new work when quota evidence is stale", () => {
     render(<ProjectUpload health={{ ...HEALTHY, mode: "READ_ONLY", reasons: ["DRIVE_QUOTA_STALE"] }} projects={[]} />);
@@ -108,6 +118,168 @@ describe("ProjectUpload", () => {
       expect.any(Object),
     );
     expect(onProjectsChange).toHaveBeenCalledWith([PROJECT]);
+  });
+
+  it("stops provisioning when permanent cancel is requested during project creation", async () => {
+    const pendingProject = deferred<Response>();
+    const fetcher = vi.fn<typeof fetch>().mockReturnValueOnce(pendingProject.promise);
+    const uploaderFactory = vi.fn<(dependencies: ResumableUploaderDependencies) => ResumableUploader>();
+    render(
+      <ProjectUpload
+        fetcher={fetcher}
+        health={HEALTHY}
+        projects={[]}
+        store={memoryStore()}
+        uploaderFactory={uploaderFactory}
+      />,
+    );
+    const file = new File([new Uint8Array(100)], "cancel-project.mp4", {
+      type: "video/mp4",
+      lastModified: 1,
+    });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cancel-project.mp4" }));
+    pendingProject.resolve(projectBody(PROJECT));
+
+    await waitFor(() => expect(screen.queryByText("cancel-project.mp4")).not.toBeInTheDocument());
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(uploaderFactory).not.toHaveBeenCalled();
+  });
+
+  it("remotely cancels an artifact that materializes after provisioning cancel", async () => {
+    const artifactId = "20000000-0000-4000-8000-000000000009";
+    const pendingSession = deferred<Response>();
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockReturnValueOnce(pendingSession.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    const uploaderFactory = vi.fn<(dependencies: ResumableUploaderDependencies) => ResumableUploader>();
+    render(
+      <ProjectUpload
+        fetcher={fetcher}
+        health={HEALTHY}
+        projects={[]}
+        store={memoryStore()}
+        uploaderFactory={uploaderFactory}
+      />,
+    );
+    const file = new File([new Uint8Array(100)], "cancel-session.mp4", {
+      type: "video/mp4",
+      lastModified: 1,
+    });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cancel-session.mp4" }));
+    pendingSession.resolve(sessionBody(artifactId));
+
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    expect(fetcher).toHaveBeenNthCalledWith(
+      3,
+      `/api/v1/projects/${PROJECT.id}/upload-cancel`,
+      expect.objectContaining({ body: JSON.stringify({ artifactId }), method: "POST" }),
+    );
+    await waitFor(() => expect(screen.queryByText("cancel-session.mp4")).not.toBeInTheDocument());
+    expect(uploaderFactory).not.toHaveBeenCalled();
+  });
+
+  it("remotely cancels after a persisted upload capability finishes saving", async () => {
+    const artifactId = "20000000-0000-4000-8000-000000000010";
+    const pendingPut = deferred<void>();
+    const baseStore = memoryStore();
+    const store: UploadSessionStore = {
+      ...baseStore,
+      put: vi.fn(async () => pendingPut.promise),
+      delete: vi.fn(baseStore.delete),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(artifactId))
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    const uploaderFactory = vi.fn<(dependencies: ResumableUploaderDependencies) => ResumableUploader>();
+    render(
+      <ProjectUpload
+        fetcher={fetcher}
+        health={HEALTHY}
+        projects={[]}
+        store={store}
+        uploaderFactory={uploaderFactory}
+      />,
+    );
+    const file = new File([new Uint8Array(100)], "cancel-save.mp4", {
+      type: "video/mp4",
+      lastModified: 1,
+    });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    await waitFor(() => expect(store.put).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cancel-save.mp4" }));
+    pendingPut.resolve();
+
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    expect(fetcher).toHaveBeenNthCalledWith(
+      3,
+      `/api/v1/projects/${PROJECT.id}/upload-cancel`,
+      expect.objectContaining({ body: JSON.stringify({ artifactId }), method: "POST" }),
+    );
+    expect(store.delete).toHaveBeenCalledWith(PROJECT.id, artifactId);
+    await waitFor(() => expect(screen.queryByText("cancel-save.mp4")).not.toBeInTheDocument());
+    expect(uploaderFactory).not.toHaveBeenCalled();
+  });
+
+  it("remotely cancels a materialized artifact when capability persistence rejects", async () => {
+    const artifactId = "20000000-0000-4000-8000-000000000013";
+    const pendingPut = deferred<void>();
+    const baseStore = memoryStore();
+    const store: UploadSessionStore = {
+      ...baseStore,
+      put: vi.fn(() => pendingPut.promise),
+      delete: vi.fn(baseStore.delete),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(artifactId))
+      .mockResolvedValueOnce(new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    const uploaderFactory = vi.fn<(dependencies: ResumableUploaderDependencies) => ResumableUploader>();
+    render(
+      <ProjectUpload
+        fetcher={fetcher}
+        health={HEALTHY}
+        projects={[]}
+        store={store}
+        uploaderFactory={uploaderFactory}
+      />,
+    );
+    const file = new File([new Uint8Array(100)], "cancel-rejected-save.mp4", {
+      type: "video/mp4",
+      lastModified: 1,
+    });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    await waitFor(() => expect(store.put).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cancel-rejected-save.mp4" }));
+    pendingPut.reject(new Error("INDEXEDDB_PUT_FAILED"));
+
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3));
+    expect(fetcher).toHaveBeenNthCalledWith(
+      3,
+      `/api/v1/projects/${PROJECT.id}/upload-cancel`,
+      expect.objectContaining({ body: JSON.stringify({ artifactId }), method: "POST" }),
+    );
+    expect(store.delete).toHaveBeenCalledWith(PROJECT.id, artifactId);
+    await waitFor(() => expect(screen.queryByText("cancel-rejected-save.mp4")).not.toBeInTheDocument());
+    expect(uploaderFactory).not.toHaveBeenCalled();
   });
 
   it("sends the extension-derived MIME type even when the browser reports none", async () => {
@@ -180,6 +352,74 @@ describe("ProjectUpload", () => {
     expect(onSourceFile).toHaveBeenNthCalledWith(1, PROJECT.id, first);
     expect(onSourceFile).toHaveBeenNthCalledWith(2, SECOND_PROJECT.id, second);
     expect(screen.getByLabelText("Thêm video")).toBeEnabled();
+  });
+
+  it("keeps a paused first upload ahead of a queued second upload until resume settles", async () => {
+    const firstStart = deferred<void>();
+    const firstResume = deferred<void>();
+    let firstListener: ((snapshot: UploadSnapshot) => void) | null = null;
+    let secondListener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const uploading: UploadSnapshot = {
+      phase: "UPLOADING",
+      committedBytes: 0,
+      totalBytes: 100,
+      bytesPerSecond: 25,
+      publicCode: null,
+    };
+    const firstUploader: ResumableUploader = {
+      start: vi.fn(async () => {
+        firstListener?.(uploading);
+        await firstStart.promise;
+      }),
+      resume: vi.fn(async (file) => {
+        await firstResume.promise;
+        firstListener?.({ ...uploading, phase: "READY", committedBytes: file.size, totalBytes: file.size });
+      }),
+      pause: vi.fn(() => {
+        firstListener?.({ ...uploading, phase: "PAUSED" });
+        firstStart.resolve();
+      }),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { firstListener = next; return () => { firstListener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => uploading),
+    };
+    const secondUploader: ResumableUploader = {
+      start: vi.fn(async (file) => {
+        secondListener?.({ ...uploading, phase: "READY", committedBytes: file.size, totalBytes: file.size });
+      }),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { secondListener = next; return () => { secondListener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const uploaderFactory = vi.fn()
+      .mockReturnValueOnce(firstUploader)
+      .mockReturnValueOnce(secondUploader);
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id))
+      .mockResolvedValueOnce(projectBody(SECOND_PROJECT))
+      .mockResolvedValueOnce(sessionBody(SECOND_PROJECT.id));
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={uploaderFactory} />);
+    const first = new File([new Uint8Array(100)], "first.mp4", { type: "video/mp4", lastModified: 1 });
+    const second = new File([new Uint8Array(80)], "second.mp4", { type: "video/mp4", lastModified: 2 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [first, second] } });
+    await waitFor(() => expect(firstUploader.start).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Tạm dừng first.mp4" }));
+    await screen.findByRole("button", { name: "Tiếp tục first.mp4" });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+
+    expect(secondUploader.start).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Tiếp tục first.mp4" }));
+    await waitFor(() => expect(firstUploader.resume).toHaveBeenCalled());
+    expect(secondUploader.start).not.toHaveBeenCalled();
+    firstResume.resolve();
+
+    await waitFor(() => expect(secondUploader.start).toHaveBeenCalledWith(second, expect.any(Object)));
   });
 
   it("marks unsupported files as failed without calling the server", async () => {
@@ -264,6 +504,54 @@ describe("ProjectUpload", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("waits for persisted-session recovery before matching an immediately selected file", async () => {
+    const persisted: StoredUploadSession = {
+      projectId: PROJECT.id,
+      artifactId: "20000000-0000-4000-8000-000000000011",
+      sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=recovery-gate",
+      fileIdentity: {
+        displayName: "instant.mp4",
+        sizeBytes: 100,
+        mimeType: "video/mp4",
+        lastModified: 1,
+      },
+      nextOffset: 50,
+      chunkBytes: 8_388_608,
+      expiresAt: "2026-07-26T00:00:00.000Z",
+    };
+    const pendingList = deferred<readonly StoredUploadSession[]>();
+    const baseStore = memoryStore([persisted]);
+    const store: UploadSessionStore = { ...baseStore, list: vi.fn(() => pendingList.promise) };
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const uploader: ResumableUploader = {
+      start: vi.fn(),
+      resume: vi.fn(async () => listener?.({
+        phase: "UPLOADING",
+        committedBytes: 50,
+        totalBytes: 100,
+        bytesPerSecond: 25,
+        publicCode: null,
+      })),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const fetcher = vi.fn<typeof fetch>();
+    render(<ProjectUpload health={HEALTHY} projects={[PROJECT]} fetcher={fetcher} store={store} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "instant.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    await act(async () => { await Promise.resolve(); });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(uploader.resume).not.toHaveBeenCalled();
+
+    pendingList.resolve([persisted]);
+    await waitFor(() => expect(uploader.resume).toHaveBeenCalledWith(file, persisted));
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("retries a failed item through the same sequential queue", async () => {
     let listener: ((snapshot: UploadSnapshot) => void) | null = null;
     const uploader: ResumableUploader = {
@@ -334,6 +622,63 @@ describe("ProjectUpload", () => {
     expect(screen.getByText("video.mp4")).toBeVisible();
     await act(async () => resolveCancel?.());
     await waitFor(() => expect(screen.queryByText("video.mp4")).not.toBeInTheDocument());
+    confirm.mockRestore();
+  });
+
+  it("keeps a remotely cancelled item visible when local cleanup fails and retries cleanup", async () => {
+    const artifactId = "20000000-0000-4000-8000-000000000012";
+    const baseStore = memoryStore();
+    const deleteCapability = vi.fn()
+      .mockRejectedValueOnce(new Error("INDEXEDDB_DELETE_FAILED"))
+      .mockResolvedValueOnce(undefined);
+    const store: UploadSessionStore = { ...baseStore, delete: deleteCapability };
+    const pendingStart = deferred<void>();
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const uploading: UploadSnapshot = {
+      phase: "UPLOADING",
+      committedBytes: 50,
+      totalBytes: 100,
+      bytesPerSecond: 25,
+      publicCode: null,
+    };
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => {
+        listener?.(uploading);
+        await pendingStart.promise;
+      }),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(async () => {
+        listener?.({ ...uploading, phase: "CANCELLED", bytesPerSecond: 0 });
+        await store.delete(PROJECT.id, artifactId);
+      }),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => uploading),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(artifactId));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={store} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "cleanup.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    expect(await screen.findByText("50%")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cleanup.mp4" }));
+
+    expect(await screen.findByText("Chưa thể dọn phiên tải cục bộ. Hãy bấm Dừng và huỷ để thử lại.")).toBeVisible();
+    expect(screen.getByText("cleanup.mp4")).toBeVisible();
+    pendingStart.resolve();
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("cleanup.mp4")).toBeVisible();
+    expect(screen.getByText("Chưa thể dọn phiên tải cục bộ. Hãy bấm Dừng và huỷ để thử lại.")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dừng và huỷ cleanup.mp4" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cleanup.mp4" }));
+
+    await waitFor(() => expect(screen.queryByText("cleanup.mp4")).not.toBeInTheDocument());
+    expect(uploader.cancel).toHaveBeenCalledTimes(1);
+    expect(deleteCapability).toHaveBeenCalledTimes(2);
     confirm.mockRestore();
   });
 

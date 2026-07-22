@@ -33,6 +33,7 @@ function statusLabel(item: UploadQueueItem): string {
   if (item.state === "DONE") return "Đã lên Drive";
   if (item.state === "FAILED") return "Tải lỗi";
   if (item.state === "CANCELLED") return "Đã huỷ";
+  if (item.snapshot.phase === "CANCELLED") return "Chờ dọn dẹp";
   if (item.snapshot.phase === "PAUSED") return "Tạm dừng";
   if (item.snapshot.phase === "PAUSED_ERROR" || item.snapshot.phase === "PAUSED_VERIFYING") {
     return "Chờ thử lại";

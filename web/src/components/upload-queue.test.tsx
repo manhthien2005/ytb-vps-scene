@@ -133,7 +133,10 @@ describe("UploadQueue", () => {
   it("prevents repeated permanent cancellation while the request is pending", async () => {
     let resolveCancel: (() => void) | null = null;
     const actions = handlers();
-    actions.onCancel.mockImplementation(() => new Promise<void>((resolve) => { resolveCancel = resolve; }));
+    actions.onCancel.mockImplementation(async (): Promise<undefined> => {
+      await new Promise<void>((resolve) => { resolveCancel = resolve; });
+      return undefined;
+    });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<UploadQueue items={[ACTIVE_ITEM]} {...actions} />);
     const cancel = screen.getByRole("button", { name: "Dừng và huỷ bangkok.mp4" });
