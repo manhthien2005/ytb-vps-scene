@@ -32,7 +32,6 @@ type ManagedArtifactMetadata = Readonly<{
   jobId: string | null;
   verifiedAt: string | null;
   createdAt: string;
-  creationOrder: number;
 }>;
 
 export class FakeDriveControlPlaneRepository implements DriveControlPlaneRepository {
@@ -46,7 +45,6 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
   private readonly provisioningClaims = new Map<string, Readonly<{ token: string; expiresAt: number }>>();
   private credential: StoredDriveCredential | null = null;
   private nextProjectNumber = 1;
-  private nextManagedArtifactOrder = 1;
 
   constructor(
     private readonly now: () => Date = () => new Date("2026-07-19T00:00:00.000Z"),
@@ -73,7 +71,6 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     this.managedArtifactMetadata.set(artifactId, {
       ...metadata,
       createdAt: existing?.createdAt ?? this.timestamp(),
-      creationOrder: existing?.creationOrder ?? this.nextManagedArtifactOrder++,
     });
   }
 
@@ -258,7 +255,6 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
         return leftProject.createdAt.localeCompare(rightProject.createdAt) ||
           left.projectName.localeCompare(right.projectName) ||
           leftMetadata.createdAt.localeCompare(rightMetadata.createdAt) ||
-          leftMetadata.creationOrder - rightMetadata.creationOrder ||
           left.artifact.id.localeCompare(right.artifact.id);
       });
   }

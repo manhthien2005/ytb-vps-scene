@@ -1198,8 +1198,9 @@ describe("FakeDriveControlPlaneRepository", () => {
     expect((await fake.getProject(project.id))?.sourceStatus).toBe("NO_SOURCE");
   });
 
-  it("lists managed artifacts in their creation order instead of UUID order", async () => {
-    const fake = new FakeDriveControlPlaneRepository();
+  it("orders managed artifacts by creation time then artifact ID", async () => {
+    let now = new Date("2026-07-19T12:00:00.000Z");
+    const fake = new FakeDriveControlPlaneRepository(() => now);
     const reserved = await fake.reserveProject({
       idempotencyKeyHash: HASH_A,
       requestHash: HASH_B,
@@ -1214,8 +1215,9 @@ describe("FakeDriveControlPlaneRepository", () => {
       CLAIM_TOKEN,
     );
     const firstId = "20000000-0000-4000-8000-000000000006";
-    const secondId = "20000000-0000-4000-8000-000000000005";
-    for (const id of [firstId, secondId]) {
+    const laterHigherId = "20000000-0000-4000-8000-000000000003";
+    const laterLowerId = "20000000-0000-4000-8000-000000000002";
+    for (const id of [firstId, laterHigherId]) {
       fake.seedManagedArtifact({
         artifact: {
           id,
@@ -1233,11 +1235,31 @@ describe("FakeDriveControlPlaneRepository", () => {
         jobId: null,
         verifiedAt: NOW.toISOString(),
       });
+      now = new Date(now.getTime() + 1_000);
     }
+    now = new Date(now.getTime() - 1_000);
+    fake.seedManagedArtifact({
+      artifact: {
+        id: laterLowerId,
+        projectId: project.id,
+        kind: "OUTPUT",
+        status: "READY",
+        driveFileId: "drive-output-file-002",
+        driveParentId: project.driveProjectFolderId!,
+        displayName: "later-lower.mp4",
+        mimeType: "video/mp4",
+        expectedSizeBytes: 100,
+        actualSizeBytes: 100,
+      },
+      projectName: "Phim A",
+      jobId: null,
+      verifiedAt: NOW.toISOString(),
+    });
 
     await expect(fake.listManagedArtifacts()).resolves.toMatchObject([
       { artifact: { id: firstId } },
-      { artifact: { id: secondId } },
+      { artifact: { id: laterLowerId } },
+      { artifact: { id: laterHigherId } },
     ]);
   });
 
