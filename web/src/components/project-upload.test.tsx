@@ -66,7 +66,7 @@ function projectBody(project: PublicProject) {
 describe("ProjectUpload", () => {
   it("disables new work when quota evidence is stale", () => {
     render(<ProjectUpload health={{ ...HEALTHY, mode: "READ_ONLY", reasons: ["DRIVE_QUOTA_STALE"] }} projects={[]} />);
-    expect(screen.getByLabelText("File video")).toBeDisabled();
+    expect(screen.getByLabelText("Thêm video")).toBeDisabled();
     expect(screen.getByText("Chưa xác minh được dung lượng Google Drive.")).toBeVisible();
   });
 
@@ -90,7 +90,7 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={uploaderFactory} onProjectsChange={onProjectsChange} />);
     const file = new File([new Uint8Array(100)], "Phim thử nghiệm.mp4", { type: "video/mp4", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
     expect(await screen.findByText("50%")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Tiến trình Phim thử nghiệm" })).toHaveAttribute("aria-valuenow", "50");
@@ -126,7 +126,7 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
     const file = new File([new Uint8Array(100)], "phim.mkv", { type: "", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
     expect(fetcher).toHaveBeenNthCalledWith(
@@ -171,15 +171,15 @@ describe("ProjectUpload", () => {
     const first = new File([new Uint8Array(100)], "Video một.mp4", { type: "video/mp4", lastModified: 1 });
     const second = new File([new Uint8Array(80)], "Video hai.mp4", { type: "video/mp4", lastModified: 2 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [first, second] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [first, second] } });
 
     await waitFor(() => expect(screen.getAllByText("Đã lên Drive")).toHaveLength(2));
     expect(started).toEqual(["Video một.mp4", "Video hai.mp4"]);
-    expect(screen.getByText("Video một")).toBeVisible();
-    expect(screen.getByText("Video hai")).toBeVisible();
+    expect(screen.getByText("Video một.mp4")).toBeVisible();
+    expect(screen.getByText("Video hai.mp4")).toBeVisible();
     expect(onSourceFile).toHaveBeenNthCalledWith(1, PROJECT.id, first);
     expect(onSourceFile).toHaveBeenNthCalledWith(2, SECOND_PROJECT.id, second);
-    expect(screen.getByLabelText("File video")).toBeEnabled();
+    expect(screen.getByLabelText("Thêm video")).toBeEnabled();
   });
 
   it("marks unsupported files as failed without calling the server", async () => {
@@ -187,10 +187,11 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} />);
     const file = new File([new Uint8Array(10)], "tài liệu.pdf", { type: "application/pdf", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
     expect(await screen.findByText("Chỉ nhận video MP4, MOV, MKV hoặc WEBM.")).toBeVisible();
     expect(screen.getByText("Tải lỗi")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Thử lại tài liệu.pdf" })).not.toBeInTheDocument();
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -212,12 +213,12 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
     expect(await screen.findByText("50%")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Tạm dừng" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Tiếp tục" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tạm dừng video.mp4" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Tiếp tục video.mp4" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Tiếp tục video.mp4" }));
     await waitFor(() => expect(uploader.resume).toHaveBeenCalled());
   });
 
@@ -257,10 +258,83 @@ describe("ProjectUpload", () => {
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
     expect(await screen.findByText(/Có phiên tải dở/)).toBeVisible();
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
     await waitFor(() => expect(uploader.resume).toHaveBeenCalledWith(file, persisted));
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed item through the same sequential queue", async () => {
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const uploader: ResumableUploader = {
+      start: vi.fn(async (file) => listener?.({
+        phase: "READY",
+        committedBytes: file.size,
+        totalBytes: file.size,
+        bytesPerSecond: 0,
+        publicCode: null,
+      })),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: "DRIVE_TEMPORARILY_UNAVAILABLE" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    expect(await screen.findByText("Tải lỗi")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại video.mp4" }));
+
+    await waitFor(() => expect(uploader.start).toHaveBeenCalled());
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText("Đã lên Drive")).toBeVisible();
+  });
+
+  it("keeps an item visible until permanent cancellation succeeds", async () => {
+    let listener: ((snapshot: UploadSnapshot) => void) | null = null;
+    let resolveCancel: (() => void) | null = null;
+    const snapshot: UploadSnapshot = {
+      phase: "UPLOADING",
+      committedBytes: 50,
+      totalBytes: 100,
+      bytesPerSecond: 25,
+      publicCode: null,
+    };
+    const uploader: ResumableUploader = {
+      start: vi.fn(async () => listener?.(snapshot)),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(() => new Promise<void>((resolve) => { resolveCancel = resolve; })),
+      subscribe: vi.fn((next) => { listener = next; return () => { listener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+    };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(PROJECT.id));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={() => uploader} />);
+    const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
+    expect(await screen.findByText("50%")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ video.mp4" }));
+
+    expect(uploader.cancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("video.mp4")).toBeVisible();
+    await act(async () => resolveCancel?.());
+    await waitFor(() => expect(screen.queryByText("video.mp4")).not.toBeInTheDocument());
+    confirm.mockRestore();
   });
 
   it("exposes upload diagnostics on the section element", async () => {
@@ -280,7 +354,7 @@ describe("ProjectUpload", () => {
     render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={memoryStore()} uploaderFactory={(value) => { dependencies = value; return uploader; }} />);
     const file = new File([new Uint8Array(100)], "video.mp4", { type: "video/mp4", lastModified: 1 });
 
-    fireEvent.change(screen.getByLabelText("File video"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
     await waitFor(() => expect(dependencies).not.toBeNull());
 
     const consoleDiagnostic = vi.spyOn(console, "error").mockImplementation(() => undefined);
