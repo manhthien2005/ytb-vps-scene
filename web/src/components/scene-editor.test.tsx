@@ -1,18 +1,20 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SceneEditor } from "./scene-editor";
 
 describe("SceneEditor", () => {
-  it("offers rectangle review and a TTS preview without requiring a VPS", () => {
-    const synth = { cancel: vi.fn(), speak: vi.fn() };
-    Object.defineProperty(window, "speechSynthesis", { configurable: true, value: synth });
-    Object.defineProperty(window, "SpeechSynthesisUtterance", { configurable: true, value: class { text: string; lang = ""; rate = 1; constructor(text: string) { this.text = text; } } });
-    const speak = synth.speak;
-    render(<SceneEditor projectId={null} />);
+  it("offers rectangle review and previews TTS through the CapCut endpoint", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(new Blob(["mp3"], { type: "audio/mpeg" }), { status: 200 }));
+    const play = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window, "Audio", { configurable: true, value: class { src: string; constructor(src: string) { this.src = src; } play = play; } });
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn().mockReturnValue("blob:tts-preview") });
+    render(<SceneEditor projectId={null} fetcher={fetcher} />);
     expect(screen.getByText("Vùng phụ đề gốc")).toBeVisible();
     expect(screen.getByText("Vùng logo")).toBeVisible();
+    expect(screen.queryByLabelText("Voice")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Nghe thử TTS" }));
-    expect(speak).toHaveBeenCalled();
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    expect(fetcher).toHaveBeenCalledWith("/api/v1/tts-preview", expect.objectContaining({ method: "POST" }));
   });
 
   it("saves settings to the project control-plane endpoint", async () => {

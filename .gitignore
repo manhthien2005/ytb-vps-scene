@@ -8,6 +8,8 @@ dist/
 runtime/
 secrets/
 capcut-devices/
+device-*.json
+capcut-device.json
 *.part
 *.part.*
 .worktrees/

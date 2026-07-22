@@ -21,9 +21,12 @@ python -m ytb_vps_v2 media-run \
   --source /var/lib/ytb-vps/input/source.mp4 \
   --workspace /var/lib/ytb-vps/runs/test-1 \
   --blur 20:20:320:160 \
-  --tts-provider edge \
-  --voice vi-VN-HoaiMyNeural
+  --tts-provider capcut
 ```
+
+The smoke test uses the same fixed CapCut BV074 voice as the worker. Configure
+`YTB_VPS_CAPCUT_DEVICE_FILE` or `YTB_VPS_CAPCUT_DEVICE_POOL_DIR` before running
+it; there is no Edge TTS fallback.
 
 The next control-plane bridge will supply the source and saved scene settings
 to this same command; it is deliberately not a second renderer.

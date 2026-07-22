@@ -1,3 +1,4 @@
+from ytb_vps_v2.adapters.offline.capcut_tts import CapCutTtsProvider
 from ytb_vps_v2.adapters.offline.providers import (
     DeterministicOcrProvider,
     DeterministicTranslationProvider,
@@ -7,6 +8,7 @@ from ytb_vps_v2.adapters.offline.providers import (
 
 
 __all__ = [
+    "CapCutTtsProvider",
     "DeterministicOcrProvider",
     "DeterministicTranslationProvider",
     "DeterministicWaveTtsProvider",

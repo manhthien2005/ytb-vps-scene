@@ -60,6 +60,17 @@ export function createSsh2Transport(): SetupTransport {
                 });
               });
             },
+            upload(localPath, remotePath) {
+              return new Promise((uploadResolve, uploadReject) => {
+                client.sftp((error, sftp) => {
+                  if (error) { uploadReject(error); return; }
+                  sftp.fastPut(localPath, remotePath, { mode: 0o600 }, (uploadError) => {
+                    sftp.end();
+                    if (uploadError) uploadReject(uploadError); else uploadResolve();
+                  });
+                });
+              });
+            },
             close: () => client.end(),
           });
         });

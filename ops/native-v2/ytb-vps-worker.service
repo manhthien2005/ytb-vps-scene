@@ -13,6 +13,8 @@ WorkingDirectory=/var/lib/ytb-vps
 Environment=PATH=/opt/ytb-vps/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=YTB_VPS_FFMPEG=/usr/local/bin/ffmpeg-v2
 Environment=YTB_VPS_FFPROBE=/usr/local/bin/ffprobe-v2
+Environment=YTB_VPS_CAPCUT_DEVICE_FILE=/var/lib/ytb-vps/secrets/capcut-device.json
+Environment=YTB_VPS_CAPCUT_DEVICE_POOL_DIR=/var/lib/ytb-vps/secrets/capcut-devices
 ExecStart=/opt/ytb-vps/current/.venv/bin/python -m ytb_vps_v2 worker-run --credential-path /var/lib/ytb-vps/worker-credential.json
 Restart=on-failure
 RestartSec=10

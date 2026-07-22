@@ -33,7 +33,7 @@ describe("POST /api/v1/worker/claim", () => {
         sceneSettings: {
           sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
           logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
-          voice: "vi-VN-HoaiMyNeural",
+          voice: "BV074_streaming",
           rate: 1,
         },
       },

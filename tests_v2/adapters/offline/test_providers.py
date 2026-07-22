@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import io
+import subprocess
+import tempfile
 import unittest
 import wave
 from fractions import Fraction
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 import ytb_vps_v2.adapters.filesystem as filesystem_adapters
 import ytb_vps_v2.adapters.offline as offline_adapters
 import ytb_vps_v2.ports as ports
+from ytb_vps_v2.adapters.offline.capcut_tts import CapCutTtsProvider, _download_audio, _safe_audio_url
 from ytb_vps_v2.adapters.offline.providers import (
     DeterministicOcrProvider,
     DeterministicTranslationProvider,
@@ -168,6 +172,123 @@ class DeterministicProviderTests(unittest.TestCase):
             self.assertEqual(reader.getframerate(), 8_000)
             self.assertEqual(reader.getnframes(), 30 * 8_000)
             self.assertEqual(reader.getcomptype(), "NONE")
+
+
+class CapCutProviderTests(unittest.TestCase):
+    def _device_file(self, directory: Path) -> Path:
+        path = directory / "device-001.json"
+        path.write_text('{"device_id":"device","iid":"install","tdid":"trace"}', encoding="utf-8")
+        return path
+
+    def _wave_bytes(self) -> bytes:
+        output = io.BytesIO()
+        with wave.open(output, "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(24_000)
+            writer.writeframes(b"\x00\x00" * 240)
+        return output.getvalue()
+
+    def test_capcut_provider_uses_bv074_protocol_and_returns_canonical_tts_document(self) -> None:
+        translation = DeterministicTranslationProvider(target_language="vi").translate(track())
+        responses = iter([
+            {"ret": "0", "data": {"tasks": [{"id": "task", "token": "token"}]}},
+            {"ret": "0", "data": {"tasks": [{"status": "succeed", "payload": '{"audio":"https://v16m-default.tiktokcdn.com/audio.mp3"}'}]}},
+        ])
+        calls: list[tuple[str, object]] = []
+
+        def request_json(url: str, body: object, device: object, timeout: float) -> dict[str, object]:
+            calls.append((url, body))
+            return next(responses)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            device = self._device_file(directory)
+            wave_bytes = self._wave_bytes()
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                self.assertIn("-ac", command)
+                self.assertIn("1", command)
+                self.assertIn("-ar", command)
+                self.assertIn("24000", command)
+                Path(command[-1]).write_bytes(wave_bytes)
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            with patch("ytb_vps_v2.adapters.offline.capcut_tts.subprocess.run", side_effect=fake_run):
+                result = CapCutTtsProvider(
+                    device_path=device,
+                    device_pool_dir=directory / "missing",
+                    request_json=request_json,
+                    download_audio=lambda url: b"mp3" * 80,
+                    resolve_audio_host=lambda host: ("93.184.216.34",),
+                    query_interval_seconds=0,
+                ).synthesize(translation)
+
+        self.assertEqual(result.audio_bytes, wave_bytes)
+        self.assertEqual(result.document.cues, translation.cues)
+        self.assertEqual(result.document.audio_path, PurePosixPath("artifacts/tts/voice.wav"))
+        self.assertEqual(result.document.audio_digest, digest(wave_bytes))
+        self.assertIn("/lv/v1/common_task/new?", calls[0][0])
+        self.assertIn("/lv/v1/common_task/query?", calls[1][0])
+        self.assertIn("BV074_streaming", str(calls[0][1]))
+        self.assertIn("7102355709945188865", str(calls[0][1]))
+
+    def test_capcut_provider_rejects_missing_or_invalid_device_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            invalid = directory / "device.json"
+            invalid.write_text('{"device_id":"device"}', encoding="utf-8")
+            provider = CapCutTtsProvider(device_path=invalid, device_pool_dir=directory / "missing")
+            with self.assertRaisesRegex(Exception, "credential is invalid"):
+                provider.synthesize(DeterministicTranslationProvider(target_language="vi").translate(track()))
+
+    def test_capcut_audio_url_safety_rejects_private_or_non_https_hosts(self) -> None:
+        resolver = lambda host: ("93.184.216.34",)
+        self.assertEqual(_safe_audio_url("https://v16m-default.tiktokcdn.com/audio.mp3", resolver), "https://v16m-default.tiktokcdn.com/audio.mp3")
+        with self.assertRaisesRegex(Exception, "unsafe"):
+            _safe_audio_url("http://v16m-default.tiktokcdn.com/audio.mp3", resolver)
+        with self.assertRaisesRegex(Exception, "not allowed"):
+            _safe_audio_url("https://example.com/audio.mp3", resolver)
+        with self.assertRaisesRegex(Exception, "private"):
+            _safe_audio_url("https://v16m-default.tiktokcdn.com/audio.mp3", lambda host: ("127.0.0.1",))
+
+    def test_capcut_audio_download_pins_the_validated_dns_address(self) -> None:
+        connections: list[tuple[str, str]] = []
+
+        class Response:
+            status = 200
+
+            def read(self, _size: int) -> bytes:
+                if hasattr(self, "done"):
+                    return b""
+                self.done = True
+                return b"mp3" * 80
+
+        class Connection:
+            def request(self, method: str, path: str, headers: object) -> None:
+                self.request_value = (method, path, headers)
+
+            def getresponse(self) -> Response:
+                return Response()
+
+            def close(self) -> None:
+                pass
+
+        def connection_factory(hostname: str, address: str, timeout: float) -> Connection:
+            connections.append((hostname, address))
+            self.assertEqual(timeout, 10)
+            return Connection()
+
+        audio = _download_audio(
+            "https://v16m-default.tiktokcdn.com/audio.mp3",
+            timeout=10,
+            max_bytes=1024,
+            resolver=lambda _host: ("93.184.216.34",),
+            connection_factory=connection_factory,
+        )
+
+        self.assertEqual(audio, b"mp3" * 80)
+        self.assertEqual(connections, [("v16m-default.tiktokcdn.com", "93.184.216.34")])
 
 
 if __name__ == "__main__":

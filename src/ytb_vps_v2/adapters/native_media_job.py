@@ -23,7 +23,8 @@ from ytb_vps_v2.adapters.filesystem.additive import LocalAdditiveObjectStore
 from ytb_vps_v2.adapters.filesystem.archive import VerifiedInputArchiver
 from ytb_vps_v2.adapters.filesystem.composition import LocalArtifactWriterFactory, LocalFileDigestVerifier, LocalPartPublisherFactory
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity
-from ytb_vps_v2.adapters.offline.providers import DeterministicOcrProvider, DeterministicTranslationProvider, EdgeTtsProvider
+from ytb_vps_v2.adapters.offline.capcut_tts import CapCutTtsProvider
+from ytb_vps_v2.adapters.offline.providers import DeterministicOcrProvider, DeterministicTranslationProvider
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.media_job import MediaJobError, MediaJobExecutor, scene_blur_regions
@@ -70,7 +71,7 @@ def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, An
             media,
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(target_language="vi"),
-            EdgeTtsProvider(voice=str(settings.get("voice", "vi-VN-HoaiMyNeural")), rate=float(settings.get("rate", 1)), ffmpeg=ffmpeg),
+            CapCutTtsProvider(rate=float(settings.get("rate", 1)), ffmpeg=ffmpeg),
             LocalArtifactWriterFactory(), LocalPartPublisherFactory(), LocalFileDigestVerifier(),
         ).run(OfflineSliceRequest(
             job_id=job_id, source=archived_source, verified_input=archive,

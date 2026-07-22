@@ -8,7 +8,7 @@ const DEFAULTS: SceneSettings = {
   sourceArtifactId: null,
   sourceSubtitle: { x: 0.05, y: 0.78, width: 0.9, height: 0.16 },
   logo: { x: 0.78, y: 0.04, width: 0.18, height: 0.16 },
-  voice: "vi-VN-HoaiMyNeural",
+  voice: "BV074_streaming",
   rate: 1,
 };
 
@@ -25,6 +25,7 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
   const [ttsText, setTtsText] = useState("Xin chào, đây là giọng đọc thử.");
   const [message, setMessage] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const previewUrl = videoUrl ?? sourceUrl;
 
   useEffect(() => {
@@ -53,6 +54,10 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
     if (videoUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(videoUrl);
   }, [videoUrl]);
 
+  useEffect(() => () => {
+    if (audioUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(audioUrl);
+  }, [audioUrl]);
+
   function point(event: React.PointerEvent) {
     const bounds = preview.current?.getBoundingClientRect();
     if (!bounds) return null;
@@ -71,14 +76,28 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
     const response = await fetcher(`/api/v1/projects/${projectId}/scene-settings`, { method: "PUT", headers: { "content-type": "application/json", origin: window.location.origin }, body: JSON.stringify({ settings }) });
     setMessage(response.ok ? "Đã lưu vùng blur và voice." : "Chưa lưu được cấu hình.");
   }
-  function speak() {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) { setMessage("Trình duyệt chưa hỗ trợ nghe thử voice."); return; }
-    const utterance = new SpeechSynthesisUtterance(ttsText);
-    utterance.lang = "vi-VN";
-    utterance.rate = settings.rate;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-    setMessage(`Đang nghe thử ${settings.voice}.`);
+  async function speak() {
+    setMessage("Đang tạo file nghe thử BV074…");
+    try {
+      const response = await fetcher("/api/v1/tts-preview", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: window.location.origin },
+        body: JSON.stringify({ text: ttsText, rate: settings.rate }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { code?: string } | null;
+        throw new Error(body?.code ?? "TTS_PREVIEW_UNAVAILABLE");
+      }
+      const blob = await response.blob();
+      if (audioUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(audioUrl);
+      const next = URL.createObjectURL(blob);
+      setAudioUrl(next);
+      const audio = new Audio(next);
+      await audio.play();
+      setMessage(`Đang nghe thử BV074.`);
+    } catch {
+      setMessage("Chưa tạo được nghe thử BV074.");
+    }
   }
 
   return (
@@ -99,10 +118,7 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
       <div className="scene-tts">
         <label htmlFor="tts-text">Nghe thử câu voice</label>
         <textarea id="tts-text" value={ttsText} onChange={(event) => setTtsText(event.target.value)} maxLength={500} />
-        <label htmlFor="tts-voice">Voice</label>
-        <select id="tts-voice" value={settings.voice} onChange={(event) => setSettings((current) => ({ ...current, voice: event.target.value as SceneSettings["voice"] }))}>
-          <option value="vi-VN-HoaiMyNeural">Hoài My · nữ</option><option value="vi-VN-NamMinhNeural">Nam Minh · nam</option>
-        </select>
+        <p><strong>Voice:</strong> CapCut BV074 (giọng cũ v1)</p>
         <label htmlFor="tts-rate">Tốc độ: {settings.rate.toFixed(2)}x</label>
         <input id="tts-rate" type="range" min="0.8" max="1.2" step="0.05" value={settings.rate} onChange={(event) => setSettings((current) => ({ ...current, rate: Number(event.target.value) }))} />
         <div className="button-row"><button type="button" onClick={speak}>Nghe thử TTS</button><button type="button" className="button-secondary" disabled={projectId === null} onClick={save}>Lưu cấu hình</button></div>

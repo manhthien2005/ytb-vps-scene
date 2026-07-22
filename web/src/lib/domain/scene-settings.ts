@@ -10,12 +10,18 @@ const rectangle = z.object({
   if (value.y + value.height > 1) context.addIssue({ code: "custom", message: "rectangle exceeds height" });
 });
 
+const legacyEdgeVoices = new Set(["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]);
+const fixedVoice = z.preprocess(
+  (value) => typeof value === "string" && legacyEdgeVoices.has(value) ? "BV074_streaming" : value,
+  z.literal("BV074_streaming"),
+);
+
 const schema = z.object({
   version: z.literal(1).default(1),
   sourceArtifactId: z.string().uuid().nullable().default(null),
   sourceSubtitle: rectangle,
   logo: rectangle,
-  voice: z.enum(["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]),
+  voice: fixedVoice,
   rate: z.number().min(0.8).max(1.2),
 }).strict();
 

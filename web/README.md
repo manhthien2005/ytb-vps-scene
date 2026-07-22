@@ -12,13 +12,14 @@ This directory is the short-request metadata control plane. It never accepts vid
 6. Create a Google Web application OAuth client for the exact callback `APP_ORIGIN/api/v1/drive/callback`. Enable Drive API, request only `https://www.googleapis.com/auth/drive.file`, and place the client ID/secret only in `.env.local` or Vercel Production.
 7. Generate `DRIVE_TOKEN_KEY_V1` with `node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url") + "\n")'`. Store it only as a secret; changing it forces Drive reauthentication.
 8. Keep the free-tier safety values exactly as shown in `.env.example`. Do not enable billing or configure a paid fallback.
-9. Run `npm ci`.
-10. Run `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`, and `npm audit --audit-level=low`.
-11. Run `npm run db:migrate` twice against that same Neon database to verify the additive migration is idempotent. The migration command uses a direct PostgreSQL client, while application requests use Neon HTTP; migration and PGlite tests are separate from the application runtime.
-12. Run `npm run dev` and open `http://localhost:3000`.
+9. Configure the BV074 preview credential. On Vercel, store one complete device JSON document in `CAPCUT_DEVICE_JSON_V1` as raw JSON or base64-encoded JSON; never commit that value or any `device-*.json` file. `CAPCUT_DEVICE_PATH_V1` is only an alternative for a persistent Node host with a private local file, and is not suitable for Vercel's ephemeral filesystem. If both are set, the inline value takes precedence. Redeploy after changing a Vercel environment variable.
+10. Run `npm ci`.
+11. Run `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`, and `npm audit --audit-level=low`.
+12. Run `npm run db:migrate` twice against that same Neon database to verify the additive migration is idempotent. The migration command uses a direct PostgreSQL client, while application requests use Neon HTTP; migration and PGlite tests are separate from the application runtime.
+13. Run `npm run dev` and open `http://localhost:3000`.
 
 The control plane stores only metadata in Neon. Source video chunks travel directly from the signed-in browser to the private Google Drive resumable endpoint; Vercel never receives video bytes. GPU VPS attachment remains a safe empty state until its owning phase.
 
 ## Deployment
 
-The production Vercel project is connected to the private `manhthien2005/ytb-vps-scene` repository with `web` as its root directory. Keep runtime secrets in Vercel Environment Variables; never commit `.env.local` or generated credentials.
+The production Vercel project is connected to the private `manhthien2005/ytb-vps-scene` repository with `web` as its root directory. Keep runtime secrets, including `CAPCUT_DEVICE_JSON_V1`, in Vercel Environment Variables; never commit `.env.local` or generated credentials. The preview route deliberately has no Edge TTS or browser voice fallback, so missing or rejected CapCut credentials surface as `TTS_PREVIEW_UNAVAILABLE` instead of silently changing the voice.

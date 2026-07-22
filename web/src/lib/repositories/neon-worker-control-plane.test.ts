@@ -84,7 +84,7 @@ describe("worker control plane repository", () => {
       [projectId, JSON.stringify({
         sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
         logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
-        voice: "vi-VN-HoaiMyNeural",
+        voice: "BV074_streaming",
         rate: 1,
       }), NOW.toISOString()],
     );
@@ -169,7 +169,7 @@ describe("worker control plane repository", () => {
         sourceArtifactId: null,
         sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
         logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
-        voice: "vi-VN-HoaiMyNeural",
+        voice: "BV074_streaming",
         rate: 1,
       },
     });

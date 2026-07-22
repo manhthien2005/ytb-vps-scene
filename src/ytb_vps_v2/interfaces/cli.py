@@ -23,11 +23,11 @@ from ytb_vps_v2.adapters.filesystem.composition import (
     LocalPartPublisherFactory,
 )
 from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity
+from ytb_vps_v2.adapters.offline.capcut_tts import CapCutTtsProvider
 from ytb_vps_v2.adapters.offline.providers import (
     DeterministicOcrProvider,
     DeterministicTranslationProvider,
     DeterministicWaveTtsProvider,
-    EdgeTtsProvider,
 )
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
@@ -123,8 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     media.add_argument("--snapshots", type=Path)
     media.add_argument("--blur", action="append", type=_parse_blur, default=[])
     media.add_argument("--target-language", default="vi")
-    media.add_argument("--tts-provider", choices=("deterministic", "edge"), default="deterministic")
-    media.add_argument("--voice", default="vi-VN-HoaiMyNeural")
+    media.add_argument("--tts-provider", choices=("deterministic", "capcut"), default="capcut")
     media.add_argument("--rate", type=float, default=1.0)
     media.add_argument("--job-id")
     media.add_argument("--output-has-audio", action=argparse.BooleanOptionalAction, default=True)
@@ -156,7 +155,7 @@ def _run_media(arguments: argparse.Namespace) -> int:
         tts = (
             DeterministicWaveTtsProvider()
             if arguments.tts_provider == "deterministic"
-            else EdgeTtsProvider(voice=arguments.voice, rate=arguments.rate)
+            else CapCutTtsProvider(rate=arguments.rate)
         )
         runner = OfflineSliceRunner(
             state,

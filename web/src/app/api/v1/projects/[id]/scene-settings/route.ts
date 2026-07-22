@@ -30,7 +30,8 @@ export async function GET(request: NextRequest, context: Context) {
     const sql = createSql(env.databaseUrl);
     const result = await sql.query("select settings from project_scene_settings where project_id=$1", [id]);
     const row = result.rows[0] as { settings?: unknown } | undefined;
-    return NextResponse.json({ settings: row?.settings ?? null }, { headers: HEADERS });
+    const settings = row?.settings === undefined ? null : parseSceneSettings(row.settings);
+    return NextResponse.json({ settings }, { headers: HEADERS });
   } catch (error) {
     return errorResponse(error);
   }

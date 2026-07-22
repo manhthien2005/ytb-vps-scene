@@ -50,6 +50,23 @@ class CliTests(unittest.TestCase):
             arguments = parser.parse_args([command, *arguments_list])
             self.assertEqual(arguments.command, command)
 
+    def test_media_run_exposes_only_deterministic_or_capcut_bv074_tts(self) -> None:
+        from ytb_vps_v2.interfaces.cli import build_parser
+
+        parser = build_parser()
+        arguments = parser.parse_args([
+            "media-run", "--source", "source.mp4", "--workspace", "workspace",
+            "--tts-provider", "capcut",
+        ])
+        self.assertEqual(arguments.tts_provider, "capcut")
+        self.assertFalse(hasattr(arguments, "voice"))
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args([
+                "media-run", "--source", "source.mp4", "--workspace", "workspace",
+                "--tts-provider", "edge",
+            ])
+
 
 if __name__ == "__main__":
     unittest.main()
