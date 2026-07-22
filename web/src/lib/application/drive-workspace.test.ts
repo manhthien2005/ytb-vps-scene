@@ -271,11 +271,82 @@ describe("DriveWorkspaceService", () => {
 
     await expect(service().delete(artifactId)).resolves.toEqual({ status: "DELETED" });
     expect(repository.claimManagedArtifactDeletion).toHaveBeenCalledWith(artifactId);
+    expect(files.inspectVideoMetadata).toHaveBeenCalledWith(
+      "access-token-secret",
+      records[0]!.artifact.driveFileId,
+    );
     expect(files.deleteFile).toHaveBeenCalledWith(
       "access-token-secret",
       records[0]!.artifact.driveFileId,
     );
     expect(repository.markManagedArtifactDeleted).toHaveBeenCalledWith(artifactId);
+  });
+
+  it.each([
+    ["artifact property", (remote: DriveVideoMetadata) => ({
+      ...remote,
+      appProperties: { ...remote.appProperties, ytbVpsArtifactId: OTHER_ID },
+    })],
+    ["project property", (remote: DriveVideoMetadata) => ({
+      ...remote,
+      appProperties: { ...remote.appProperties, ytbVpsProjectId: OTHER_PROJECT_ID },
+    })],
+    ["role property", (remote: DriveVideoMetadata) => ({
+      ...remote,
+      appProperties: { ...remote.appProperties, ytbVpsRole: "output" },
+    })],
+    ["file name", (remote: DriveVideoMetadata) => ({ ...remote, name: "other.mp4" })],
+    ["video MIME type", (remote: DriveVideoMetadata) => ({ ...remote, mimeType: "video/webm" })],
+    ["authoritative size", (remote: DriveVideoMetadata) => ({ ...remote, sizeBytes: 99 })],
+    ["Drive ID", (remote: DriveVideoMetadata) => ({ ...remote, id: "other-drive-file" })],
+  ] as const)("fails closed before deletion for a mismatched %s", async (_label, mutate) => {
+    records = [record()];
+    files.inspectVideoMetadata = vi.fn(async () => mutate(metadata(records[0]!)));
+
+    await expect(service().delete(SOURCE_ID)).rejects.toMatchObject({
+      code: "DRIVE_REMOTE_MISMATCH",
+      status: 502,
+    });
+
+    expect(files.deleteFile).not.toHaveBeenCalled();
+    expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["folder", (remote: DriveVideoMetadata) => ({
+      ...remote,
+      mimeType: "application/vnd.google-apps.folder",
+    })],
+    ["unmanaged item", (remote: DriveVideoMetadata) => ({
+      ...remote,
+      appProperties: {},
+    })],
+  ] as const)("fails closed before deletion for a remote %s", async (_label, mutate) => {
+    records = [record()];
+    files.inspectVideoMetadata = vi.fn(async () => mutate(metadata(records[0]!)));
+
+    await expect(service().delete(SOURCE_ID)).rejects.toMatchObject({
+      code: "DRIVE_REMOTE_MISMATCH",
+      status: 502,
+    });
+
+    expect(files.deleteFile).not.toHaveBeenCalled();
+    expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the adapter rejects deletion metadata as a remote mismatch", async () => {
+    records = [record()];
+    files.inspectVideoMetadata = vi.fn(async () => {
+      throw new AppError("DRIVE_REMOTE_MISMATCH", 502);
+    });
+
+    await expect(service().delete(SOURCE_ID)).rejects.toMatchObject({
+      code: "DRIVE_REMOTE_MISMATCH",
+      status: 502,
+    });
+
+    expect(files.deleteFile).not.toHaveBeenCalled();
+    expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
   });
 
   it("treats a provider 404 as already absent and completes deletion", async () => {
@@ -298,6 +369,7 @@ describe("DriveWorkspaceService", () => {
       status: 409,
     });
     expect(access.getAccessToken).not.toHaveBeenCalled();
+    expect(files.inspectVideoMetadata).not.toHaveBeenCalled();
     expect(files.deleteFile).not.toHaveBeenCalled();
     expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
   });
@@ -315,6 +387,7 @@ describe("DriveWorkspaceService", () => {
     await expect(service().delete(SOURCE_ID)).rejects.toThrow("database unavailable");
     await expect(service().delete(SOURCE_ID)).resolves.toEqual({ status: "DELETED" });
 
+    expect(files.inspectVideoMetadata).toHaveBeenCalledTimes(2);
     expect(files.deleteFile).toHaveBeenCalledTimes(2);
     expect(repository.markManagedArtifactDeleted).toHaveBeenCalledTimes(2);
   });
@@ -327,6 +400,7 @@ describe("DriveWorkspaceService", () => {
 
     await expect(service().delete(SOURCE_ID)).resolves.toEqual({ status: "DELETED" });
     expect(access.getAccessToken).not.toHaveBeenCalled();
+    expect(files.inspectVideoMetadata).not.toHaveBeenCalled();
     expect(files.deleteFile).not.toHaveBeenCalled();
     expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
   });

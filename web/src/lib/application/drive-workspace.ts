@@ -9,6 +9,12 @@ import type {
 } from "@/lib/repositories/drive-control-plane";
 
 const INSPECTION_CONCURRENCY = 4;
+const VIDEO_MIME_TYPES = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/x-matroska",
+  "video/webm",
+]);
 
 export type DriveWorkspaceFile = Readonly<{
   artifactId: string;
@@ -58,7 +64,8 @@ function matchesManagedRecord(
   metadata: DriveVideoMetadata,
 ): boolean {
   const artifact = record.artifact;
-  return metadata.id === artifact.driveFileId &&
+  return VIDEO_MIME_TYPES.has(metadata.mimeType) &&
+    metadata.id === artifact.driveFileId &&
     metadata.name === artifact.displayName &&
     metadata.mimeType === artifact.mimeType &&
     metadata.sizeBytes === expectedSize(record) &&
@@ -206,6 +213,13 @@ export function createDriveWorkspaceService(
       if (!record) throw new AppError("DRIVE_FILE_DELETE_CONFLICT", 409);
 
       const accessToken = await dependencies.access.getAccessToken();
+      const metadata = await dependencies.files.inspectVideoMetadata(
+        accessToken,
+        record.artifact.driveFileId,
+      );
+      if (!matchesManagedRecord(record, metadata)) {
+        throw new AppError("DRIVE_REMOTE_MISMATCH", 502);
+      }
       try {
         await dependencies.files.deleteFile(accessToken, record.artifact.driveFileId);
       } catch (error) {
