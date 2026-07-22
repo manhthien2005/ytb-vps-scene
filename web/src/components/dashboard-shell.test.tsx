@@ -48,6 +48,9 @@ describe("DashboardShell", () => {
     expect(await screen.findByText("source.mp4")).toBeVisible();
     expect(screen.getByTestId("video-icon")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Kéo thả hoặc chọn video" })).toBeEnabled();
+    expect(screen.queryByText("Kho video riêng tư")).not.toBeInTheDocument();
+    expect(screen.queryByText("Dữ liệu dự án")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Tải video lên Drive" })).not.toBeInTheDocument();
   });
 
   it("shows the no-worker empty state and queued jobs", () => {
