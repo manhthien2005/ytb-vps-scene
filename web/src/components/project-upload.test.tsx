@@ -682,6 +682,90 @@ describe("ProjectUpload", () => {
     confirm.mockRestore();
   });
 
+  it("retains queue ownership when upload settles before cancellation cleanup rejects", async () => {
+    const artifactId = "20000000-0000-4000-8000-000000000014";
+    const pendingStart = deferred<void>();
+    const pendingDelete = deferred<void>();
+    const baseStore = memoryStore();
+    const deleteCapability = vi.fn()
+      .mockReturnValueOnce(pendingDelete.promise)
+      .mockResolvedValueOnce(undefined);
+    const store: UploadSessionStore = { ...baseStore, delete: deleteCapability };
+    const uploading: UploadSnapshot = {
+      phase: "UPLOADING",
+      committedBytes: 50,
+      totalBytes: 100,
+      bytesPerSecond: 25,
+      publicCode: null,
+    };
+    let firstListener: ((snapshot: UploadSnapshot) => void) | null = null;
+    let secondListener: ((snapshot: UploadSnapshot) => void) | null = null;
+    const firstUploader: ResumableUploader = {
+      start: vi.fn(async () => {
+        firstListener?.(uploading);
+        await pendingStart.promise;
+      }),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(async () => {
+        firstListener?.({ ...uploading, phase: "CANCELLED", bytesPerSecond: 0 });
+        await store.delete(PROJECT.id, artifactId);
+      }),
+      subscribe: vi.fn((next) => { firstListener = next; return () => { firstListener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => uploading),
+    };
+    const secondUploader: ResumableUploader = {
+      start: vi.fn(async (file) => secondListener?.({
+        phase: "READY",
+        committedBytes: file.size,
+        totalBytes: file.size,
+        bytesPerSecond: 0,
+        publicCode: null,
+      })),
+      resume: vi.fn(),
+      pause: vi.fn(),
+      cancel: vi.fn(),
+      subscribe: vi.fn((next) => { secondListener = next; return () => { secondListener = null; }; }),
+      dispose: vi.fn(),
+      snapshot: vi.fn(() => EMPTY_SNAPSHOT),
+    };
+    const uploaderFactory = vi.fn()
+      .mockReturnValueOnce(firstUploader)
+      .mockReturnValueOnce(secondUploader);
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(projectBody(PROJECT))
+      .mockResolvedValueOnce(sessionBody(artifactId))
+      .mockResolvedValueOnce(projectBody(SECOND_PROJECT))
+      .mockResolvedValueOnce(sessionBody("20000000-0000-4000-8000-000000000015"));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ProjectUpload health={HEALTHY} projects={[]} fetcher={fetcher} store={store} uploaderFactory={uploaderFactory} />);
+    const first = new File([new Uint8Array(100)], "cleanup-first.mp4", { type: "video/mp4", lastModified: 1 });
+    const second = new File([new Uint8Array(80)], "cleanup-second.mp4", { type: "video/mp4", lastModified: 2 });
+
+    fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [first, second] } });
+    expect(await screen.findByText("50%")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cleanup-first.mp4" }));
+    await waitFor(() => expect(deleteCapability).toHaveBeenCalledTimes(1));
+
+    pendingStart.resolve();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    expect(screen.getByText("cleanup-first.mp4")).toBeVisible();
+    expect(secondUploader.start).not.toHaveBeenCalled();
+
+    pendingDelete.reject(new Error("INDEXEDDB_DELETE_FAILED"));
+    expect(await screen.findByText("Chưa thể dọn phiên tải cục bộ. Hãy bấm Dừng và huỷ để thử lại.")).toBeVisible();
+    expect(secondUploader.start).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dừng và huỷ cleanup-first.mp4" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Dừng và huỷ cleanup-first.mp4" }));
+
+    await waitFor(() => expect(screen.queryByText("cleanup-first.mp4")).not.toBeInTheDocument());
+    await waitFor(() => expect(secondUploader.start).toHaveBeenCalledWith(second, expect.any(Object)));
+    expect(firstUploader.cancel).toHaveBeenCalledTimes(1);
+    expect(deleteCapability).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
+  });
+
   it("exposes upload diagnostics on the section element", async () => {
     let dependencies: ResumableUploaderDependencies | null = null;
     const uploader: ResumableUploader = {

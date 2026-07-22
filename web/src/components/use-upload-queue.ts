@@ -171,6 +171,7 @@ export function useUploadQueue({
   const recoveriesRef = useRef<readonly StoredUploadSession[]>([]);
   const pendingCancellationsRef = useRef(new Map<string, PendingCancellation>());
   const cleanupRequiredRef = useRef(new Set<string>());
+  const cancellationsInProgressRef = useRef(new Set<string>());
 
   const anyUploading = items.some((item) => item.state === "ACTIVE" && item.snapshot.phase === "UPLOADING");
 
@@ -352,7 +353,10 @@ export function useUploadQueue({
       return true;
     }
     if (settled.snapshot.phase === "CANCELLED") {
-      if (cleanupRequiredRef.current.has(id)) return true;
+      if (
+        cleanupRequiredRef.current.has(id) ||
+        cancellationsInProgressRef.current.has(id)
+      ) return true;
       patchItem(id, { state: "CANCELLED" });
       return true;
     }
@@ -572,14 +576,17 @@ export function useUploadQueue({
       if (item.snapshot.phase === "CANCELLED") {
         await store?.delete(item.projectId, item.artifactId);
       } else if (uploader !== undefined) {
+        cancellationsInProgressRef.current.add(id);
         await uploader.cancel();
       } else {
         await controlPlaneApi(fetcher).cancel(item.projectId, item.artifactId);
         await store?.delete(item.projectId, item.artifactId);
       }
+      cancellationsInProgressRef.current.delete(id);
       cleanupRequiredRef.current.delete(id);
       patchItem(id, { state: "CANCELLED", message: null });
     } catch (error) {
+      cancellationsInProgressRef.current.delete(id);
       if (currentItem(id)?.snapshot.phase === "CANCELLED") {
         cleanupRequiredRef.current.add(id);
         patchItem(id, {
