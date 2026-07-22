@@ -242,6 +242,79 @@ describe("DriveWorkspace", () => {
     expect(screen.getByRole("button", { name: "Kéo thả hoặc chọn video" })).toBeDisabled();
   });
 
+  it("ignores a pending file response after refreshed props require reauthentication", async () => {
+    let resolveFiles!: (response: Response) => void;
+    let resolveFreshFiles!: (response: Response) => void;
+    const pendingFiles = new Promise<Response>((resolve) => { resolveFiles = resolve; });
+    const freshFiles = new Promise<Response>((resolve) => { resolveFreshFiles = resolve; });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockReturnValueOnce(pendingFiles)
+      .mockReturnValueOnce(freshFiles);
+    const { rerender } = render(
+      <DriveWorkspace drive={CONNECTED} health={HEALTHY} projects={[]} fetcher={fetcher} store={emptyStore()} />,
+    );
+    expect(screen.getAllByText("Đang tải file Drive…")).toHaveLength(2);
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <DriveWorkspace
+        drive={{ status: "REAUTH_REQUIRED", accountHint: null, rootReady: false }}
+        health={{ ...HEALTHY, driveConnection: "REAUTH_REQUIRED" }}
+        projects={[]}
+        fetcher={fetcher}
+        store={emptyStore()}
+      />,
+    );
+    await act(async () => { resolveFiles(jsonResponse(PROCESSING_VIEW)); });
+
+    expect(screen.getByText("Cần kết nối lại")).toBeVisible();
+    expect(screen.queryByText("source.mp4")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Kéo thả hoặc chọn video" })).toBeDisabled();
+
+    rerender(
+      <DriveWorkspace drive={CONNECTED} health={HEALTHY} projects={[]} fetcher={fetcher} store={emptyStore()} />,
+    );
+    expect(screen.queryByText("source.mp4")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Đang tải file Drive…")).toHaveLength(2);
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    await act(async () => { resolveFreshFiles(jsonResponse(EMPTY_VIEW)); });
+    expect(await screen.findByText("Chưa có video nguồn.")).toBeVisible();
+  });
+
+  it("clears prior filenames until reconnect and root restoration finish a fresh request", async () => {
+    let resolveReconnect!: (response: Response) => void;
+    const reconnectFiles = new Promise<Response>((resolve) => { resolveReconnect = resolve; });
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(PROCESSING_VIEW))
+      .mockReturnValueOnce(reconnectFiles);
+    const { rerender } = render(
+      <DriveWorkspace drive={CONNECTED} health={HEALTHY} projects={[]} fetcher={fetcher} store={emptyStore()} />,
+    );
+    expect(await screen.findByText("source.mp4")).toBeVisible();
+
+    rerender(
+      <DriveWorkspace
+        drive={DISCONNECTED}
+        health={{ ...HEALTHY, driveConnection: "DISCONNECTED" }}
+        projects={[]}
+        fetcher={fetcher}
+        store={emptyStore()}
+      />,
+    );
+    expect(screen.queryByText("source.mp4")).not.toBeInTheDocument();
+
+    rerender(
+      <DriveWorkspace drive={CONNECTED} health={HEALTHY} projects={[]} fetcher={fetcher} store={emptyStore()} />,
+    );
+    expect(screen.queryByText("source.mp4")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Đang tải file Drive…")).toHaveLength(2);
+    await act(async () => { resolveReconnect(jsonResponse(EMPTY_VIEW)); });
+
+    expect(await screen.findByText("Chưa có video nguồn.")).toBeVisible();
+    expect(screen.queryByText("source.mp4")).not.toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("refreshes processing files at bounded 5, 10, and 20 second intervals", async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse(PROCESSING_VIEW));

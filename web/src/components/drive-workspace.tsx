@@ -173,6 +173,23 @@ export function DriveWorkspace({
   const [documentVisible, setDocumentVisible] = useState(() => (
     typeof document === "undefined" || document.visibilityState === "visible"
   ));
+  const connectionContext = JSON.stringify([
+    currentDrive.status,
+    currentDrive.rootReady,
+    currentDrive.accountHint,
+  ]);
+  const [workspaceContext, setWorkspaceContext] = useState(connectionContext);
+  if (workspaceContext !== connectionContext) {
+    setWorkspaceContext(connectionContext);
+    setView(null);
+    setLoading(canBrowse);
+    setTreeError(null);
+    setPollAttempt(0);
+  }
+
+  useEffect(() => {
+    requestGeneration.current += 1;
+  }, [connectionContext]);
 
   const refreshTree = useCallback(async (resetPolling: boolean, showLoading = false): Promise<boolean> => {
     if (!canBrowse) return false;
