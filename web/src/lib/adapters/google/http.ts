@@ -7,6 +7,7 @@ export type GoogleJsonOptions = Readonly<{
   maxResponseBytes: number;
   attempts: number;
   acceptInvalidTokenAsRevoked?: boolean;
+  notFoundCode?: "DRIVE_FILE_NOT_FOUND";
 }>;
 
 const MAX_PROVIDER_TIMEOUT_MS = 5_000;
@@ -19,6 +20,7 @@ function providerError(code: PublicCode): AppError {
     DRIVE_RATE_LIMITED: 429,
     DRIVE_TEMPORARILY_UNAVAILABLE: 503,
     DRIVE_PROVIDER_REJECTED: 502,
+    DRIVE_FILE_NOT_FOUND: 404,
   };
   return new AppError(code, statuses[code] ?? 502);
 }
@@ -37,6 +39,10 @@ function validOptions(options: GoogleJsonOptions): boolean {
     (
       options.acceptInvalidTokenAsRevoked === undefined ||
       typeof options.acceptInvalidTokenAsRevoked === "boolean"
+    ) &&
+    (
+      options.notFoundCode === undefined ||
+      options.notFoundCode === "DRIVE_FILE_NOT_FOUND"
     )
   );
 }
@@ -159,6 +165,10 @@ export async function googleJson<T>(
           : "DRIVE_TEMPORARILY_UNAVAILABLE";
         await cancelBody(response);
         continue;
+      }
+      if (response.status === 404 && options.notFoundCode !== undefined) {
+        await cancelBody(response);
+        throw providerError(options.notFoundCode);
       }
 
       const value = parseJson(await readBoundedBytes(response, options.maxResponseBytes));

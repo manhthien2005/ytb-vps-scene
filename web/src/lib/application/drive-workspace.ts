@@ -213,10 +213,17 @@ export function createDriveWorkspaceService(
       if (!record) throw new AppError("DRIVE_FILE_DELETE_CONFLICT", 409);
 
       const accessToken = await dependencies.access.getAccessToken();
-      const metadata = await dependencies.files.inspectVideoMetadata(
-        accessToken,
-        record.artifact.driveFileId,
-      );
+      let metadata: DriveVideoMetadata;
+      try {
+        metadata = await dependencies.files.inspectVideoMetadata(
+          accessToken,
+          record.artifact.driveFileId,
+        );
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== "DRIVE_FILE_NOT_FOUND") throw error;
+        await dependencies.repository.markManagedArtifactDeleted(artifactId);
+        return { status: "DELETED" };
+      }
       if (!matchesManagedRecord(record, metadata)) {
         throw new AppError("DRIVE_REMOTE_MISMATCH", 502);
       }

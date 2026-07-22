@@ -88,6 +88,29 @@ describe("createGoogleDriveFilesAdapter", () => {
       });
   });
 
+  it("maps an authenticated video metadata 404 to the distinct file-not-found code", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code: "DRIVE_FILE_NOT_FOUND", status: 404 });
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(requestDetails(fetcher).init.method).toBe("GET");
+  });
+
+  it.each([
+    [401, "DRIVE_REAUTH_REQUIRED"],
+    [429, "DRIVE_RATE_LIMITED"],
+    [503, "DRIVE_TEMPORARILY_UNAVAILABLE"],
+  ] as const)("does not collapse video metadata HTTP %i into file-not-found", async (status, code) => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(
+      async () => new Response(null, { status }),
+    );
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code });
+  });
+
   it("rejects browser links outside the Google Drive allowlist", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
       ...READY_VIDEO_FILE,

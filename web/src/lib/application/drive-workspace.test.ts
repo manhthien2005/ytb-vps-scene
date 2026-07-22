@@ -349,6 +349,37 @@ describe("DriveWorkspaceService", () => {
     expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
   });
 
+  it.each(["CLAIMED", "RECONCILE"] as const)(
+    "completes a %s deletion when pre-delete inspection proves the remote file is absent",
+    async (claim) => {
+      records = [record()];
+      repository.claimManagedArtifactDeletion = vi.fn(async () => claim);
+      files.inspectVideoMetadata = vi.fn(async () => {
+        throw new AppError("DRIVE_FILE_NOT_FOUND", 404);
+      });
+
+      await expect(service().delete(SOURCE_ID)).resolves.toEqual({ status: "DELETED" });
+
+      expect(files.deleteFile).not.toHaveBeenCalled();
+      expect(repository.markManagedArtifactDeleted).toHaveBeenCalledWith(SOURCE_ID);
+    },
+  );
+
+  it("does not delete or complete after a transient pre-delete inspection failure", async () => {
+    records = [record()];
+    files.inspectVideoMetadata = vi.fn(async () => {
+      throw new AppError("DRIVE_TEMPORARILY_UNAVAILABLE", 503);
+    });
+
+    await expect(service().delete(SOURCE_ID)).rejects.toMatchObject({
+      code: "DRIVE_TEMPORARILY_UNAVAILABLE",
+      status: 503,
+    });
+
+    expect(files.deleteFile).not.toHaveBeenCalled();
+    expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
+  });
+
   it("treats a provider 404 as already absent and completes deletion", async () => {
     records = [record()];
     files.deleteFile = vi.fn(async () => {
@@ -383,12 +414,15 @@ describe("DriveWorkspaceService", () => {
     >()
       .mockResolvedValueOnce("CLAIMED")
       .mockResolvedValueOnce("RECONCILE");
+    files.inspectVideoMetadata = vi.fn()
+      .mockResolvedValueOnce(metadata(records[0]!))
+      .mockRejectedValueOnce(new AppError("DRIVE_FILE_NOT_FOUND", 404));
 
     await expect(service().delete(SOURCE_ID)).rejects.toThrow("database unavailable");
     await expect(service().delete(SOURCE_ID)).resolves.toEqual({ status: "DELETED" });
 
     expect(files.inspectVideoMetadata).toHaveBeenCalledTimes(2);
-    expect(files.deleteFile).toHaveBeenCalledTimes(2);
+    expect(files.deleteFile).toHaveBeenCalledTimes(1);
     expect(repository.markManagedArtifactDeleted).toHaveBeenCalledTimes(2);
   });
 

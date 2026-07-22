@@ -507,6 +507,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
     url: string,
     init: RequestInit = {},
     attempts = DRIVE_ATTEMPTS,
+    notFoundCode?: "DRIVE_FILE_NOT_FOUND",
   ): Promise<T> {
     return googleJson(fetcher, url, {
       ...init,
@@ -515,6 +516,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
       timeoutMs: DRIVE_TIMEOUT_MS,
       maxResponseBytes: DRIVE_RESPONSE_BYTES,
       attempts,
+      ...(notFoundCode === undefined ? {} : { notFoundCode }),
     });
   }
 
@@ -783,6 +785,8 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         accessToken,
         driveUrl(`/files/${encodeURIComponent(fileId)}`, { fields: VIDEO_METADATA_FIELDS }),
         { method: "GET" },
+        DRIVE_ATTEMPTS,
+        "DRIVE_FILE_NOT_FOUND",
       ));
       if (!metadata) throw remoteMismatch();
       return metadata;
