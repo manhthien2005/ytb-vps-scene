@@ -11,9 +11,19 @@ export type DriveFileTreeProps = Readonly<{
   onDelete: (artifactId: string) => void | Promise<void>;
   dropzone?: ReactNode;
   error?: string | null;
+  loading?: boolean;
+  onRetry?: () => void;
 }>;
 
-export function DriveFileTree({ kind, view, onDelete, dropzone, error = null }: DriveFileTreeProps) {
+export function DriveFileTree({
+  kind,
+  view,
+  onDelete,
+  dropzone,
+  error = null,
+  loading = false,
+  onRetry,
+}: DriveFileTreeProps) {
   const [rootExpanded, setRootExpanded] = useState(true);
   const [expandedProjects, setExpandedProjects] = useState<ReadonlySet<string>>(() => new Set());
   const [expandedFiles, setExpandedFiles] = useState<ReadonlySet<string>>(() => new Set());
@@ -57,8 +67,16 @@ export function DriveFileTree({ kind, view, onDelete, dropzone, error = null }: 
 
       {rootExpanded && (
         <>
-          {error ? (
-            <p className="drive-tree-error" role="alert">{error}</p>
+          {loading ? (
+            <>
+              <p aria-live="polite" className="drive-tree-loading" role="status">Đang tải file Drive…</p>
+              {kind === "input" && dropzone}
+            </>
+          ) : error ? (
+            <div className="drive-tree-error-state">
+              <p className="drive-tree-error" role="alert">{error}</p>
+              {onRetry && <button onClick={onRetry} type="button">Thử tải lại danh sách Drive</button>}
+            </div>
           ) : kind === "input" ? (
             <ul className="drive-tree-list">
               {view.input.map((file) => {
@@ -118,7 +136,7 @@ export function DriveFileTree({ kind, view, onDelete, dropzone, error = null }: 
               {view.output.length === 0 && <li className="drive-tree-empty">Chưa có video render.</li>}
             </ul>
           )}
-          {error && kind === "input" && dropzone}
+          {!loading && error && kind === "input" && dropzone}
         </>
       )}
     </section>

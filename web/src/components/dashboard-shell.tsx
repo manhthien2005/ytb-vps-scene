@@ -3,8 +3,7 @@
 import { useState } from "react";
 import type { JobSummary } from "@/lib/domain/control-plane";
 import type { DriveConnectionView, FreeTierHealthView, PublicProject, WorkerViewModel } from "./dashboard-types";
-import { DriveCard } from "./drive-card";
-import { ProjectUpload } from "./project-upload";
+import { DriveWorkspace } from "./drive-workspace";
 import { WorkerCard } from "./worker-card";
 import { JobList } from "./job-list";
 import { SceneEditor } from "./scene-editor";
@@ -56,7 +55,13 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
       <div className="workflow-panels">
         <section className={`workflow-panel ${activeStep === "drive" ? "workflow-panel-active" : ""}`} aria-labelledby="workflow-drive-title">
           <div className="workflow-panel-heading"><p className="eyebrow">Bước 1</p><h2 id="workflow-drive-title">Drive · Nguồn và thư mục output</h2></div>
-          <div className="workspace-grid"><DriveCard value={drive} health={health} /><ProjectUpload health={health} projects={videoItems} onProjectsChange={setVideoItems} onSourceFile={handleSourceFile} /></div>
+          <DriveWorkspace
+            drive={drive}
+            health={health}
+            onProjectsChange={setVideoItems}
+            onSourceFile={handleSourceFile}
+            projects={videoItems}
+          />
         </section>
         <section className={`workflow-panel ${activeStep === "vps" ? "workflow-panel-active" : ""}`} aria-labelledby="workflow-vps-title">
           <div className="workflow-panel-heading"><p className="eyebrow">Bước 2</p><h2 id="workflow-vps-title">VPS · Setup và kiểm tra GPU</h2></div><WorkerCard workers={workers} />

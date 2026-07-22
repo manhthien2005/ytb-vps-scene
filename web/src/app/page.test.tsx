@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   currentAdmin,
@@ -47,6 +47,11 @@ import HomePage from "./page";
 describe("HomePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      input: [],
+      output: [],
+      processingCount: 0,
+    }), { status: 200, headers: { "content-type": "application/json" } })));
     Object.assign(process.env, {
       NODE_ENV: "test",
       DATABASE_URL: "postgresql://test:test@localhost/test",
@@ -83,6 +88,8 @@ describe("HomePage", () => {
       neon: null,
     });
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   it("does not instantiate or call the repository before authentication", async () => {
     render(await HomePage());
@@ -139,7 +146,11 @@ describe("HomePage", () => {
 
     expect(screen.getByText("Đã kết nối")).toBeVisible();
     expect(screen.getByText("a***@example.test")).toBeVisible();
-    expect(screen.getByLabelText("File video")).toBeEnabled();
+    expect(screen.getByRole("heading", { name: "Drive" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Input" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Output" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Kéo thả hoặc chọn video" })).toBeEnabled();
+    expect(screen.getByLabelText("Thêm video")).toBeEnabled();
     expect(container.textContent).not.toContain("secret-root-folder-id");
     expect(container.textContent).not.toContain("secret-project-folder-id");
     expect(container.textContent).not.toContain("secret-envelope");
