@@ -32,3 +32,26 @@ export type PublicProject = Readonly<{
 }>;
 
 export type WorkerViewModel = WorkerView;
+
+export type DriveWorkspaceFile = Readonly<{
+  artifactId: string;
+  name: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  durationMillis: number | null;
+  width: number | null;
+  height: number | null;
+  readiness: "PROCESSING" | "READY" | "UNKNOWN";
+  viewUrl: string | null;
+  downloadUrl: string | null;
+}>;
+
+export type DriveWorkspaceView = Readonly<{
+  input: readonly DriveWorkspaceFile[];
+  output: readonly Readonly<{
+    projectId: string;
+    name: string;
+    files: readonly DriveWorkspaceFile[];
+  }>[];
+  processingCount: number;
+}>;
