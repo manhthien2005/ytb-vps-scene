@@ -1,4 +1,4 @@
-import type { UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
+import type { DriveVideoMetadata, UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
 
 export interface DriveOAuthPort {
   buildAuthorizationUrl(input: Readonly<{
@@ -36,6 +36,7 @@ export interface DriveFilesPort {
     fileId: string; mimeType: string; sizeBytes: number; origin?: string;
   }>): Promise<Readonly<{ sessionUri: string; expiresAt: string }>>;
   inspectFile(accessToken: string, fileId: string): Promise<VerifiedDriveFile>;
+  inspectVideoMetadata(accessToken: string, fileId: string): Promise<DriveVideoMetadata>;
   deleteFile(accessToken: string, fileId: string): Promise<void>;
 }
 

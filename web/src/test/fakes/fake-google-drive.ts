@@ -1,4 +1,4 @@
-import { DRIVE_FILE_SCOPE, type VerifiedDriveFile } from "@/lib/domain/drive";
+import { DRIVE_FILE_SCOPE, type DriveVideoMetadata, type VerifiedDriveFile } from "@/lib/domain/drive";
 import type { DriveFilesPort, DriveOAuthPort } from "@/lib/ports/drive";
 
 export class FakeGoogleDriveOAuth implements DriveOAuthPort {
@@ -77,10 +77,12 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     trashed: false,
     appProperties: { schema: "1" },
   };
+  readonly videoMetadataByFileId = new Map<string, DriveVideoMetadata>();
   inspectAccountError: unknown = null;
   ensureWorkspaceError: unknown = null;
   resumableSessionError: unknown = null;
   inspectFileError: unknown = null;
+  inspectVideoMetadataError: unknown = null;
   deleteFileError: unknown = null;
   readonly inspectAccountCalls: string[] = [];
   readonly ensureWorkspaceCalls: string[] = [];
@@ -93,6 +95,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
   readonly ensureOutputFileCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly resumableSessionCalls: Array<Readonly<{ accessToken: string; input: unknown }>> = [];
   readonly inspectFileCalls: Array<Readonly<{ accessToken: string; fileId: string }>> = [];
+  readonly inspectVideoMetadataCalls: Array<Readonly<{ accessToken: string; fileId: string }>> = [];
   readonly deleteFileCalls: Array<Readonly<{ accessToken: string; fileId: string }>> = [];
 
   async inspectAccount(accessToken: string) {
@@ -140,6 +143,26 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     this.inspectFileCalls.push({ accessToken, fileId });
     if (this.inspectFileError !== null) throw this.inspectFileError;
     return structuredClone(this.file);
+  }
+
+  async inspectVideoMetadata(accessToken: string, fileId: string) {
+    this.inspectVideoMetadataCalls.push({ accessToken, fileId });
+    if (this.inspectVideoMetadataError !== null) throw this.inspectVideoMetadataError;
+    return structuredClone(this.videoMetadataByFileId.get(fileId) ?? {
+      id: fileId,
+      name: "source.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 100,
+      parentIds: ["fake-project-input-folder-001"],
+      createdTime: "2026-07-22T00:00:00.000Z",
+      modifiedTime: "2026-07-22T00:00:00.000Z",
+      width: null,
+      height: null,
+      durationMillis: null,
+      webViewLink: null,
+      webContentLink: null,
+      appProperties: { schema: "1" },
+    });
   }
 
   async deleteFile(accessToken: string, fileId: string) {

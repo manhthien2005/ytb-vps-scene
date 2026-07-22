@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createGoogleDriveFilesAdapter } from "./drive-files";
 
 const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,appProperties";
+const VIDEO_METADATA_FIELDS = `${FILE_FIELDS},createdTime,modifiedTime,videoMediaMetadata(width,height,durationMillis),webViewLink,webContentLink`;
 const ABOUT_FIELDS = "storageQuota(limit,usage),user(permissionId,emailAddress)";
 const ACCESS_TOKEN = "server-memory-access-token";
 const NOW = new Date("2026-07-19T00:00:00.000Z");
@@ -9,6 +10,20 @@ const FOLDER_MIME = "application/vnd.google-apps.folder";
 const PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 const ARTIFACT_ID = "10000000-0000-4000-8000-000000000001";
 const MY_DRIVE_ROOT_ID = "opaque-my-drive-root-id";
+const READY_VIDEO_FILE = {
+  id: "drive-video-001",
+  name: "source.mp4",
+  mimeType: "video/mp4",
+  size: "864026624",
+  parents: ["drive-parent-001"],
+  trashed: false,
+  appProperties: { schema: "1", ytbVpsRole: "source", ytbVpsArtifactId: ARTIFACT_ID },
+  createdTime: "2026-07-22T07:30:00.000Z",
+  modifiedTime: "2026-07-22T07:35:00.000Z",
+  videoMediaMetadata: { width: 1920, height: 1080, durationMillis: "5076000" },
+  webViewLink: "https://drive.google.com/file/d/drive-video-001/view",
+  webContentLink: "https://drive.usercontent.google.com/download?id=drive-video-001",
+};
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -39,6 +54,50 @@ function requestDetails(fetcher: ReturnType<typeof vi.fn<typeof fetch>>, index =
 }
 
 describe("createGoogleDriveFilesAdapter", () => {
+  it("returns bounded video metadata and safe Drive browser links", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse(READY_VIDEO_FILE));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .resolves.toMatchObject({
+        sizeBytes: 864_026_624,
+        width: 1920,
+        height: 1080,
+        durationMillis: 5_076_000,
+        webViewLink: READY_VIDEO_FILE.webViewLink,
+        webContentLink: READY_VIDEO_FILE.webContentLink,
+      });
+
+    expect(requestDetails(fetcher).url.searchParams.get("fields")).toBe(VIDEO_METADATA_FIELDS);
+  });
+
+  it("returns null media fields while Drive is processing", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      ...READY_VIDEO_FILE,
+      videoMediaMetadata: undefined,
+      webViewLink: undefined,
+      webContentLink: undefined,
+    }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .resolves.toMatchObject({
+        width: null,
+        height: null,
+        durationMillis: null,
+        webViewLink: null,
+        webContentLink: null,
+      });
+  });
+
+  it("rejects browser links outside the Google Drive allowlist", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse({
+      ...READY_VIDEO_FILE,
+      webViewLink: "https://evil.test/file",
+    }));
+
+    await expect(adapter(fetcher).inspectVideoMetadata(ACCESS_TOKEN, "drive-video-001"))
+      .rejects.toMatchObject({ code: "DRIVE_REMOTE_MISMATCH" });
+  });
+
   it("inspects exact account fields and masks the returned email", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
       storageQuota: { limit: "1000000", usage: "125000" },

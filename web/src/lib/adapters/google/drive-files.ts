@@ -1,7 +1,7 @@
 import "server-only";
 
 import { AppError, type PublicCode } from "@/lib/domain/errors";
-import type { UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
+import type { DriveVideoMetadata, UploadIntent, VerifiedDriveFile } from "@/lib/domain/drive";
 import { parseDriveResumableSessionUri } from "@/lib/domain/resumable-session-uri";
 import { isCanonicalUploadFileName } from "@/lib/domain/upload-filename";
 import type { DriveFilesPort } from "@/lib/ports/drive";
@@ -9,6 +9,7 @@ import { outputPartFileName } from "@/lib/domain/output-part";
 import { googleJson } from "./http";
 
 export const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,appProperties";
+export const VIDEO_METADATA_FIELDS = `${FILE_FIELDS},createdTime,modifiedTime,videoMediaMetadata(width,height,durationMillis),webViewLink,webContentLink`;
 export const ABOUT_FIELDS = "storageQuota(limit,usage),user(permissionId,emailAddress)";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
@@ -36,6 +37,12 @@ type DriveFile = Readonly<{
   parentIds: readonly string[];
   trashed: boolean;
   appProperties: Readonly<Record<string, string>>;
+}>;
+
+type VideoMediaMetadata = Readonly<{
+  width: number | null;
+  height: number | null;
+  durationMillis: number | null;
 }>;
 
 type ExpectedDriveFile = Readonly<{
@@ -171,6 +178,98 @@ function parseDriveFile(value: unknown): DriveFile | null {
     parentIds: [...record.parents],
     trashed: record.trashed,
     appProperties,
+  };
+}
+
+function boundedDriveTimestamp(value: unknown): value is string {
+  return (
+    boundedAscii(value, 20, 64) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
+}
+
+function parseVideoMediaMetadata(value: unknown): VideoMediaMetadata | null {
+  if (value === undefined) return { width: null, height: null, durationMillis: null };
+  const record = objectRecord(value);
+  const width = record?.width;
+  const height = record?.height;
+  if (
+    !record ||
+    !hasExactKeys(record, ["width", "height", "durationMillis"]) ||
+    typeof width !== "number" || !Number.isSafeInteger(width) || width <= 0 ||
+    typeof height !== "number" || !Number.isSafeInteger(height) || height <= 0
+  ) {
+    return null;
+  }
+  const durationMillis = parseDriveInteger(record.durationMillis, 0);
+  if (durationMillis === null) return null;
+  return { width, height, durationMillis };
+}
+
+function parseDriveBrowserLink(value: unknown): string | null | undefined {
+  if (value === undefined) return null;
+  if (!boundedAscii(value, 8, 2_048)) return undefined;
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      (url.hostname !== "drive.google.com" && url.hostname !== "drive.usercontent.google.com") ||
+      url.port !== "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.hash !== ""
+    ) {
+      return undefined;
+    }
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseDriveVideoMetadata(value: unknown): DriveVideoMetadata | null {
+  const record = objectRecord(value);
+  if (
+    !record ||
+    !hasOnlyKeys(record, [
+      "id", "name", "mimeType", "size", "parents", "trashed", "appProperties",
+      "createdTime", "modifiedTime", "videoMediaMetadata", "webViewLink", "webContentLink",
+    ])
+  ) {
+    return null;
+  }
+  const file = parseDriveFile({
+    id: record.id,
+    name: record.name,
+    mimeType: record.mimeType,
+    size: record.size,
+    parents: record.parents,
+    trashed: record.trashed,
+    appProperties: record.appProperties,
+  });
+  if (
+    !file || file.sizeBytes === null ||
+    !boundedDriveTimestamp(record.createdTime) || !boundedDriveTimestamp(record.modifiedTime)
+  ) {
+    return null;
+  }
+  const media = parseVideoMediaMetadata(record.videoMediaMetadata);
+  const webViewLink = parseDriveBrowserLink(record.webViewLink);
+  const webContentLink = parseDriveBrowserLink(record.webContentLink);
+  if (!media || webViewLink === undefined || webContentLink === undefined) return null;
+  return {
+    id: file.id,
+    name: file.name,
+    mimeType: file.mimeType,
+    sizeBytes: file.sizeBytes,
+    parentIds: file.parentIds,
+    createdTime: record.createdTime,
+    modifiedTime: record.modifiedTime,
+    ...media,
+    webViewLink,
+    webContentLink,
+    appProperties: file.appProperties,
   };
 }
 
@@ -664,6 +763,17 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         trashed: file.trashed,
         appProperties: file.appProperties,
       };
+    },
+
+    async inspectVideoMetadata(accessToken, fileId): Promise<DriveVideoMetadata> {
+      if (!boundedDriveId(fileId)) throw stableError("DRIVE_PROVIDER_REJECTED");
+      const metadata = parseDriveVideoMetadata(await driveJson(
+        accessToken,
+        driveUrl(`/files/${encodeURIComponent(fileId)}`, { fields: VIDEO_METADATA_FIELDS }),
+        { method: "GET" },
+      ));
+      if (!metadata) throw remoteMismatch();
+      return metadata;
     },
 
     async deleteFile(accessToken, fileId) {
