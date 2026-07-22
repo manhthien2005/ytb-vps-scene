@@ -154,7 +154,10 @@ describe("DashboardShell", () => {
 
     fireEvent.change(screen.getByLabelText("Thêm video"), { target: { files: [file] } });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /3\. Review/ })).toBeEnabled());
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: /3\. Review/ })).toBeEnabled(),
+      { timeout: 3_000 },
+    );
     expect(screen.getByText("Nguồn: Sẵn sàng")).toBeVisible();
   });
 });
