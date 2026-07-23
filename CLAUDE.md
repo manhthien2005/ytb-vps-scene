@@ -28,10 +28,10 @@ so Codex never accidentally uses your project's API key for billing.
 | `/collab-fleet <task>` | **Tech Lead mode:** decompose work → dispatch a fleet of parallel, worktree-isolated Codex workers → QC → integrate |
 | `/collab-adversarial` | Independent adversarial review of a scoped diff (auth / data-loss / races / edge cases) |
 
-**How it works:** Claude calls `codex exec` via bash. Codex's response streams
-directly into Claude's context. Claude reads it, reasons about it, synthesizes.
-No tmux, no file polling, no third-party tools. Build tasks run asynchronously
-in the background so the user can keep talking to Claude while Codex works.
+**How it works:** Claude calls `codex exec` via bash. Think calls return directly. Build calls
+use the Bash tool's `run_in_background: true`; the harness notifies on completion, so there is
+no shell PID polling or shared output-file protocol. Claude reads an output artifact only when
+diagnosis requires it, reviews the diff, runs tests, and synthesizes the result.
 
 **Bridge modes:**
 - `codex-bridge.sh think "prompt"` — read-only, for debate and review (sync)
@@ -62,16 +62,18 @@ and fans it out to a **fleet of parallel Codex workers** via `.claude/bin/codex-
 Use `/collab-fleet`. For one tightly-coupled change, use `/collab` build instead.
 
 **Isolation via git worktrees (no tmux):** each worker runs in `.worktrees/<name>` on
-branch `codex/<name>`, from current `HEAD`. Codex's `workspace-write` sandbox is scoped to
+branch `codex/<name>`, from an immutable base. Codex's `workspace-write` sandbox is scoped to
 that worktree, so a worker **physically cannot** touch the main tree or a sibling's files.
 Disjoint specs → clean merges (disjoint on files AND shared contracts/interfaces, not just
-files). Lifecycle: `run` → `collect` → review → `merge` → `clean`.
+files). Lifecycle: plan → `check` → `run` → `status` → `collect` → QC → `approve` → `merge`
+→ integration test → optional `rollback` → `clean`.
 
 **Durable + resumable:** all worker state lives under `.collab/fleet/<name>/` (phase machine,
-immutable base SHA, reviewed tip, PID). If a session dies mid-fleet, a fresh Claude runs
-`status` — each worker shows `DONE`/`RUNNING`/`ORPHANED`/`FAILED`/`MERGED` from durable phase +
-PID liveness — and recovers: re-`run` orphans (idempotent, base preserved), QC+`merge` the done
-ones. Intended workers = specs in `.collab/specs/`; merged work is also permanent in git history.
+immutable base SHA, pinned spec/charter hashes, attempt metadata, report/diff ground truth,
+approval, and merge journal). A fresh Claude runs `status` and recovers from durable classes:
+`READY`, `BLOCKED`, `FAILED`, `APPROVED`, `STALE`, `MERGING`, `MERGED`, `ROLLED-BACK`,
+`ORPHANED`, or `RECOVERY-REQUIRED`. `run` resumes only orphans; failed/blocked workers require
+explicit `retry`. Missing durable branches are never recreated from current `HEAD`.
 
 **Token contract — the reason this exists:**
 - SAVE on dispatch: a worker's raw reasoning transcript goes to `.collab/fleet/<name>/log`,
@@ -80,15 +82,37 @@ ones. Intended workers = specs in `.collab/specs/`; merged work is also permanen
 - SPEND on QC: reading the real diff (`.collab/fleet/<name>/diff`) and running the tests is
   where the lead enforces quality. Never skimp here to save tokens.
 
-**Safety gates (engine-enforced):** worker names must be `[a-z0-9][a-z0-9-]*`; stale non-worktree
-dirs are rejected (isolation); denylist writes (`secrets/`, `web/.env*`, `web/src/lib/security/`,
-`config/`) auto-fail a worker; `merge` requires phase=complete + tip match + clean main tree;
-`clean` refuses a live worker; background `codex exec` uses `< /dev/null` (else it hangs on stdin).
+**Safety gates (engine-enforced):** names/spec dependencies/allowlists are linted; Windows path
+policy is separator- and case-normalized; SHA-256 tooling is required; the engineering charter,
+spec, base, attempt, logs, and engine ground truth are durable; `FLEET_TIMEOUT_S` bounds worker
+execution; approval pins tip/diff/evidence plus integration `HEAD`; a global lock serializes
+merge; conflicts are aborted and journaled; rollback uses a revert commit. Scope uses tracked
+and non-ignored untracked paths; benign ignored runtime/test caches are summarized but do not
+fail workers or normal clean, while ignored protected paths still fail denylist policy. Normal
+`clean` is limited to merged or rolled-back workers; other evidence needs explicit
+`clean --discard`.
+
+Before official production use, run one tiny harmless live Codex worker when auth, quota, and
+service availability permit; otherwise record the exact environment limitation and retain the
+disposable fake-Codex smoke evidence.
 
 **Engine subcommands:** `run <name> <spec>` (launch worker — always via the Bash tool's
-`run_in_background: true`, never shell `&`), `collect <name>`, `status`, `check` (flag
-files claimed by >1 spec), `merge <name>`, `clean <name>`. Env: `CODEX_MODEL`,
-`WORKER_EFFORT` (default `xhigh`), `FLEET_MAX_FILES` (soft warn, default 3).
+`run_in_background: true`, never shell `&`), `retry <name>`, `collect <name>`, `status`,
+`check`, `approve <name> <evidence>`, `merge <name>`, `rollback <name>`, and
+`clean [--discard] <name>`. Env: `CODEX_MODEL`, `WORKER_EFFORT` (default `xhigh`),
+`FLEET_MAX_FILES` (default 3), `FLEET_TIMEOUT_S` (default 1800; `FLEET_TIMEOUT` alias),
+`FLEET_CHARTER` (override charter path), `CODEX_FLEET_LAUNCHER` (optional executable wrapper or
+`.ps1` launcher), and `CODEX_FLEET_PWSH` (PowerShell executable override). On WSL, a mounted
+Windows npm Codex installation is launched through its adjacent `codex.ps1` so Windows receives a
+normalized working directory; linked-worktree `.git` pointers are made relative so both WSL Git
+and Windows Codex resolve the same metadata. PowerShell auto-selection prefers a non-`WindowsApps`
+executable because Windows Store shims can be denied by the Codex sandbox; the Codex subprocess
+`PATH` is also sanitized to remove `WindowsApps` and prefer system PowerShell for nested tools.
+Launcher overrides are path/command values, never shell snippets, and missing or non-executable
+launchers fail closed.
+Run one harmless live Codex smoke before production use; if auth, quota, sandbox, path, or service
+limitations prevent it, record the exact error and keep the fake smoke evidence instead of claiming
+readiness.
 
 **Not installed by design:** the official `openai/codex-plugin-cc` was evaluated and
 declined for this repo — its parallel `agent-team` needs tmux (absent on this Windows/

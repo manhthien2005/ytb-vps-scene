@@ -22,6 +22,10 @@ pin down exactly what is under test:
 ## Call Codex (build mode — it writes test files)
 
 Keep the prompt tight. Codex is stateless and can read the files itself.
+For serious implementation or any change needing isolation and merge gates, use
+`/collab-fleet`; this bridge workflow is for a tightly scoped test-only edit.
+
+Invoke the Bash tool with `run_in_background: true`:
 
 ```bash
 .claude/bin/codex-bridge.sh build "Write tests for the following change. Test the REQUIRED BEHAVIOR described below, not the implementation details — a test must fail if the behavior is wrong.
@@ -34,16 +38,15 @@ Changed source files (test targets):
 Required behavior (the spec to test against):
 [your behavior description — inputs, outputs, edge cases, error paths]
 
-Do NOT modify any non-test file. Do NOT touch: secrets/, web/.env*, web/src/lib/security/, config/. Run the relevant tests when done and report pass/fail." > .collab/codex-output.txt 2>&1 &
-CODEX_PID=$!
-echo "Codex PID: $CODEX_PID"
+Do NOT modify any non-test file. Do NOT touch: secrets/, web/.env*, web/src/lib/security/, config/. Run the relevant tests when done and report pass/fail."
 ```
 
-Async: tell the user Codex is writing tests, check per the /collab polling rules.
+The harness notifies on completion. Do not use shell `&`, manual PID polling, or a shared
+`.collab/codex-output.txt`; inspect a harness output artifact only when diagnosis needs it.
 
 ## Review when done (never trust the self-report)
 
-1. Check PID done, read `.collab/codex-output.txt`, then `rm -f` it.
+1. When notified, read the compact result or output artifact only as needed.
 2. `git status --porcelain` — confirm Codex only added/changed test files. Reject writes to source or denylist paths (the bridge logs a warning too).
 3. Read the tests: do they assert *behavior*, or just restate the code? Flag tautological/trivial tests.
 4. Run `pytest` yourself. Report real coverage of the behavior, and any gaps Codex missed.

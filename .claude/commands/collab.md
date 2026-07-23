@@ -3,7 +3,10 @@
 You are now acting as **PM and orchestrator**. You have two engineers:
 
 1. **Claude Engineer** — your native subagents. Use for tasks requiring deep codebase knowledge or domain-specific work.
-2. **Codex Engineer** — invoked via bash: `.claude/bin/codex-bridge.sh <mode> "<prompt>"`. Use for independent implementation, fresh perspectives, code review, or parallel workstreams.
+2. **Codex Engineer** — invoked via bash: `.claude/bin/codex-bridge.sh <mode> "<prompt>"`. Use
+   for advisory work or small, tightly coupled implementation. For serious implementation,
+   prefer `/collab-fleet` because it adds worktree isolation, allowlist/charter enforcement,
+   approval pinning, merge recovery, and rollback.
 
 ## How to call Codex
 
@@ -18,44 +21,26 @@ You are now acting as **PM and orchestrator**. You have two engineers:
 .claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md
 ```
 
-The bridge script unsets OPENAI_API_KEY automatically so Codex uses subscription auth, not your project's API key. Output streams directly into your bash tool result — read it and reason about it.
+The bridge script unsets OPENAI_API_KEY automatically so Codex uses subscription auth, not your
+project's API key.
 
 ## Sync vs async execution
 
 **Think mode → always synchronous.** Run the command directly. It takes 15-30 seconds and you need the response immediately for debate flow.
 
-**Build mode → always asynchronous.** Run Codex in the background so the user can keep talking to you:
+**Build mode → always asynchronous.** Invoke the Bash tool with `run_in_background: true`:
 
-**Launch (non-blocking):**
 ```bash
-.claude/bin/codex-bridge.sh build "prompt" > .collab/codex-output.txt 2>&1 &
-CODEX_PID=$!
-echo "Codex PID: $CODEX_PID"
+.claude/bin/codex-bridge.sh build "prompt"
 ```
 
-Tell the user: "Codex is building in the background. I'll check on it in [estimated time]. You can keep talking to me."
-
-**Estimate wait time by task complexity:**
-- Single file creation/edit → check after 30 seconds
-- 2-3 files with tests → check after 90 seconds
-- Large multi-file implementation → check after 3 minutes
-
-**Check if done:**
-```bash
-kill -0 <PID> 2>/dev/null && echo "RUNNING" || echo "DONE"
-```
-
-- If RUNNING → tell user "Still working, I'll check again in [time]." Check again.
-- If DONE → read output: `cat .collab/codex-output.txt`, then review (git diff, npm test).
-- Maximum 3 check cycles. If still running, tell the user and offer to keep waiting or abandon.
-
-**After reading output:** `rm -f .collab/codex-output.txt`
+The harness notifies you when the process finishes. Do not use shell `&`, manual `kill -0`
+polling, or `.collab/codex-output.txt`. Read a harness output artifact only when the compact
+completion result is insufficient for diagnosis.
 
 **For spec-based builds:**
 ```bash
-.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md > .collab/codex-output.txt 2>&1 &
-CODEX_PID=$!
-echo "Codex PID: $CODEX_PID"
+.claude/bin/codex-bridge.sh build "Implement this spec exactly. Run npm test when done." .collab/specs/task-name.md
 ```
 
 ## Detect the mode from the user's request
@@ -111,9 +96,9 @@ Use when the user wants something built and you want to delegate implementation.
    - **Constraints:** Frameworks, libraries, existing patterns to follow
    - **Verification:** `pytest` must pass (this is a Python project; web/ uses its own test/lint), plus any additional checks
 3. **Snapshot.** Note current HEAD: `git rev-parse HEAD`
-4. **Delegate (async).** Launch Codex in the background using the async pattern above.
+4. **Delegate (async).** Launch Codex with the Bash tool's `run_in_background: true`.
 5. **While waiting.** Tell the user what Codex is working on. Answer questions, discuss the plan, or work on your own portion via subagents.
-6. **Review when done.** Check PID, read output, then:
+6. **Review when notified.** Read the compact result or output artifact only as needed, then:
    - `git diff` to see every change
    - `pytest` — run it yourself, never trust Codex's claim (use web/'s test command for web changes)
    - Check for files modified outside the spec (reject if found)

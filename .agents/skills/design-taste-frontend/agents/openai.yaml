@@ -1,0 +1,7 @@
+interface:
+  display_name: "Design Taste Frontend"
+  short_description: "Distinctive frontend design without AI slop"
+  default_prompt: "Use $design-taste-frontend to design and build a distinctive, production-ready frontend experience."
+
+policy:
+  allow_implicit_invocation: true

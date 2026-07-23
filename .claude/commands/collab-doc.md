@@ -21,6 +21,11 @@ of the code. Docs that describe what the code *should* do (rather than what it
 
 ## Call Codex (build mode — it writes doc files)
 
+For serious implementation or any change needing isolation and merge gates, use
+`/collab-fleet`; this bridge workflow is for a tightly scoped documentation-only edit.
+
+Invoke the Bash tool with `run_in_background: true`:
+
 ```bash
 .claude/bin/codex-bridge.sh build "Document the following change. Describe ACTUAL, VERIFIED behavior only — do not speculate about behavior you cannot confirm from the code, and do not just paraphrase the implementation line by line. Explain purpose, inputs/outputs, and how to use it.
 
@@ -33,16 +38,15 @@ Changed files being documented:
 Verified behavior to document:
 [what you have confirmed the code does]
 
-Do NOT modify source logic — docs and docstrings only. Do NOT touch: secrets/, web/.env*, web/src/lib/security/, config/. Do NOT document unrelated code outside this change." > .collab/codex-output.txt 2>&1 &
-CODEX_PID=$!
-echo "Codex PID: $CODEX_PID"
+Do NOT modify source logic — docs and docstrings only. Do NOT touch: secrets/, web/.env*, web/src/lib/security/, config/. Do NOT document unrelated code outside this change."
 ```
 
-Async: tell the user Codex is documenting, poll per the /collab rules.
+The harness notifies on completion. Do not use shell `&`, manual PID polling, or a shared
+`.collab/codex-output.txt`; inspect a harness output artifact only when diagnosis needs it.
 
 ## Review when done
 
-1. PID done → read `.collab/codex-output.txt` → `rm -f` it.
+1. When notified, read the compact result or output artifact only as needed.
 2. `git status --porcelain` — Codex should only touch doc files / docstrings. Reject changes to source logic or denylist paths (bridge logs a warning too).
 3. Read the docs: are claims accurate against the real behavior? Delete any speculative or invented statements. Check it didn't drift into unrelated areas.
 4. Report what was documented and where; note anything you corrected.
