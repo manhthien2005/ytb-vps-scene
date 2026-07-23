@@ -64,7 +64,7 @@ class LocalArtifactWriterTests(unittest.TestCase):
 
         self.assertEqual(len(observed), 1)
         parent, name = observed[0]
-        self.assertEqual(parent, self.destination().parent)
+        self.assertTrue(parent.samefile(self.destination().parent))
         self.assertTrue(name.startswith(f".{self.destination().name}."))
         self.assertTrue(name.endswith(".part"))
         self.assertGreaterEqual(fsync.call_count, 1)

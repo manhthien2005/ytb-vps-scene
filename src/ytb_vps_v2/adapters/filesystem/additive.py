@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -123,7 +124,8 @@ class LocalAdditiveObjectStore:
                 PurePosixPath(destination.name),
                 expected,
             )
-            if prepared != destination:
+            same_parent = os.path.samefile(prepared.parent, destination.parent)
+            if not same_parent or prepared.name != destination.name:
                 raise BackupStoreError("Materialization destination is not canonical")
             if destination.exists():
                 verified_existing_file(
