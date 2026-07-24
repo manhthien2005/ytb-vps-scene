@@ -78,6 +78,8 @@ describe("SceneEditor", () => {
       },
     });
 
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "1.1" } });
+    expect(screen.getByRole("slider")).toHaveValue("1.1");
     await act(async () => { resolveProjectB(jsonResponse({ settings: null })); });
     expect(screen.getByRole("slider")).toHaveValue("1");
   });
