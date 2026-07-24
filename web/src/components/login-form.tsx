@@ -26,12 +26,19 @@ export function LoginForm({
     setBusy(true);
     setError("");
     const form = new FormData(event.currentTarget);
-    const response = await fetcher("/api/v1/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key: form.get("key") }),
-    });
-    setBusy(false);
+    let response: Awaited<ReturnType<Fetcher>>;
+    try {
+      response = await fetcher("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: form.get("key") }),
+      });
+    } catch {
+      setError("Admin key không đúng hoặc yêu cầu bị từ chối.");
+      return;
+    } finally {
+      setBusy(false);
+    }
     if (!response.ok) {
       setError("Admin key không đúng hoặc yêu cầu bị từ chối.");
       return;
