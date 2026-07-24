@@ -87,6 +87,20 @@ class MediaJobTests(unittest.TestCase):
         transfer = FakeTransfer.instances[0]
         self.assertEqual(transfer.downloads[0][0], "drive-source-1")
         self.assertEqual(transfer.uploads[0][0].startswith("https://www.googleapis.com/"), True)
+        progress_updates = [payload for event, payload in client.events if event == "progress"]
+        self.assertEqual(
+            progress_updates,
+            [
+                {"fencingToken": 4, "fromState": "CLAIMED", "state": "DOWNLOADING", "progressPercent": 5},
+                {"fencingToken": 4, "fromState": "DOWNLOADING", "state": "OCR", "progressPercent": 20},
+                {"fencingToken": 4, "fromState": "OCR", "state": "UPLOADING", "progressPercent": 90},
+            ],
+        )
+        uploading_progress_index = client.events.index(("progress", progress_updates[-1]))
+        output_session_index = next(
+            index for index, (event, _payload) in enumerate(client.events) if event == "output-session"
+        )
+        self.assertLess(uploading_progress_index, output_session_index)
         self.assertEqual([event for event, _ in client.events], ["progress", "progress", "renew", "renew", "progress", "output-session", "complete"])
 
     def test_rejects_missing_source_digest(self) -> None:
