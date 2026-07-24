@@ -18,7 +18,9 @@ function rectangleStyle(rectangle: SceneRectangle): React.CSSProperties {
 
 export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: { projectId: string | null; sourceFile?: File | null; fetcher?: typeof fetch }) {
   const preview = useRef<HTMLDivElement>(null);
+  const settingsLoadGeneration = useRef(0);
   const [settings, setSettings] = useState<SceneSettings>(DEFAULTS);
+  const [settingsProjectId, setSettingsProjectId] = useState(projectId);
   const [kind, setKind] = useState<"sourceSubtitle" | "logo">("sourceSubtitle");
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -27,6 +29,11 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const previewUrl = videoUrl ?? sourceUrl;
+
+  if (settingsProjectId !== projectId) {
+    setSettingsProjectId(projectId);
+    setSettings(DEFAULTS);
+  }
 
   useEffect(() => {
     if (sourceFile === null || typeof URL.createObjectURL !== "function") return;
@@ -40,14 +47,22 @@ export function SceneEditor({ projectId, sourceFile = null, fetcher = fetch }: {
   }, [sourceFile]);
 
   useEffect(() => {
-    if (projectId === null) return;
+    const generation = ++settingsLoadGeneration.current;
+    const invalidate = () => {
+      if (generation === settingsLoadGeneration.current) settingsLoadGeneration.current += 1;
+    };
+    if (projectId === null) return invalidate;
     fetcher(`/api/v1/projects/${projectId}/scene-settings`).then(async (response) => {
-      if (!response.ok) return;
+      if (!response.ok || generation !== settingsLoadGeneration.current) return;
       const body = await response.json() as { settings?: SceneSettings | null };
+      if (generation !== settingsLoadGeneration.current) return;
       if (body.settings) {
         try { setSettings(parseSceneSettings(body.settings)); } catch { setSettings(DEFAULTS); }
+      } else {
+        setSettings(DEFAULTS);
       }
     }).catch(() => undefined);
+    return invalidate;
   }, [fetcher, projectId]);
 
   useEffect(() => () => {
