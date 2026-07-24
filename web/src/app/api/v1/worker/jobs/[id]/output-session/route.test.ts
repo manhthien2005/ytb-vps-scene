@@ -44,8 +44,10 @@ describe("POST /api/v1/worker/jobs/[id]/output-session", () => {
     };
 
     const first = await createSession(jobId, request);
+    repository.reserveOutput.mockResolvedValueOnce("REPLAY");
     const replay = await createSession(jobId, request);
     expect(first.artifactId).toBe(replay.artifactId);
+    expect(first.artifactId).toBe("0399d9cb-c22a-523b-a611-86749f6688b5");
     expect(first.artifactId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(drive.files.ensureOutputFile.mock.calls.slice(0, 2).map(([, input]) => input.artifactId))
       .toEqual([first.artifactId, first.artifactId]);
