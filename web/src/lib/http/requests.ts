@@ -31,14 +31,28 @@ export async function readStrictJson<T>(
   const chunks: Uint8Array[] = [];
   let size = 0;
   while (true) {
-    const part = await reader.read();
+    let part: ReadableStreamReadResult<Uint8Array>;
+    try {
+      part = await reader.read();
+    } catch {
+      throw new HttpError(400, "INVALID_REQUEST");
+    }
     if (part.done) break;
     size += part.value.byteLength;
-    if (size > maxBytes) throw new HttpError(413, "REQUEST_TOO_LARGE");
+    if (size > maxBytes) {
+      try {
+        void reader.cancel().catch(() => undefined);
+      } catch {
+        // Cancellation is best-effort; stream details must never escape.
+      }
+      throw new HttpError(413, "REQUEST_TOO_LARGE");
+    }
     chunks.push(part.value);
   }
   try {
-    return schema.parse(JSON.parse(new TextDecoder().decode(Buffer.concat(chunks))));
+    return schema.parse(JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
+    ));
   } catch {
     throw new HttpError(400, "INVALID_REQUEST");
   }
