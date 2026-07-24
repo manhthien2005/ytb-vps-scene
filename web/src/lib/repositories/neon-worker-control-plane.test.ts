@@ -163,6 +163,8 @@ describe("worker control plane repository", () => {
       progressPercent: 20,
       now: BEFORE_EXPIRY,
     })).resolves.toBe("UPDATED");
+    const progressed = await db.query("select state,progress_percent from jobs where id=$1", [job!.id]);
+    expect(progressed.rows[0]).toMatchObject({ state: "DOWNLOADING", progress_percent: 20 });
 
     const second = await repository.claimJob(workerB.id, AFTER_EXPIRY, "bridge-v1");
     expect(first?.lease.fencingToken).toBe(1);
