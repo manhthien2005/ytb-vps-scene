@@ -6,6 +6,7 @@ describe("job transitions", () => {
     ["DRAFT", "READY"],
     ["READY", "QUEUED"],
     ["QUEUED", "CLAIMED"],
+    ["OCR", "UPLOADING"],
     ["TRANSLATE", "REVIEW_READY"],
     ["REVIEW_READY", "PAUSED_REVIEW"],
     ["PAUSED_REVIEW", "TTS"],
