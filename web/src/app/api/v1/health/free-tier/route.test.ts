@@ -1,14 +1,18 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { currentAdmin, service } = vi.hoisted(() => ({
-  currentAdmin: vi.fn(),
-  service: { getHealth: vi.fn() },
-}));
+const { currentAdmin, createHealthService, service } = vi.hoisted(() => {
+  const service = { getHealth: vi.fn() };
+  return {
+    currentAdmin: vi.fn(),
+    createHealthService: vi.fn(() => service),
+    service,
+  };
+});
 
 vi.mock("@/lib/auth/current-admin", () => ({ currentAdmin }));
 vi.mock("@/lib/application/free-tier-health", () => ({
-  createFreeTierHealthService: () => service,
+  createFreeTierHealthService: createHealthService,
 }));
 vi.mock("@/lib/repositories/neon-drive-control-plane", () => ({
   createNeonDriveControlPlaneRepository: () => ({ kind: "repository" }),
@@ -86,6 +90,18 @@ describe("GET /api/v1/health/free-tier", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({ code: "AUTH_REQUIRED" });
     expect(service.getHealth).not.toHaveBeenCalled();
+  });
+
+  it("contains invalid configuration before auth or health service construction", async () => {
+    process.env.SESSION_SECRET = "private-invalid-config-detail";
+
+    const response = await GET(new NextRequest("http://localhost:3000/api/v1/health/free-tier"));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(JSON.stringify(await response.json())).toBe('{"code":"HEALTH_UNAVAILABLE"}');
+    expect(currentAdmin).not.toHaveBeenCalled();
+    expect(createHealthService).not.toHaveBeenCalled();
   });
 
   it("returns only the sanitized free-tier view", async () => {

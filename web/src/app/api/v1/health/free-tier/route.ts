@@ -23,8 +23,8 @@ function usageView(snapshot: UsageSnapshot | null) {
 }
 
 export async function GET(request: NextRequest) {
-  const env = parseServerEnv(process.env);
   try {
+    const env = parseServerEnv(process.env);
     await requireAdmin(request, env.sessionSecret);
     const repository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const oauth = createGoogleOAuthAdapter({
