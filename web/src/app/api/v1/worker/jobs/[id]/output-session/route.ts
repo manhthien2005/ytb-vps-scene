@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { parseServerEnv } from "@/lib/config/env";
@@ -10,12 +11,28 @@ import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
+const UUID_V5_DNS_NAMESPACE = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
+const OUTPUT_ARTIFACT_ID_DOMAIN = "ytb-vps/output-artifact/v1";
 const schema = z.object({
   fencingToken: z.number().int().positive(),
   sizeBytes: z.number().int().safe().min(1).max(1_099_511_627_776),
   checksumSha256: z.string().regex(/^[0-9a-f]{64}$/),
 }).strict();
 type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
+
+function deriveOutputArtifactId(jobId: string, sizeBytes: number, checksumSha256: string): string {
+  const bytes = createHash("sha1")
+    .update(UUID_V5_DNS_NAMESPACE)
+    .update(OUTPUT_ARTIFACT_ID_DOMAIN, "utf8")
+    .update("\0", "utf8")
+    .update(JSON.stringify([jobId, sizeBytes, checksumSha256]), "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 export async function POST(request: NextRequest, context: Context) {
   try {
@@ -29,7 +46,7 @@ export async function POST(request: NextRequest, context: Context) {
     const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const drive = createConfiguredDrive(env, driveRepository);
     const accessToken = await drive.access.getAccessToken();
-    const artifactId = crypto.randomUUID();
+    const artifactId = deriveOutputArtifactId(jobId, body.sizeBytes, body.checksumSha256);
     const driveFileId = await drive.files.ensureOutputFile(accessToken, {
       projectId: execution.projectId,
       jobId,
