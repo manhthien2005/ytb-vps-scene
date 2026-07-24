@@ -46,6 +46,19 @@ export default async function HomePage() {
     );
   }
 
+  if (env.nodeEnv === "development" && env.databaseUrl === "postgresql://test:test@localhost/test") {
+    return (
+      <DashboardShell
+        workerOnline={false}
+        jobs={[]}
+        drive={{ status: "DISCONNECTED", accountHint: null, rootReady: false }}
+        health={{ mode: "READ_WRITE", reasons: [], driveConnection: "DISCONNECTED", drive: null, neon: null }}
+        projects={[]}
+        workers={[]}
+      />
+    );
+  }
+
   const repository = createNeonDriveControlPlaneRepository(env.databaseUrl);
   const oauth = createGoogleOAuthAdapter({
     clientId: env.googleOAuthClientId,

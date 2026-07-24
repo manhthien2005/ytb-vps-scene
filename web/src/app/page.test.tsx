@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -143,6 +143,9 @@ describe("HomePage", () => {
     });
 
     const { container } = render(await HomePage());
+
+    const nav = screen.getByRole("navigation", { name: "Điều hướng Zeus MMO" });
+    fireEvent.click(within(nav).getByRole("button", { name: /Files/ }));
 
     expect(screen.getByText("Đã kết nối")).toBeVisible();
     expect(screen.getByText("a***@example.test")).toBeVisible();

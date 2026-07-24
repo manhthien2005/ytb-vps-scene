@@ -22,3 +22,5 @@ web/.env.*.local
 web/coverage/
 tools/local-vps-connector/node_modules/
 .collab/
+
+.vercel

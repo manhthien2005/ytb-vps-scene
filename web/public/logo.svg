@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Zeus Video Workflow Logo</title>
+  <desc>Modern square logo combining cyan lightning, video playback, workflow nodes and growth.</desc>
+
+  <rect width="1024" height="1024" fill="#050505"/>
+
+  <path d="M235 402 V360 C235 295 288 242 353 242 H520"
+        fill="none" stroke="#FFFFFF" stroke-width="24"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M778 598 V664 C778 729 725 782 660 782 H493"
+        fill="none" stroke="#FFFFFF" stroke-width="24"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M236 454
+           C236 442 249 435 259 442
+           L350 503
+           C360 510 360 526 350 533
+           L259 594
+           C249 601 236 594 236 582 Z"
+        fill="#FFFFFF"/>
+
+  <path d="M709 116
+           L390 523
+           H514
+           L329 842
+           L684 446
+           H551 Z"
+        fill="#18D9F4"/>
+
+  <path d="M458 748
+           C520 725 580 696 633 657
+           C689 616 733 561 767 492"
+        fill="none" stroke="#FFC400" stroke-width="18"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M600 686 L653 646 L704 581"
+        fill="none" stroke="#FFFFFF" stroke-width="14"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <circle cx="600" cy="686" r="22" fill="#FFFFFF"/>
+  <circle cx="653" cy="646" r="22" fill="#FFFFFF"/>
+  <circle cx="704" cy="581" r="22" fill="#FFFFFF"/>
+
+  <path d="M756 489 L802 505 L787 459 Z" fill="#FFC400"/>
+</svg>

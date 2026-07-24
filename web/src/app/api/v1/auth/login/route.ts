@@ -88,8 +88,11 @@ export async function POST(request: NextRequest) {
     .split(",")[0]!
     .trim();
   const loginKey = createHmac("sha256", env.sessionSecret).update(address).digest("hex");
-  const repository = createNeonControlPlaneRepository(env.databaseUrl);
-  const decision = await repository.consumeLoginAttempt(loginKey, new Date());
+  const usesLocalDummyDatabase = env.nodeEnv === "development" && env.databaseUrl === "postgresql://test:test@localhost/test";
+  const repository = usesLocalDummyDatabase ? null : createNeonControlPlaneRepository(env.databaseUrl);
+  const decision = repository
+    ? await repository.consumeLoginAttempt(loginKey, new Date())
+    : { allowed: true, retryAfterSeconds: 0 };
   if (!decision.allowed) {
     return NextResponse.json(
       { code: "RATE_LIMITED" },
@@ -104,7 +107,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ code: "AUTH_REJECTED" }, { status: 401 });
   }
 
-  await repository.clearLoginAttempts(loginKey);
+  await repository?.clearLoginAttempts(loginKey);
   const response = NextResponse.json({ ok: true });
   response.cookies.set(ADMIN_COOKIE, issueSession(env.sessionSecret), {
     httpOnly: true,

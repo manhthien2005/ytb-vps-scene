@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "YTB VPS Studio",
-  description: "Điều phối video với GPU VPS thuê theo giờ",
+  title: "Zeus MMO",
+  description: "Control plane cho video production, dịch, file và VPS render",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
