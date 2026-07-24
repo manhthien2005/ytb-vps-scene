@@ -562,13 +562,36 @@ describe("UploadService sessions", () => {
   );
 
   it("returns an already-ready artifact without another provider call or audit", async () => {
-    repository.getArtifact.mockResolvedValue({ ...artifact, status: "READY", actualSizeBytes: 100 });
+    repository.getArtifact.mockResolvedValue({
+      ...artifact,
+      status: "READY",
+      actualSizeBytes: artifact.expectedSizeBytes,
+    });
 
     await expect(service.complete({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
-      .resolves.toEqual({ status: "SOURCE_READY", actualSizeBytes: 100 });
+      .resolves.toEqual({
+        status: "SOURCE_READY",
+        actualSizeBytes: artifact.expectedSizeBytes,
+      });
     expect(access.getAccessToken).not.toHaveBeenCalled();
     expect(files.inspectFileCalls).toHaveLength(0);
     expect(repository.markSourceReady).not.toHaveBeenCalled();
+    expect(repository.recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("rejects an already-ready artifact with a contradictory actual size", async () => {
+    repository.getArtifact.mockResolvedValue({
+      ...artifact,
+      status: "READY",
+      actualSizeBytes: 100,
+    });
+
+    await expect(service.complete({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .rejects.toMatchObject({ code: "UPLOAD_REMOTE_MISMATCH", status: 409 });
+    expect(access.getAccessToken).not.toHaveBeenCalled();
+    expect(files.inspectFileCalls).toHaveLength(0);
+    expect(repository.markSourceReady).not.toHaveBeenCalled();
+    expect(repository.markSourceInvalid).not.toHaveBeenCalled();
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });
 
@@ -643,6 +666,20 @@ describe("UploadService sessions", () => {
       .resolves.toEqual({ status: "CANCELLED" });
     expect(files.inspectFileCalls).toEqual([{ accessToken: "access", fileId: SOURCE_FILE_ID }]);
     expect(files.deleteFileCalls).toEqual([{ accessToken: "access", fileId: SOURCE_FILE_ID }]);
+    expect(repository.markSourceDeleted).toHaveBeenCalledWith(PROJECT_ID);
+    expect(repository.recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("finalizes cancellation when Drive reports the pending source is already missing", async () => {
+    repository.getArtifact.mockResolvedValue({ ...artifact, status: "PENDING" });
+    files.inspectFileError = new AppError("DRIVE_FILE_NOT_FOUND", 404);
+
+    await expect(service.cancel({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .resolves.toEqual({ status: "CANCELLED" });
+
+    expect(files.inspectFileCalls).toEqual([{ accessToken: "access", fileId: SOURCE_FILE_ID }]);
+    expect(repository.claimSourceDeletion).toHaveBeenCalledWith(PROJECT_ID);
+    expect(files.deleteFileCalls).toHaveLength(0);
     expect(repository.markSourceDeleted).toHaveBeenCalledWith(PROJECT_ID);
     expect(repository.recordAudit).not.toHaveBeenCalled();
   });
