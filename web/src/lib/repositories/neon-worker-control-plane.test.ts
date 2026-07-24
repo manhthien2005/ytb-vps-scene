@@ -6,6 +6,7 @@ import { createWorkerControlPlaneRepository } from "./neon-worker-control-plane"
 import type { WorkerCapabilities, WorkerDoctorReport } from "@/lib/domain/worker";
 
 const NOW = new Date("2026-07-20T08:30:00.000Z");
+const BEFORE_EXPIRY = new Date("2026-07-20T08:31:00.000Z");
 const AFTER_EXPIRY = new Date("2026-07-20T08:32:00.000Z");
 const capabilities: WorkerCapabilities = {
   protocolVersion: 1,
@@ -139,7 +140,7 @@ describe("worker control plane repository", () => {
     expect(first).toMatchObject({ state: "QUEUED", projectName: "Video test" });
   });
 
-  it("increments fencing and rejects stale progress after lease takeover", async () => {
+  it("restarts progress under the new fence and rejects stale progress after lease takeover", async () => {
     const workerA = await enrollWorker("a");
     const workerB = await enrollWorker("b");
     const projectId = await seedSourceReadyProject();
@@ -152,6 +153,17 @@ describe("worker control plane repository", () => {
     expect(job).not.toBeNull();
 
     const first = await repository.claimJob(workerA.id, NOW, "bridge-v1");
+    expect(first?.job.progressPercent).toBe(0);
+    await expect(repository.updateJobProgress({
+      workerId: workerA.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      fromState: "CLAIMED",
+      state: "DOWNLOADING",
+      progressPercent: 20,
+      now: BEFORE_EXPIRY,
+    })).resolves.toBe("UPDATED");
+
     const second = await repository.claimJob(workerB.id, AFTER_EXPIRY, "bridge-v1");
     expect(first?.lease.fencingToken).toBe(1);
     expect(first?.execution).toEqual({
@@ -174,11 +186,21 @@ describe("worker control plane repository", () => {
       },
     });
     expect(second?.lease.fencingToken).toBe(2);
+    expect(second?.job).toMatchObject({ state: "CLAIMED", progressPercent: 0 });
+    await expect(repository.updateJobProgress({
+      workerId: workerB.id,
+      jobId: job!.id,
+      fencingToken: 2,
+      fromState: "CLAIMED",
+      state: "DOWNLOADING",
+      progressPercent: 5,
+      now: AFTER_EXPIRY,
+    })).resolves.toBe("UPDATED");
     await expect(repository.updateJobProgress({
       workerId: workerA.id,
       jobId: job!.id,
       fencingToken: 1,
-      fromState: "CLAIMED",
+      fromState: "DOWNLOADING",
       state: "OCR",
       progressPercent: 20,
       now: AFTER_EXPIRY,
