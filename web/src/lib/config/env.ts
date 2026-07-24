@@ -9,7 +9,9 @@ const schema = z
       message: "ADMIN_KEY_HASH must be a canonical supported scrypt hash",
     }),
     SESSION_SECRET: z.string().min(64),
-    APP_ORIGIN: z.string().url(),
+    APP_ORIGIN: z.string().url().refine((value) => value === new URL(value).origin, {
+      message: "APP_ORIGIN must be a canonical origin",
+    }),
   })
   .strict();
 
@@ -25,7 +27,8 @@ const cp2Schema = z.object({
   WORKER_RELEASE_REPOSITORY: z.string().url().refine((value) => {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "github.com" &&
-      url.username === "" && url.password === "" && url.search === "" && url.hash === "" &&
+      url.port === "" && url.username === "" && url.password === "" &&
+      url.search === "" && url.hash === "" &&
       /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(url.pathname);
   }, "WORKER_RELEASE_REPOSITORY must be a credential-free HTTPS GitHub repository"),
   WORKER_RELEASE_COMMIT: z.string().regex(/^[0-9a-f]{40}$/),
