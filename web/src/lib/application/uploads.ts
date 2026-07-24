@@ -406,7 +406,8 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         if (
           artifact.actualSizeBytes === null ||
           !Number.isSafeInteger(artifact.actualSizeBytes) ||
-          artifact.actualSizeBytes < 0
+          artifact.actualSizeBytes < 0 ||
+          artifact.actualSizeBytes !== artifact.expectedSizeBytes
         ) {
           throw remoteMismatch();
         }
@@ -459,14 +460,25 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
       }
 
       const accessToken = await dependencies.access.getAccessToken();
+      let remotePresent = true;
       if (artifact.status !== "DELETING") {
-        const remote = await dependencies.files.inspectFile(accessToken, artifact.driveFileId);
-        classifyEvidence(artifact, remote);
+        try {
+          const remote = await dependencies.files.inspectFile(accessToken, artifact.driveFileId);
+          classifyEvidence(artifact, remote);
+        } catch (error) {
+          if (error instanceof AppError && error.code === "DRIVE_FILE_NOT_FOUND") {
+            remotePresent = false;
+          } else {
+            throw error;
+          }
+        }
         const claim = await dependencies.repository.claimSourceDeletion(artifact.id);
         if (claim === "CONFLICT") throw remoteMismatch();
         if (claim === "DELETED") return { status: "CANCELLED" };
       }
-      await dependencies.files.deleteFile(accessToken, artifact.driveFileId);
+      if (remotePresent) {
+        await dependencies.files.deleteFile(accessToken, artifact.driveFileId);
+      }
       await dependencies.repository.markSourceDeleted(artifact.id);
       return { status: "CANCELLED" };
     },
