@@ -261,7 +261,7 @@ export function createWorkerControlPlaneRepository(
            where a.job_id=l.job_id and a.ended_at is null and a.fencing_token<l.fencing_token
            returning a.id
          ), updated_job as (
-           update jobs j set state='CLAIMED',active_stage='CLAIMED',updated_at=$2
+           update jobs j set state='CLAIMED',active_stage='CLAIMED',progress_percent=0,updated_at=$2
            from leased l where j.id=l.job_id
            returning j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at
          ), busy as (
