@@ -90,15 +90,24 @@ export function WorkerCard({
   }
 
   async function revoke(workerId: string) {
-    const response = await fetcher(`/api/v1/workers/${workerId}/revoke`, {
-      method: "POST",
-      headers: { origin: window.location.origin },
-    });
-    if (response.ok) {
-      setCommand(null);
-      setExpiresAt(null);
-      setMessage("Đã thu hồi phiên VPS.");
+    let response: Response;
+    try {
+      response = await fetcher(`/api/v1/workers/${workerId}/revoke`, {
+        method: "POST",
+        headers: { origin: window.location.origin },
+      });
+    } catch {
+      setMessage("Chưa thu hồi được phiên VPS. Hãy thử lại.");
+      return;
     }
+    if (!response.ok) {
+      setMessage("Chưa thu hồi được phiên VPS. Hãy thử lại.");
+      return;
+    }
+    setCommand(null);
+    setExpiresAt(null);
+    setMessage("Đã thu hồi phiên VPS.");
+    onWorkerChange();
   }
 
   async function setupVps() {

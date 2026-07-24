@@ -30,6 +30,49 @@ describe("WorkerCard", () => {
     expect(screen.queryByText("Sẵn sàng render")).not.toBeInTheDocument();
   });
 
+  it("clears the enrollment command and refreshes parent state after a successful revoke", async () => {
+    const command = "curl -fsSL https://example.test/bootstrap-worker.sh";
+    let resolveRevoke: ((response: Response) => void) | undefined;
+    const revokeResponse = new Promise<Response>((resolve) => { resolveRevoke = resolve; });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ command, expiresAt: "2026-07-20T08:40:00.000Z" }), { status: 200 }))
+      .mockReturnValueOnce(revokeResponse);
+    const onWorkerChange = vi.fn();
+    render(<WorkerCard workers={[worker]} fetcher={fetcher} onWorkerChange={onWorkerChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Tạo lệnh gắn VPS" }));
+    expect(await screen.findByText(command)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Thu hồi" }));
+    expect(onWorkerChange).not.toHaveBeenCalled();
+    resolveRevoke?.(new Response(null, { status: 204 }));
+
+    expect(await screen.findByText("Đã thu hồi phiên VPS.")).toBeVisible();
+    expect(screen.queryByText(command)).not.toBeInTheDocument();
+    expect(onWorkerChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a failed revoke response without refreshing parent state", async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 409 }));
+    const onWorkerChange = vi.fn();
+    render(<WorkerCard workers={[worker]} fetcher={fetcher} onWorkerChange={onWorkerChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Thu hồi" }));
+
+    expect(await screen.findByText("Chưa thu hồi được phiên VPS. Hãy thử lại.")).toBeVisible();
+    expect(onWorkerChange).not.toHaveBeenCalled();
+  });
+
+  it("reports a rejected revoke request without refreshing parent state", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("network unavailable"));
+    const onWorkerChange = vi.fn();
+    render(<WorkerCard workers={[worker]} fetcher={fetcher} onWorkerChange={onWorkerChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Thu hồi" }));
+
+    expect(await screen.findByText("Chưa thu hồi được phiên VPS. Hãy thử lại.")).toBeVisible();
+    expect(onWorkerChange).not.toHaveBeenCalled();
+  });
+
   it("sends SSH credentials only to the local connector", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ command: "curl -fsSL https://raw.githubusercontent.com/acme/repo/abc/ops/native-v2/bootstrap-worker.sh | sudo bash -s -- 'https://app.example' 'token' 'https://github.com/acme/repo.git' 'abc'", expiresAt: "2026-07-20T08:40:00.000Z" }), { status: 200 }));
     const connectorFetcher = vi.fn()
