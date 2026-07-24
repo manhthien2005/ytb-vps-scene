@@ -52,6 +52,33 @@ describe("parseServerEnv", () => {
   });
 
   it.each([
+    "https://example.vercel.app/path",
+    "https://example.vercel.app?query=value",
+    "https://example.vercel.app/",
+    "https://user:password@example.vercel.app",
+  ])("rejects a non-origin APP_ORIGIN: %s", (appOrigin) => {
+    expect(() => parseServerEnv({ ...cp2Valid, APP_ORIGIN: appOrigin })).toThrow();
+  });
+
+  it.each(["development", "test"] as const)(
+    "accepts a localhost HTTP origin in %s",
+    (nodeEnv) => {
+      expect(parseServerEnv({
+        ...cp2Valid,
+        NODE_ENV: nodeEnv,
+        APP_ORIGIN: "http://localhost:3000",
+      }).appOrigin).toBe("http://localhost:3000");
+    },
+  );
+
+  it("rejects a worker release repository with a non-default port", () => {
+    expect(() => parseServerEnv({
+      ...cp2Valid,
+      WORKER_RELEASE_REPOSITORY: "https://github.com:444/example/repo.git",
+    })).toThrow();
+  });
+
+  it.each([
     "argon2$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "scrypt$32768$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAA=$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
