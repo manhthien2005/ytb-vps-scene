@@ -1,3 +1,5 @@
+import type { SceneSettings } from "./scene-settings";
+
 export const JOB_STATES = [
   "DRAFT", "READY", "QUEUED", "CLAIMED", "DOWNLOADING", "OCR", "TRANSLATE",
   "REVIEW_READY", "PAUSED_REVIEW", "TTS", "RENDER", "UPLOADING", "COMPLETED", "PAUSED_QUOTA",
@@ -35,12 +37,66 @@ const next: Readonly<Record<JobState, readonly JobState[]>> = {
 
 const terminal = new Set<JobState>(["COMPLETED", "CANCELLED", "FAILED_FINAL", "DELETED"]);
 
+export type JobSourceMetadata = Readonly<{
+  artifactId: string | null;
+  displayName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  checksumSha256: string | null;
+}>;
+
+export type JobPhaseTelemetry = Readonly<{
+  activePhase: string | null;
+  phaseProgressPercent: number | null;
+  latestMessage: string | null;
+  etaSeconds: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelRequestedAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}>;
+
+export type JobProgressEvent = Readonly<{
+  id: string;
+  phase: string;
+  progressPercent: number;
+  message: string | null;
+  recordedAt: string;
+}>;
+
+export type RenderSettingsPreset = Readonly<{
+  id: string;
+  name: string;
+  settings: SceneSettings;
+  createdAt: string;
+  updatedAt: string;
+}>;
+
 export type JobSummary = Readonly<{
   id: string;
   projectName: string;
   state: JobState;
   progressPercent: number;
   updatedAt: string;
+  settingsSnapshot?: SceneSettings | null;
+  sourceMetadata?: JobSourceMetadata | null;
+  activePhase?: string | null;
+  phaseProgressPercent?: number | null;
+  latestMessage?: string | null;
+  etaSeconds?: number | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  cancelRequestedAt?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}>;
+
+export type JobDetail = Readonly<JobSummary & {
+  settingsSnapshot: SceneSettings | null;
+  sourceMetadata: JobSourceMetadata | null;
+  telemetry: JobPhaseTelemetry;
+  progressHistory: readonly JobProgressEvent[];
 }>;
 
 export function assertJobTransition(from: JobState, to: JobState): void {
@@ -49,4 +105,8 @@ export function assertJobTransition(from: JobState, to: JobState): void {
 
 export function isTerminalJobState(state: string): state is JobState {
   return terminal.has(state as JobState);
+}
+
+export function isCancelableJobState(state: string): state is JobState {
+  return next[state as JobState]?.includes("CANCEL_REQUESTED") ?? false;
 }
