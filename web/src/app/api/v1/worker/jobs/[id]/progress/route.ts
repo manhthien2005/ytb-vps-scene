@@ -10,11 +10,24 @@ import { createJobQueueService } from "@/lib/application/job-queue";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
+const singleLine = (maxLength: number) => z.string()
+  .min(1)
+  .max(maxLength)
+  .refine((value) => value.trim() === value && !value.includes("\n") && !value.includes("\r"));
 const schema = z.object({
   fencingToken: z.number().int().positive(),
   fromState: z.enum(JOB_STATES),
   state: z.enum(JOB_STATES),
   progressPercent: z.number().int().min(0).max(100),
+  phase: singleLine(80).nullable().optional(),
+  phaseProgressPercent: z.number().int().min(0).max(100).nullable().optional(),
+  message: singleLine(500).nullable().optional(),
+  etaSeconds: z.number().int().min(0).max(31_536_000).nullable().optional(),
+  processedSeconds: z.number().int().min(0).max(31_536_000).nullable().optional(),
+  totalSeconds: z.number().int().min(0).max(31_536_000).nullable().optional(),
+  currentPart: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  totalParts: z.number().int().min(0).max(1_000_000).nullable().optional(),
+  errorCode: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).nullable().optional(),
 }).strict();
 type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
 
