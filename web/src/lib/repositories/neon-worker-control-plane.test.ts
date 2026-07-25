@@ -140,6 +140,199 @@ describe("worker control plane repository", () => {
     expect(first).toMatchObject({ state: "QUEUED", projectName: "Video test" });
   });
 
+  it("captures immutable settings and source metadata snapshots for claims", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "3".repeat(64),
+      now: NOW,
+    });
+    expect(job).toMatchObject({
+      settingsSnapshot: {
+        version: 1,
+        voice: "BV074_streaming",
+        rate: 1,
+      },
+      sourceMetadata: {
+        artifactId: "30000000-0000-4000-8000-000000000001",
+        displayName: "source.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 100,
+        checksumSha256: "a".repeat(64),
+      },
+    });
+
+    await db.query(
+      `update project_scene_settings
+       set settings=$2::jsonb,updated_at=$3
+       where project_id=$1`,
+      [projectId, JSON.stringify({
+        sourceSubtitle: { x: 0.2, y: 0.2, width: 0.5, height: 0.2 },
+        logo: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 },
+        voice: "BV074_streaming",
+        rate: 0.8,
+      }), BEFORE_EXPIRY.toISOString()],
+    );
+
+    const assignment = await repository.claimJob(worker.id, NOW, "bridge-v1");
+    expect(assignment?.execution.sceneSettings).toMatchObject({
+      version: 1,
+      sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
+      logo: { x: 0.8, y: 0.05, width: 0.15, height: 0.1 },
+      rate: 1,
+    });
+  });
+
+  it("returns the safe not-queueable result for malformed settings", async () => {
+    const projectId = await seedSourceReadyProject();
+    await db.query(
+      `update project_scene_settings set settings=$2::jsonb where project_id=$1`,
+      [projectId, JSON.stringify({ malformed: true })],
+    );
+
+    await expect(repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "6".repeat(64),
+      now: NOW,
+    })).resolves.toBeNull();
+  });
+
+  it("falls back to current project settings for legacy queued jobs", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    await db.query(
+      `insert into jobs(
+         id,project_id,project_name,state,progress_percent,request_key_digest,created_at,updated_at
+       ) values ($1,$2,'Legacy video','QUEUED',0,$3,$4,$4)`,
+      [
+        "40000000-0000-4000-8000-000000000001",
+        projectId,
+        "7".repeat(64),
+        NOW.toISOString(),
+      ],
+    );
+
+    const assignment = await repository.claimJob(worker.id, NOW, "bridge-v1");
+    expect(assignment?.execution.sceneSettings).toMatchObject({
+      version: 1,
+      sourceSubtitle: { x: 0.1, y: 0.7, width: 0.8, height: 0.2 },
+      rate: 1,
+    });
+  });
+
+  it("persists bounded telemetry/history and rejects progress regressions", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "4".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+
+    await expect(repository.updateJobProgress({
+      workerId: worker.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      fromState: "CLAIMED",
+      state: "DOWNLOADING",
+      progressPercent: 20,
+      phase: "download",
+      phaseProgressPercent: 50,
+      message: "Downloading source",
+      etaSeconds: 120,
+      processedSeconds: 10,
+      totalSeconds: 100,
+      currentPart: 1,
+      totalParts: 2,
+      errorCode: null,
+      now: BEFORE_EXPIRY,
+    })).resolves.toBe("UPDATED");
+
+    const telemetry = await db.query(
+      `select state,progress_percent,active_phase,phase_progress_percent,latest_message,eta_seconds
+       from jobs where id=$1`,
+      [job!.id],
+    );
+    expect(telemetry.rows[0]).toMatchObject({
+      state: "DOWNLOADING",
+      progress_percent: 20,
+      active_phase: "download",
+      phase_progress_percent: 50,
+      latest_message: "Downloading source",
+      eta_seconds: 120,
+    });
+    const history = await db.query(
+      `select phase,progress_percent,message from job_progress_history where job_id=$1`,
+      [job!.id],
+    );
+    expect(history.rows).toEqual([
+      { phase: "download", progress_percent: 20, message: "Downloading source" },
+    ]);
+
+    await expect(repository.updateJobProgress({
+      workerId: worker.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      fromState: "DOWNLOADING",
+      state: "OCR",
+      progressPercent: 30,
+      etaSeconds: -1,
+      now: BEFORE_EXPIRY,
+    })).rejects.toThrow("Invalid ETA");
+    await expect(repository.updateJobProgress({
+      workerId: worker.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      fromState: "DOWNLOADING",
+      state: "COMPLETED",
+      progressPercent: 100,
+      now: BEFORE_EXPIRY,
+    })).rejects.toThrow("Illegal job transition");
+
+    await expect(repository.updateJobProgress({
+      workerId: worker.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      fromState: "DOWNLOADING",
+      state: "OCR",
+      progressPercent: 10,
+      now: AFTER_EXPIRY,
+    })).resolves.toBe("LEASE_LOST");
+    const unchanged = await db.query(
+      `select state,progress_percent from jobs where id=$1`,
+      [job!.id],
+    );
+    expect(unchanged.rows[0]).toMatchObject({ state: "DOWNLOADING", progress_percent: 20 });
+  });
+
+  it("exposes cooperative cancellation through lease renewal", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "5".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+    await db.query(
+      `update jobs set cancel_requested_at=$2 where id=$1`,
+      [job!.id, BEFORE_EXPIRY.toISOString()],
+    );
+
+    await expect(repository.renewLease({
+      workerId: worker.id,
+      jobId: job!.id,
+      fencingToken: 1,
+      now: BEFORE_EXPIRY,
+    })).resolves.toMatchObject({ cancelRequested: true, fencingToken: 1 });
+  });
+
   it("restarts progress under the new fence and rejects stale progress after lease takeover", async () => {
     const workerA = await enrollWorker("a");
     const workerB = await enrollWorker("b");

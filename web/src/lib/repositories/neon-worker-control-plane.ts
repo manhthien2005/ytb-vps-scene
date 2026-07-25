@@ -1,5 +1,14 @@
-import { JOB_STATES, WORKER_STATES, type JobState, type JobSummary, type WorkerState } from "@/lib/domain/control-plane";
-import { parseMediaExecutionDescriptor, parseWorkerCapabilities, parseWorkerDoctorReport, type WorkerLease, type WorkerView } from "@/lib/domain/worker";
+import {
+  assertJobTransition,
+  JOB_STATES,
+  WORKER_STATES,
+  type JobSourceMetadata,
+  type JobState,
+  type JobSummary,
+  type WorkerState,
+} from "@/lib/domain/control-plane";
+import { parseSceneSettings } from "@/lib/domain/scene-settings";
+import { parseMediaExecutionDescriptor, parseWorkerCapabilities, parseWorkerDoctorReport, type WorkerView } from "@/lib/domain/worker";
 import { createSql } from "@/lib/db/client";
 import type {
   EnrollmentReservation,
@@ -7,6 +16,7 @@ import type {
   JobProgress,
   QueueProjectJob,
   RenewLease,
+  WorkerLease,
   WorkerControlPlaneRepository,
   WorkerEnrollment,
   WorkerEnrollmentResult,
@@ -49,6 +59,81 @@ function parseJobState(value: unknown): JobState {
   return value as JobState;
 }
 
+function parseNullableBoundedString(value: unknown, label: string, maxLength: number): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || value.trim() !== value || value.length < 1 || value.length > maxLength
+      || value.includes("\n") || value.includes("\r")) {
+    throw new Error(`Invalid ${label} returned by database`);
+  }
+  return value;
+}
+
+function parseJobSourceMetadata(value: unknown): JobSourceMetadata {
+  const parsed = asJson(value, "job source metadata");
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid job source metadata returned by database");
+  }
+  const record = parsed as Record<string, unknown>;
+  const artifactId = record.artifactId === null || record.artifactId === undefined
+    ? null
+    : String(record.artifactId);
+  if (artifactId !== null && !UUID_PATTERN.test(artifactId)) {
+    throw new Error("Invalid job source artifact id returned by database");
+  }
+  const displayName = parseNullableBoundedString(record.displayName, "job source display name", 255);
+  const mimeType = parseNullableBoundedString(record.mimeType, "job source mime type", 127);
+  const sizeBytes = record.sizeBytes === null || record.sizeBytes === undefined ? null : Number(record.sizeBytes);
+  if (sizeBytes !== null && (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0)) {
+    throw new Error("Invalid job source size returned by database");
+  }
+  const checksumSha256 = record.checksumSha256 === null || record.checksumSha256 === undefined
+    ? null
+    : String(record.checksumSha256);
+  if (checksumSha256 !== null && !/^[0-9a-f]{64}$/.test(checksumSha256)) {
+    throw new Error("Invalid job source checksum returned by database");
+  }
+  return Object.freeze({ artifactId, displayName, mimeType, sizeBytes, checksumSha256 });
+}
+
+function validateOptionalTelemetry(input: JobProgress): void {
+  const validateString = (value: string | null | undefined, label: string, maxLength: number): void => {
+    if (value === undefined || value === null) return;
+    if (value.trim() !== value || value.length < 1 || value.length > maxLength
+        || value.includes("\n") || value.includes("\r")) {
+      throw new Error(`Invalid ${label}`);
+    }
+  };
+  const validatePercent = (value: number | null | undefined, label: string): void => {
+    if (value === undefined || value === null) return;
+    if (!Number.isSafeInteger(value) || value < 0 || value > 100) throw new Error(`Invalid ${label}`);
+  };
+  const validateSeconds = (value: number | null | undefined, label: string, max = 31_536_000): void => {
+    if (value === undefined || value === null) return;
+    if (!Number.isSafeInteger(value) || value < 0 || value > max) throw new Error(`Invalid ${label}`);
+  };
+  const validatePart = (value: number | null | undefined, label: string): void => {
+    if (value === undefined || value === null) return;
+    if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000) throw new Error(`Invalid ${label}`);
+  };
+
+  validateString(input.phase, "phase", 80);
+  validatePercent(input.phaseProgressPercent, "phase progress");
+  validateString(input.message, "progress message", 500);
+  if (input.message !== undefined && input.message !== null
+      && /(access[_ -]?token|refresh[_ -]?token|authorization|cookie|stack[_ -]?trace|traceback|worker[_ -]?secret|session[_ -]?secret|raw[_ -]?log|bearer\s+\S+)/i.test(input.message)) {
+    throw new Error("Invalid progress message");
+  }
+  validateSeconds(input.etaSeconds, "ETA");
+  validateSeconds(input.processedSeconds, "processed seconds");
+  validateSeconds(input.totalSeconds, "total seconds");
+  validatePart(input.currentPart, "current part");
+  validatePart(input.totalParts, "total parts");
+  if (input.errorCode !== undefined && input.errorCode !== null
+      && !/^[A-Z][A-Z0-9_]{0,79}$/.test(input.errorCode)) {
+    throw new Error("Invalid error code");
+  }
+}
+
 function parseWorkerRow(row: Record<string, unknown>): WorkerView {
   const id = String(row.id);
   if (!UUID_PATTERN.test(id)) throw new Error("Invalid worker id returned by database");
@@ -78,13 +163,64 @@ function parseJobRow(row: Record<string, unknown>): JobSummary {
   if (projectName.length < 1 || projectName.length > 160) {
     throw new Error("Invalid project name returned by database");
   }
-  return Object.freeze({
+  const summary: {
+    id: string;
+    projectName: string;
+    state: JobState;
+    progressPercent: number;
+    updatedAt: string;
+    [key: string]: unknown;
+  } = {
     id: String(row.id),
     projectName,
     state: parseJobState(row.state),
     progressPercent,
     updatedAt: asIso(row.updated_at, "job update timestamp"),
-  });
+  };
+  if ("settings_snapshot" in row) {
+    summary.settingsSnapshot = row.settings_snapshot === null || row.settings_snapshot === undefined
+      ? null
+      : parseSceneSettings(asJson(row.settings_snapshot, "job settings snapshot"));
+  }
+  if ("source_metadata" in row) {
+    summary.sourceMetadata = row.source_metadata === null || row.source_metadata === undefined
+      ? null
+      : parseJobSourceMetadata(row.source_metadata);
+  }
+  if ("active_phase" in row) summary.activePhase = parseNullableBoundedString(row.active_phase, "job active phase", 80);
+  if ("phase_progress_percent" in row) {
+    const value = row.phase_progress_percent === null || row.phase_progress_percent === undefined
+      ? null
+      : Number(row.phase_progress_percent);
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 100)) {
+      throw new Error("Invalid job phase progress returned by database");
+    }
+    summary.phaseProgressPercent = value;
+  }
+  if ("latest_message" in row) summary.latestMessage = parseNullableBoundedString(row.latest_message, "job latest message", 500);
+  if ("eta_seconds" in row) {
+    const value = row.eta_seconds === null || row.eta_seconds === undefined ? null : Number(row.eta_seconds);
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > 31_536_000)) {
+      throw new Error("Invalid job ETA returned by database");
+    }
+    summary.etaSeconds = value;
+  }
+  if ("started_at" in row) summary.startedAt = row.started_at === null || row.started_at === undefined ? null : asIso(row.started_at, "job start timestamp");
+  if ("completed_at" in row) summary.completedAt = row.completed_at === null || row.completed_at === undefined ? null : asIso(row.completed_at, "job completion timestamp");
+  if ("cancel_requested_at" in row) {
+    summary.cancelRequestedAt = row.cancel_requested_at === null || row.cancel_requested_at === undefined
+      ? null
+      : asIso(row.cancel_requested_at, "job cancellation timestamp");
+  }
+  if ("error_code" in row) {
+    const errorCode = parseNullableBoundedString(row.error_code, "job error code", 80);
+    summary.errorCode = errorCode;
+    if (errorCode !== null && !/^[A-Z][A-Z0-9_]{0,79}$/.test(errorCode)) {
+      throw new Error("Invalid job error code returned by database");
+    }
+  }
+  if ("error_message" in row) summary.errorMessage = parseNullableBoundedString(row.error_message, "job error message", 500);
+  return Object.freeze(summary) as JobSummary;
 }
 
 function parseLeaseRow(row: Record<string, unknown>): WorkerLease {
@@ -97,6 +233,7 @@ function parseLeaseRow(row: Record<string, unknown>): WorkerLease {
     workerId: String(row.worker_id),
     fencingToken,
     expiresAt: asIso(row.expires_at, "lease expiry"),
+    cancelRequested: row.cancel_requested === true || row.cancel_requested === "t",
   });
 }
 
@@ -197,30 +334,93 @@ export function createWorkerControlPlaneRepository(
     },
 
     async queueProjectJob(input: QueueProjectJob): Promise<JobSummary | null> {
-      const result = await sql.query(
-        `with existing as (
-           select id,project_name,state,progress_percent,updated_at
-           from jobs where request_key_digest=$3
-         ), inserted as (
-           insert into jobs(
-             id,project_id,project_name,state,progress_percent,request_key_digest,created_at,updated_at
-           )
-           select $1,p.id,p.name,'QUEUED',0,$3,$4,$4
-           from projects p
-           where p.id=$2 and p.status='READY' and p.source_status='SOURCE_READY'
-             and exists (
-               select 1 from artifacts a
-               where a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
-             )
-             and exists (select 1 from project_scene_settings s where s.project_id=p.id)
-             and not exists (select 1 from existing)
-           on conflict(request_key_digest) do nothing
-           returning id,project_name,state,progress_percent,updated_at
-         )
-         select * from existing union all select * from inserted limit 1`,
-        [input.jobId, input.projectId, input.requestKeyDigest, input.now.toISOString()],
+      const summaryColumns = `id,project_id,project_name,state,progress_percent,updated_at,
+        settings_snapshot,source_metadata,active_phase,phase_progress_percent,latest_message,
+        eta_seconds,started_at,completed_at,cancel_requested_at,error_code,error_message`;
+      const existing = await sql.query(
+        `select ${summaryColumns} from jobs where request_key_digest=$1`,
+        [input.requestKeyDigest],
       );
-      return result.rows[0] ? parseJobRow(result.rows[0]) : null;
+      if (existing.rows[0]) {
+        try {
+          return parseJobRow(existing.rows[0]);
+        } catch {
+          return null;
+        }
+      }
+
+      const candidate = await sql.query(
+        `select p.name as project_name,
+                s.settings as scene_settings,
+                a.id as artifact_id,
+                a.display_name as source_file_name,
+                a.mime_type as source_mime_type,
+                a.actual_size_bytes as source_size_bytes,
+                a.checksum_sha256 as source_sha256
+         from projects p
+         join project_scene_settings s on s.project_id=p.id
+         join artifacts a on a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
+         where p.id=$1 and p.status='READY' and p.source_status='SOURCE_READY'
+           and a.actual_size_bytes is not null and a.checksum_sha256 is not null
+         limit 1`,
+        [input.projectId],
+      );
+      const candidateRow = candidate.rows[0];
+      if (!candidateRow) return null;
+
+      let settingsSnapshot: ReturnType<typeof parseSceneSettings>;
+      let sourceMetadata: JobSourceMetadata;
+      try {
+        settingsSnapshot = parseSceneSettings(asJson(candidateRow.scene_settings, "scene settings"));
+        sourceMetadata = parseJobSourceMetadata({
+          artifactId: candidateRow.artifact_id,
+          displayName: candidateRow.source_file_name,
+          mimeType: candidateRow.source_mime_type,
+          sizeBytes: Number(candidateRow.source_size_bytes),
+          checksumSha256: candidateRow.source_sha256,
+        });
+      } catch {
+        return null;
+      }
+      if (
+        sourceMetadata.artifactId === null
+        || sourceMetadata.displayName === null
+        || sourceMetadata.mimeType === null
+        || sourceMetadata.sizeBytes === null
+        || sourceMetadata.checksumSha256 === null
+      ) {
+        return null;
+      }
+
+      const inserted = await sql.query(
+        `insert into jobs(
+           id,project_id,project_name,state,progress_percent,request_key_digest,
+           settings_snapshot,source_metadata,created_at,updated_at
+         )
+         values ($1,$2,$3,'QUEUED',0,$4,$5::jsonb,$6::jsonb,$7,$7)
+         on conflict(request_key_digest) do nothing
+         returning ${summaryColumns}`,
+        [
+          input.jobId,
+          input.projectId,
+          candidateRow.project_name,
+          input.requestKeyDigest,
+          JSON.stringify(settingsSnapshot),
+          JSON.stringify(sourceMetadata),
+          input.now.toISOString(),
+        ],
+      );
+      if (inserted.rows[0]) return parseJobRow(inserted.rows[0]);
+      const raced = await sql.query(
+        `select ${summaryColumns} from jobs where request_key_digest=$1`,
+        [input.requestKeyDigest],
+      );
+      if (!raced.rows[0]) return null;
+      try {
+        return parseJobRow(raced.rows[0]);
+      } catch {
+        return null;
+      }
     },
 
     async claimJob(workerId: string, now: Date, bridgeVersion: string): Promise<JobAssignment | null> {
@@ -233,9 +433,12 @@ export function createWorkerControlPlaneRepository(
            for update
          ), candidate as materialized (
            select j.id
-           from jobs j left join job_leases current_lease on current_lease.job_id=j.id
+           from jobs j
+           left join job_leases current_lease on current_lease.job_id=j.id
+           left join project_scene_settings current_settings on current_settings.project_id=j.project_id
            where exists(select 1 from eligible)
              and not exists(select 1 from job_leases active_lease where active_lease.expires_at>$2)
+             and (j.settings_snapshot is not null or current_settings.project_id is not null)
              and (
                j.state='QUEUED'
                or (current_lease.expires_at<=$2 and j.state in (
@@ -260,10 +463,16 @@ export function createWorkerControlPlaneRepository(
            from leased l
            where a.job_id=l.job_id and a.ended_at is null and a.fencing_token<l.fencing_token
            returning a.id
-         ), updated_job as (
-           update jobs j set state='CLAIMED',active_stage='CLAIMED',progress_percent=0,updated_at=$2
+        ), updated_job as (
+           update jobs j set state='CLAIMED',active_stage='CLAIMED',progress_percent=0,
+             active_phase='CLAIMED',
+             phase_progress_percent=0,
+             started_at=coalesce(j.started_at,$2),updated_at=$2
            from leased l where j.id=l.job_id
-           returning j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at
+           returning j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at,
+             j.settings_snapshot,j.source_metadata,j.active_phase,j.phase_progress_percent,
+             j.latest_message,j.eta_seconds,j.started_at,j.completed_at,j.cancel_requested_at,
+             j.error_code,j.error_message
          ), busy as (
            update workers w set state='BUSY',updated_at=$2
            from leased l where w.id=l.worker_id
@@ -274,6 +483,9 @@ export function createWorkerControlPlaneRepository(
            returning id
          )
          select j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at,
+                j.settings_snapshot,j.source_metadata,j.active_phase,j.phase_progress_percent,
+                j.latest_message,j.eta_seconds,j.started_at,j.completed_at,j.cancel_requested_at,
+                j.error_code,j.error_message,
                 l.job_id,l.worker_id,l.fencing_token,l.expires_at,
                 a.drive_file_id as source_drive_file_id,
                 a.display_name as source_file_name,
@@ -281,13 +493,14 @@ export function createWorkerControlPlaneRepository(
                 a.actual_size_bytes as source_size_bytes,
                 a.checksum_sha256 as source_sha256,
                 p.drive_project_folder_id as output_parent_id,
-                s.settings as scene_settings
+                coalesce(j.settings_snapshot,s.settings) as scene_settings
          from updated_job j
          join leased l on l.job_id=j.id
          join projects p on p.id=j.project_id
          join artifacts a on a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
-         join project_scene_settings s on s.project_id=p.id,
-         attempt`,
+         left join project_scene_settings s on s.project_id=p.id
+         cross join attempt
+         where j.settings_snapshot is not null or s.project_id is not null`,
         [workerId, now.toISOString(), bridgeVersion],
       );
       const row = result.rows[0];
@@ -300,22 +513,71 @@ export function createWorkerControlPlaneRepository(
 
     async renewLease(input: RenewLease): Promise<WorkerLease | null> {
       const result = await sql.query(
-        `update job_leases set expires_at=$4::timestamptz + interval '90 seconds',updated_at=$4
-         where job_id=$1 and worker_id=$2 and fencing_token=$3 and expires_at>$4
-         returning job_id,worker_id,fencing_token,expires_at`,
+        `update job_leases l set expires_at=$4::timestamptz + interval '90 seconds',updated_at=$4
+         from jobs j
+         where l.job_id=$1 and l.job_id=j.id and l.worker_id=$2 and l.fencing_token=$3 and l.expires_at>$4
+         returning l.job_id,l.worker_id,l.fencing_token,l.expires_at,
+           (j.cancel_requested_at is not null or j.state='CANCEL_REQUESTED') as cancel_requested`,
         [input.jobId, input.workerId, input.fencingToken, input.now.toISOString()],
       );
       return result.rows[0] ? parseLeaseRow(result.rows[0]) : null;
     },
 
     async updateJobProgress(input: JobProgress): Promise<"UPDATED" | "LEASE_LOST"> {
+      if (!JOB_STATES.includes(input.fromState) || !JOB_STATES.includes(input.state)) {
+        throw new Error("Invalid job state");
+      }
+      assertJobTransition(input.fromState, input.state);
+      if (!Number.isSafeInteger(input.progressPercent) || input.progressPercent < 0 || input.progressPercent > 100) {
+        throw new Error("Invalid job progress");
+      }
+      validateOptionalTelemetry(input);
+
+      const parameters: unknown[] = [
+        input.jobId,
+        input.workerId,
+        input.fencingToken,
+        input.fromState,
+        input.state,
+        input.progressPercent,
+        input.now.toISOString(),
+      ];
+      const assignments = [
+        "state=$5",
+        "active_stage=$5",
+        "progress_percent=$6",
+        "updated_at=$7",
+        "started_at=coalesce(j.started_at,$7)",
+        "completed_at=case when $5 in ('COMPLETED','CANCELLED','FAILED_FINAL') then $7 else j.completed_at end",
+      ];
+      if (!("phase" in input)) assignments.push("active_phase=$5");
+      if (!("phaseProgressPercent" in input)) assignments.push("phase_progress_percent=0");
+      const addOptionalAssignment = (column: string, key: keyof JobProgress, cast: string): void => {
+        if (!(key in input)) return;
+        parameters.push(input[key] ?? null);
+        assignments.push(`${column}=$${parameters.length}::${cast}`);
+      };
+      addOptionalAssignment("active_phase", "phase", "text");
+      addOptionalAssignment("phase_progress_percent", "phaseProgressPercent", "integer");
+      addOptionalAssignment("latest_message", "message", "text");
+      addOptionalAssignment("eta_seconds", "etaSeconds", "integer");
+      addOptionalAssignment("error_code", "errorCode", "text");
+
       const result = await sql.query(
-        `update jobs j set state=$5,active_stage=$5,progress_percent=$6,updated_at=$7
-         from job_leases l
-         where j.id=$1 and l.job_id=j.id and l.worker_id=$2 and l.fencing_token=$3
-           and l.expires_at>$7 and j.state=$4 and j.progress_percent<=$6
-         returning j.id`,
-        [input.jobId, input.workerId, input.fencingToken, input.fromState, input.state, input.progressPercent, input.now.toISOString()],
+        `with updated as (
+           update jobs j set ${assignments.join(",")}
+           from job_leases l
+           where j.id=$1 and l.job_id=j.id and l.worker_id=$2 and l.fencing_token=$3
+             and l.expires_at>$7 and j.state=$4 and j.progress_percent<=$6
+           returning j.id,j.active_phase,j.latest_message
+         ), history as (
+           insert into job_progress_history(job_id,phase,progress_percent,message)
+           select id,coalesce(active_phase,$5),$6,latest_message
+           from updated
+           returning id
+         )
+         select id from updated`,
+        parameters,
       );
       return result.rows.length === 1 ? "UPDATED" : "LEASE_LOST";
     },
@@ -329,13 +591,14 @@ export function createWorkerControlPlaneRepository(
                 a.actual_size_bytes as source_size_bytes,
                 a.checksum_sha256 as source_sha256,
                 p.drive_project_folder_id as output_parent_id,
-                s.settings as scene_settings
+                coalesce(j.settings_snapshot,s.settings) as scene_settings
          from job_leases l
          join jobs j on j.id=l.job_id
          join projects p on p.id=j.project_id
          join artifacts a on a.project_id=p.id and a.kind='SOURCE' and a.status='READY'
-         join project_scene_settings s on s.project_id=p.id
-         where l.job_id=$1 and l.worker_id=$2 and l.fencing_token=$3 and l.expires_at>$4`,
+         left join project_scene_settings s on s.project_id=p.id
+         where l.job_id=$1 and l.worker_id=$2 and l.fencing_token=$3 and l.expires_at>$4
+           and (j.settings_snapshot is not null or s.project_id is not null)`,
         [jobId, workerId, fencingToken, now.toISOString()],
       );
       return result.rows[0] ? parseExecutionRow(result.rows[0]) : null;
@@ -401,7 +664,8 @@ export function createWorkerControlPlaneRepository(
              and a.drive_file_id=$5 and a.expected_size_bytes=$6
            returning a.id
          ), job_done as (
-           update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,updated_at=$7
+           update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,
+             completed_at=$7,updated_at=$7
            from eligible e, artifact_done a where j.id=e.job_id returning j.id
          ), worker_ready as (
            update workers w set state='READY',updated_at=$7
