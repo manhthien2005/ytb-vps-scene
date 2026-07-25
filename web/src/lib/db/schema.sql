@@ -460,3 +460,211 @@ alter table artifacts add column if not exists job_id text references jobs(id);
 create unique index if not exists artifacts_one_live_output_per_job_idx
   on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
 insert into schema_migrations(version) values (9) on conflict (version) do nothing;
+
+-- migration v10: durable job settings snapshots, telemetry, progress history,
+-- and reusable render settings presets
+alter table jobs add column if not exists settings_snapshot jsonb;
+alter table jobs add column if not exists source_metadata jsonb;
+alter table jobs add column if not exists active_phase text;
+alter table jobs add column if not exists phase_progress_percent integer;
+alter table jobs add column if not exists latest_message text;
+alter table jobs add column if not exists eta_seconds integer;
+alter table jobs add column if not exists started_at timestamptz;
+alter table jobs add column if not exists completed_at timestamptz;
+alter table jobs add column if not exists cancel_requested_at timestamptz;
+alter table jobs add column if not exists error_message text;
+
+create or replace function job_source_metadata_keys_are_safe(value jsonb)
+returns boolean
+language plpgsql
+immutable
+as $$
+declare
+  object_entry record;
+  child jsonb;
+begin
+  if value is null then
+    return true;
+  end if;
+  if jsonb_typeof(value) = 'object' then
+    for object_entry in
+      select object_key, object_value
+      from jsonb_each(value) as entries(object_key, object_value)
+    loop
+      if object_entry.object_key ~* '(access[_-]?token|refresh[_-]?token|worker[_-]?secret|session[_-]?secret|authorization|cookie|stack[_-]?trace|raw[_-]?log)' then
+        return false;
+      end if;
+      if jsonb_typeof(object_entry.object_value) in ('object', 'array')
+         and not job_source_metadata_keys_are_safe(object_entry.object_value) then
+        return false;
+      end if;
+    end loop;
+    return true;
+  elsif jsonb_typeof(value) = 'array' then
+    for child in select jsonb_array_elements(value) loop
+      if not job_source_metadata_keys_are_safe(child) then
+        return false;
+      end if;
+    end loop;
+    return true;
+  end if;
+  return false;
+end
+$$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_settings_snapshot_check'
+  ) then
+    alter table jobs add constraint jobs_settings_snapshot_check check (
+      settings_snapshot is null
+      or (
+        jsonb_typeof(settings_snapshot) = 'object'
+        and pg_column_size(settings_snapshot) <= 8192
+      )
+    );
+  end if;
+  update jobs
+  set error_code = null
+  where error_code is not null
+    and error_code !~ '^[A-Z][A-Z0-9_]{0,79}$';
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_source_metadata_check'
+  ) then
+    alter table jobs add constraint jobs_source_metadata_check check (
+      source_metadata is null
+      or (
+        jsonb_typeof(source_metadata) = 'object'
+        and pg_column_size(source_metadata) <= 4096
+        and job_source_metadata_keys_are_safe(source_metadata)
+      )
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_active_phase_check'
+  ) then
+    alter table jobs add constraint jobs_active_phase_check check (
+      active_phase is null
+      or (
+        active_phase = btrim(active_phase)
+        and length(active_phase) between 1 and 80
+        and position(E'\n' in active_phase) = 0
+      )
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_phase_progress_percent_check'
+  ) then
+    alter table jobs add constraint jobs_phase_progress_percent_check check (
+      phase_progress_percent is null or phase_progress_percent between 0 and 100
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_latest_message_check'
+  ) then
+    alter table jobs add constraint jobs_latest_message_check check (
+      latest_message is null
+      or (
+        latest_message = btrim(latest_message)
+        and length(latest_message) between 1 and 500
+        and position(E'\n' in latest_message) = 0
+      )
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_eta_seconds_check'
+  ) then
+    alter table jobs add constraint jobs_eta_seconds_check check (
+      eta_seconds is null or eta_seconds between 0 and 31536000
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_error_code_safe_check'
+  ) then
+    alter table jobs add constraint jobs_error_code_safe_check check (
+      error_code is null or error_code ~ '^[A-Z][A-Z0-9_]{0,79}$'
+    );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass and conname = 'jobs_error_message_check'
+  ) then
+    alter table jobs add constraint jobs_error_message_check check (
+      error_message is null
+      or (
+        error_message = btrim(error_message)
+        and length(error_message) between 1 and 500
+        and position(E'\n' in error_message) = 0
+      )
+    );
+  end if;
+end $$;
+
+create or replace function prevent_job_settings_snapshot_change()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.settings_snapshot is not null
+     and new.settings_snapshot is distinct from old.settings_snapshot then
+    raise exception 'job settings snapshot is immutable';
+  end if;
+  if old.source_metadata is not null
+     and new.source_metadata is distinct from old.source_metadata then
+    raise exception 'job source metadata is immutable';
+  end if;
+  return new;
+end
+$$;
+drop trigger if exists jobs_settings_snapshot_immutable on jobs;
+create trigger jobs_settings_snapshot_immutable
+before update on jobs
+for each row execute function prevent_job_settings_snapshot_change();
+
+create table if not exists job_progress_history (
+  id bigint generated always as identity primary key,
+  job_id text not null references jobs(id),
+  phase text not null check (
+    phase = btrim(phase)
+    and length(phase) between 1 and 80
+    and position(E'\n' in phase) = 0
+  ),
+  progress_percent integer not null check (progress_percent between 0 and 100),
+  message text check (
+    message is null
+    or (
+      message = btrim(message)
+      and length(message) between 1 and 500
+      and position(E'\n' in message) = 0
+    )
+  ),
+  recorded_at timestamptz not null default now()
+);
+create index if not exists job_progress_history_job_recorded_idx
+  on job_progress_history(job_id, recorded_at desc, id desc);
+
+create table if not exists render_settings_presets (
+  id text primary key check (
+    id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ),
+  name text not null check (
+    name = btrim(name)
+    and length(name) between 1 and 100
+  ),
+  settings jsonb not null check (
+    jsonb_typeof(settings) = 'object'
+    and pg_column_size(settings) <= 8192
+  ),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+insert into schema_migrations(version) values (10) on conflict (version) do nothing;
