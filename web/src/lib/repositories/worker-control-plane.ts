@@ -1,5 +1,11 @@
 import type { JobState, JobSummary } from "@/lib/domain/control-plane";
-import type { MediaExecutionDescriptor, WorkerCapabilities, WorkerDoctorReport, WorkerLease, WorkerView } from "@/lib/domain/worker";
+import type {
+  MediaExecutionDescriptor,
+  WorkerCapabilities,
+  WorkerDoctorReport,
+  WorkerLease as DomainWorkerLease,
+  WorkerView,
+} from "@/lib/domain/worker";
 import type { WorkerSessionRepository } from "@/lib/http/worker-auth";
 
 export type EnrollmentReservation = Readonly<{
@@ -43,6 +49,10 @@ export type JobAssignment = Readonly<{
   execution: MediaExecutionDescriptor;
 }>;
 
+export type WorkerLease = DomainWorkerLease & Readonly<{
+  cancelRequested: boolean;
+}>;
+
 export type RenewLease = Readonly<{
   workerId: string;
   jobId: string;
@@ -58,6 +68,15 @@ export type JobProgress = Readonly<{
   state: JobState;
   progressPercent: number;
   now: Date;
+  phase?: string | null;
+  phaseProgressPercent?: number | null;
+  message?: string | null;
+  etaSeconds?: number | null;
+  processedSeconds?: number | null;
+  totalSeconds?: number | null;
+  currentPart?: number | null;
+  totalParts?: number | null;
+  errorCode?: string | null;
 }>;
 
 export type OutputReservation = Readonly<{
