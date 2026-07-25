@@ -205,7 +205,7 @@ describe("control-plane schema", () => {
              phase_progress_percent,latest_message,eta_seconds,started_at,
              completed_at,cancel_requested_at,error_code,error_message
            ) values (
-             $1,'Demo','RENDER',$2::jsonb,$3::jsonb,'RENDER',42,
+             $1,'Demo','COMPLETED',$2::jsonb,$3::jsonb,'RENDER',42,
              'Encoding part 2',3600,now(),now(),now(),'ENCODE_TIMEOUT','Retrying safely'
            )`,
           [
@@ -230,8 +230,8 @@ describe("control-plane schema", () => {
         "select settings_snapshot from jobs where id='detail-job-0'",
       );
       await db.query(
-        "update render_settings_presets set name='Portrait updated' where id=$1",
-        [presetId],
+        "update render_settings_presets set name='Portrait updated',settings=$2::jsonb where id=$1",
+        [presetId, JSON.stringify({ ...settings, rate: 0.9 })],
       );
       const after = await db.query<{ settings_snapshot: unknown }>(
         "select settings_snapshot from jobs where id='detail-job-0'",
