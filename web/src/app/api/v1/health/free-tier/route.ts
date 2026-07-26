@@ -4,6 +4,7 @@ import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
 import { createDriveAccessProvider } from "@/lib/application/drive-access";
 import { createFreeTierHealthService } from "@/lib/application/free-tier-health";
 import { parseServerEnv } from "@/lib/config/env";
+import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
 import { requireAdmin } from "@/lib/http/requests";
 import type { UsageSnapshot } from "@/lib/ports/drive";
@@ -30,6 +31,7 @@ export async function GET(request: NextRequest) {
     const oauth = createGoogleOAuthAdapter({
       clientId: env.googleOAuthClientId,
       clientSecret: env.googleOAuthClientSecret,
+      scopes: [DRIVE_FILE_SCOPE],
     });
     const access = createDriveAccessProvider({
       repository,

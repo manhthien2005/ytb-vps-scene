@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
+import { YOUTUBE_SCOPES } from "@/lib/domain/youtube";
 import { createGoogleOAuthAdapter } from "./oauth";
 
 const CLIENT_ID = "google-client-id.apps.googleusercontent.com";
@@ -30,6 +31,7 @@ function adapter(fetcher: typeof fetch) {
   return createGoogleOAuthAdapter({
     clientId: CLIENT_ID,
     clientSecret: CLIENT_SECRET,
+    scopes: [DRIVE_FILE_SCOPE],
     fetcher,
   });
 }
@@ -275,5 +277,39 @@ describe("createGoogleOAuthAdapter", () => {
     expect(error).toMatchObject({ code: "DRIVE_TEMPORARILY_UNAVAILABLE" });
     expect(String(error)).not.toContain("one-use-secret-code");
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts every configured scope into the authorization url", () => {
+    const oauth = createGoogleOAuthAdapter({
+      clientId: "cid",
+      clientSecret: "secret",
+      scopes: YOUTUBE_SCOPES,
+    });
+    const url = new URL(oauth.buildAuthorizationUrl({
+      state: "state-value",
+      redirectUri: "https://example.test/api/v1/youtube/callback",
+    }));
+
+    expect(url.searchParams.get("scope")).toBe(YOUTUBE_SCOPES.join(" "));
+    expect(url.searchParams.get("access_type")).toBe("offline");
+    expect(url.searchParams.get("include_granted_scopes")).toBe("false");
+  });
+
+  it("rejects a refresh response whose scope set does not match", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      access_token: "token",
+      expires_in: 3_600,
+      token_type: "Bearer",
+      scope: YOUTUBE_SCOPES[0],
+    }));
+    const oauth = createGoogleOAuthAdapter({
+      clientId: "cid",
+      clientSecret: "secret",
+      scopes: YOUTUBE_SCOPES,
+      fetcher,
+    });
+
+    await expect(oauth.refreshAccessToken("refresh", 5_000))
+      .rejects.toMatchObject({ code: "OAUTH_SCOPE_REJECTED" });
   });
 });

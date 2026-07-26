@@ -6,7 +6,7 @@ import { createDriveAccessProvider } from "@/lib/application/drive-access";
 import { createProjectService, type ProjectService } from "@/lib/application/projects";
 import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
 import { AppError } from "@/lib/domain/errors";
-import type { Project } from "@/lib/domain/drive";
+import { DRIVE_FILE_SCOPE, type Project } from "@/lib/domain/drive";
 import {
   HttpError,
   readStrictJson,
@@ -61,6 +61,7 @@ function projectService(env: ServerEnv): ProjectService {
   const oauth = createGoogleOAuthAdapter({
     clientId: env.googleOAuthClientId,
     clientSecret: env.googleOAuthClientSecret,
+    scopes: [DRIVE_FILE_SCOPE],
   });
   const access = createDriveAccessProvider({
     repository,

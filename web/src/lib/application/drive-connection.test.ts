@@ -348,6 +348,7 @@ describe("disconnectDrive", () => {
     const oauth = createGoogleOAuthAdapter({
       clientId: "google-client-id.apps.googleusercontent.com",
       clientSecret: "private-client-secret",
+      scopes: [DRIVE_FILE_SCOPE],
       fetcher,
     });
 

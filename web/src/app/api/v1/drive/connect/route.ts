@@ -4,6 +4,7 @@ import { createGoogleDriveFilesAdapter } from "@/lib/adapters/google/drive-files
 import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
 import { beginDriveConnection } from "@/lib/application/drive-connection";
 import { parseServerEnv } from "@/lib/config/env";
+import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
 import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
     const oauth = createGoogleOAuthAdapter({
       clientId: env.googleOAuthClientId,
       clientSecret: env.googleOAuthClientSecret,
+      scopes: [DRIVE_FILE_SCOPE],
     });
     const result = await beginDriveConnection({
       redirectUri: `${env.appOrigin}/api/v1/drive/callback`,

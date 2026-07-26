@@ -1,7 +1,7 @@
 import "server-only";
 
-import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError, type PublicCode } from "@/lib/domain/errors";
+import { sameScopeSet } from "@/lib/domain/youtube";
 import type { DriveOAuthPort } from "@/lib/ports/drive";
 import { googleJson } from "./http";
 
@@ -19,6 +19,7 @@ const MAX_REFRESH_TOKEN_LIFETIME_SECONDS = 365 * 24 * 60 * 60;
 type GoogleOAuthOptions = Readonly<{
   clientId: string;
   clientSecret: string;
+  scopes: readonly string[];
   fetcher?: typeof fetch;
 }>;
 
@@ -113,7 +114,7 @@ function validateExchangeResponse(value: unknown): Readonly<{
   return { refreshToken: record.refresh_token, grantedScopes };
 }
 
-function validateRefreshResponse(value: unknown): string {
+function validateRefreshResponse(value: unknown, expectedScopes: readonly string[]): string {
   const record = objectRecord(value);
   if (
     !record ||
@@ -137,7 +138,7 @@ function validateRefreshResponse(value: unknown): string {
   }
   if (record.scope !== undefined) {
     const scopes = parseScopes(record.scope);
-    if (!scopes || scopes.length !== 1 || scopes[0] !== DRIVE_FILE_SCOPE) {
+    if (!scopes || !sameScopeSet(scopes, expectedScopes)) {
       throw oauthError("OAUTH_SCOPE_REJECTED", 400);
     }
   }
@@ -149,6 +150,15 @@ export function createGoogleOAuthAdapter(options: GoogleOAuthOptions): DriveOAut
     !boundedUtf8(options.clientId, 1, 512) ||
     !boundedUtf8(options.clientSecret, 1, MAX_REFRESH_TOKEN_BYTES) ||
     (options.fetcher !== undefined && typeof options.fetcher !== "function")
+  ) {
+    throw oauthError("DRIVE_PROVIDER_REJECTED");
+  }
+  if (
+    !Array.isArray(options.scopes) ||
+    options.scopes.length < 1 ||
+    options.scopes.length > MAX_SCOPES ||
+    options.scopes.some((scope) => !boundedUtf8(scope, 1, 512)) ||
+    new Set(options.scopes).size !== options.scopes.length
   ) {
     throw oauthError("DRIVE_PROVIDER_REJECTED");
   }
@@ -178,7 +188,7 @@ export function createGoogleOAuthAdapter(options: GoogleOAuthOptions): DriveOAut
       url.searchParams.set("response_type", "code");
       url.searchParams.set("client_id", options.clientId);
       url.searchParams.set("redirect_uri", input.redirectUri);
-      url.searchParams.set("scope", DRIVE_FILE_SCOPE);
+      url.searchParams.set("scope", options.scopes.join(" "));
       url.searchParams.set("access_type", "offline");
       url.searchParams.set("prompt", "consent");
       url.searchParams.set("include_granted_scopes", "false");
@@ -209,7 +219,7 @@ export function createGoogleOAuthAdapter(options: GoogleOAuthOptions): DriveOAut
         client_secret: options.clientSecret,
         grant_type: "refresh_token",
       });
-      return validateRefreshResponse(await tokenRequest(form, timeoutMs));
+      return validateRefreshResponse(await tokenRequest(form, timeoutMs), options.scopes);
     },
 
     async revokeRefreshToken(refreshToken, timeoutMs) {
