@@ -7,6 +7,18 @@ type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respons
 type Clipboard = Readonly<{ writeText(value: string): Promise<void> }>;
 const CONNECTOR_URL = "http://127.0.0.1:55871";
 
+// Every state needs its own label: collapsing BUSY, OFFLINE and DOCTOR_FAILED into
+// "Đang kiểm tra" told the operator a dead or unhealthy VPS was still being probed,
+// and hid the fact that a healthy worker was mid-render.
+const WORKER_STATE_LABELS: Readonly<Record<WorkerViewModel["state"], string>> = {
+  SETTING_UP: "Đang cài đặt",
+  DOCTOR_FAILED: "Kiểm tra thất bại",
+  READY: "Đã kết nối",
+  BUSY: "Đang render",
+  OFFLINE: "Mất kết nối",
+  REVOKED: "Đã thu hồi",
+};
+
 export function WorkerCard({
   workers,
   fetcher = fetch,
@@ -205,7 +217,7 @@ export function WorkerCard({
         {workers.map((worker) => (
           <li key={worker.id}>
             <div>
-              <strong>{worker.state === "READY" ? "Đã kết nối" : worker.state === "REVOKED" ? "Đã thu hồi" : "Đang kiểm tra"}</strong>
+              <strong>{WORKER_STATE_LABELS[worker.state]}</strong>
               <span>{worker.capabilities.pipelineBridgeVersion === "cp3-control-only" ? "Đã kết nối · đang chờ cài pipeline media" : `Bridge ${worker.capabilities.pipelineBridgeVersion}`}</span>
             </div>
             {worker.state !== "REVOKED" && <button type="button" className="button-danger" onClick={() => revoke(worker.id)}>Thu hồi</button>}
