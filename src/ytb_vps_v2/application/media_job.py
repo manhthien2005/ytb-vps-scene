@@ -67,6 +67,47 @@ class MediaJobExecutor:
         self.transfer_factory = transfer_factory
         self.pipeline = pipeline
 
+    def _progress(self, job_id: str, update: dict[str, Any]) -> None:
+        try:
+            response = self.client.progress(job_id, update)
+        except RuntimeError as error:
+            raise MediaJobError("control plane progress update failed") from error
+        if not isinstance(response, Mapping):
+            raise MediaJobError("control plane progress update failed")
+        if response.get("outcome") == "LEASE_LOST" or response.get("code") == "LEASE_LOST":
+            raise MediaJobError("control plane progress update failed: lease lost")
+
+    def _renew(self, job_id: str, fencing_token: int) -> bool:
+        try:
+            response = self.client.renew(job_id, fencing_token)
+        except RuntimeError as error:
+            raise MediaJobError("control plane lease renewal failed") from error
+        if not isinstance(response, Mapping):
+            raise MediaJobError("control plane lease renewal failed")
+        if response.get("outcome") == "LEASE_LOST" or response.get("code") == "LEASE_LOST":
+            raise MediaJobError("control plane lease renewal failed: lease lost")
+        cancel_requested = response.get("cancelRequested", False)
+        if not isinstance(cancel_requested, bool):
+            raise MediaJobError("control plane lease renewal failed")
+        return cancel_requested
+
+    def _cancel(self, job_id: str, fencing_token: int, progress_percent: int) -> str:
+        self._progress(
+            job_id,
+            {
+                "fencingToken": fencing_token,
+                "fromState": "CANCEL_REQUESTED",
+                "state": "CANCELLED",
+                "progressPercent": progress_percent,
+                "phase": "cancel",
+                "phaseProgressPercent": 100,
+                "message": "Cancellation acknowledged",
+                "currentPart": 1,
+                "totalParts": 1,
+            },
+        )
+        return "CANCELLED"
+
     def execute(self, assignment: Mapping[str, Any], workspace_root: Path) -> str:
         try:
             job = assignment["job"]
@@ -82,15 +123,56 @@ class MediaJobExecutor:
                 raise MediaJobError("assignment is invalid")
             source_path = workspace_root / job_id / "source.mp4"
             run_root = workspace_root / job_id
-            self.client.progress(job_id, {"fencingToken": fencing_token, "fromState": "CLAIMED", "state": "DOWNLOADING", "progressPercent": 5})
+            self._progress(
+                job_id,
+                {
+                    "fencingToken": fencing_token,
+                    "fromState": "CLAIMED",
+                    "state": "DOWNLOADING",
+                    "progressPercent": 5,
+                    "phase": "download",
+                    "phaseProgressPercent": 0,
+                    "message": "Downloading source media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+            )
             transfer = self.transfer_factory(access_token)
             transfer.download_source(str(source["driveFileId"]), source_path, int(source["sizeBytes"]), str(source["sha256"]))
-            self.client.progress(job_id, {"fencingToken": fencing_token, "fromState": "DOWNLOADING", "state": "OCR", "progressPercent": 20})
-            self.client.renew(job_id, fencing_token)
+            self._progress(
+                job_id,
+                {
+                    "fencingToken": fencing_token,
+                    "fromState": "DOWNLOADING",
+                    "state": "OCR",
+                    "progressPercent": 20,
+                    "phase": "process",
+                    "phaseProgressPercent": 0,
+                    "message": "Processing source media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+            )
+            if self._renew(job_id, fencing_token):
+                return self._cancel(job_id, fencing_token, 20)
             output = self.pipeline(source_path, run_root, settings, job_id)
             size, checksum = _digest_file(output)
-            self.client.renew(job_id, fencing_token)
-            self.client.progress(job_id, {"fencingToken": fencing_token, "fromState": "OCR", "state": "UPLOADING", "progressPercent": 90})
+            if self._renew(job_id, fencing_token):
+                return self._cancel(job_id, fencing_token, 90)
+            self._progress(
+                job_id,
+                {
+                    "fencingToken": fencing_token,
+                    "fromState": "OCR",
+                    "state": "UPLOADING",
+                    "progressPercent": 90,
+                    "phase": "upload",
+                    "phaseProgressPercent": 0,
+                    "message": "Uploading processed media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+            )
             session = self.client.output_session(job_id, {"fencingToken": fencing_token, "sizeBytes": size, "checksumSha256": checksum})
             transfer.upload_resumable(str(session["sessionUri"]), output, size, checksum)
             self.client.complete(job_id, {"artifactId": str(session["artifactId"]), "driveFileId": str(session["driveFileId"]), "fencingToken": fencing_token, "sizeBytes": size})
