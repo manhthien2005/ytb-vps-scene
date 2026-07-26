@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState, type SVGProps } from "react";
+import { useMemo, useRef, useState, type SVGProps } from "react";
 import type { JobSummary, JobState } from "@/lib/domain/control-plane";
 import type { DriveConnectionView, FreeTierHealthView, PublicProject, UsageView, WorkerViewModel } from "./dashboard-types";
 import { DriveWorkspace } from "./drive-workspace";
@@ -92,6 +92,36 @@ function latestJobForProject(jobs: readonly JobSummary[], project: PublicProject
   return jobs.find((job) => job.projectName === project.name) ?? null;
 }
 
+function settingReadiness(project: PublicProject | null, job: JobSummary | null): string {
+  if (project === null) return "Chưa có video";
+  if (project.sourceStatus !== "SOURCE_READY") return "Chờ nguồn";
+  if (job?.settingsSnapshot != null || (job !== null && !["DRAFT", "READY"].includes(job.state))) {
+    return "Đã xác nhận";
+  }
+  return "Cần thiết lập";
+}
+
+function jobProgressLabel(job: JobSummary | null): string {
+  if (job === null) return "Chưa có job";
+  if (!Number.isFinite(job.progressPercent)) return JOB_LABELS[job.state];
+  const progress = Math.min(100, Math.max(0, Math.round(job.progressPercent)));
+  return `${JOB_LABELS[job.state]} · ${progress}%`;
+}
+
+function jobEtaLabel(job: JobSummary | null): string {
+  if (job === null) return "Chưa có job";
+  if (job.state === "COMPLETED") return "Output sẵn sàng";
+  if (job.etaSeconds == null || !Number.isFinite(job.etaSeconds) || job.etaSeconds < 0) {
+    return "Chưa có ETA";
+  }
+  if (job.etaSeconds < 60) return "Còn dưới 1 phút";
+  const minutes = Math.ceil(job.etaSeconds / 60);
+  if (minutes < 60) return `Còn khoảng ${minutes} phút`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `Còn khoảng ${hours} giờ${remainingMinutes > 0 ? ` ${remainingMinutes} phút` : ""}`;
+}
+
 function activeJobs(jobs: readonly JobSummary[]): readonly JobSummary[] {
   return jobs.filter((job) => !["COMPLETED", "FAILED_FINAL", "CANCELLED", "DELETED"].includes(job.state));
 }
@@ -132,9 +162,9 @@ function readinessFor(project: PublicProject | null, job: JobSummary | null, has
 
   return {
     source: projectSourceLabel(project.sourceStatus),
-    scene: sourceReady ? "Sẵn sàng cấu hình" : "Chờ nguồn",
+    scene: settingReadiness(project, job),
     worker: hasReadyWorker ? "Worker sẵn sàng" : "Chưa có worker",
-    job: job === null ? (sourceReady && hasReadyWorker ? "Có thể queue" : "Chờ điều kiện") : JOB_LABELS[job.state],
+    job: job === null ? (sourceReady && hasReadyWorker ? "Chờ xác nhận render" : "Chờ điều kiện") : jobProgressLabel(job),
     output: completed ? "Output sẵn sàng" : "Chưa có output",
   };
 }
@@ -155,11 +185,6 @@ function ReadinessCard({ label, value, tone }: Readonly<{ label: string; value: 
       <strong><i className="rc-dot" aria-hidden />{value}</strong>
     </div>
   );
-}
-
-function ProjectStatePill({ project }: Readonly<{ project: PublicProject }>) {
-  const tone = project.sourceStatus === "SOURCE_READY" ? "good" : project.sourceStatus === "UPLOAD_FAILED" ? "danger" : "warn";
-  return <span className={`state-pill state-pill-${tone}`}>{projectSourceLabel(project.sourceStatus)}</span>;
 }
 
 function SettingMeter({ title, usage }: Readonly<{ title: string; usage: UsageView | null }>) {
@@ -195,27 +220,29 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
   const [sourceFiles, setSourceFiles] = useState<Readonly<Record<string, File>>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(projects[0]?.id ?? null);
   const [logoutMessage, setLogoutMessage] = useState<string | null>(null);
+  const sceneSetupRef = useRef<HTMLElement>(null);
 
   // Derive selection so a removed/stale id transparently falls back to the first project.
   const selectedProject = videoItems.find((project) => project.id === selectedProjectId) ?? videoItems[0] ?? null;
   const selectedJob = latestJobForProject(jobs, selectedProject);
   const hasReadyWorker = workerReady(workers, workerOnline);
   const hasConnectedWorker = workerConnected(workers, workerOnline);
-  const outputReady = jobs.some((job) => job.state === "COMPLETED");
   const activeJobCount = activeJobs(jobs).length;
   const readiness = readinessFor(selectedProject, selectedJob, hasReadyWorker);
   const sourceReady = videoItems.some((project) => project.sourceStatus === "SOURCE_READY");
   const driveReady = drive.status === "CONNECTED" && drive.rootReady;
   const selectedSourceFile = selectedProject === null ? null : sourceFiles[selectedProject.id] ?? null;
   const currentSurface = useMemo(() => SURFACES.find((item) => item.id === surface) ?? SURFACES[0]!, [surface]);
-  const canQueue = selectedProject?.sourceStatus === "SOURCE_READY" && hasReadyWorker;
-  const queueBlockReason = selectedProject === null
-    ? "Chọn một dự án đã có nguồn để queue render."
-    : selectedProject.sourceStatus !== "SOURCE_READY"
-      ? "Dự án cần video nguồn sẵn sàng trước khi queue."
+  const selectedSourceReady = selectedProject?.sourceStatus === "SOURCE_READY";
+  const setupHelp = selectedProject === null
+    ? "Thêm video nguồn để tạo dự án và mở thiết lập."
+    : !selectedSourceReady
+      ? "Hoàn tất video nguồn trước khi thiết lập và xem trước."
       : !hasReadyWorker
-        ? "Cần một VPS worker sẵn sàng để nhận job."
-        : null;
+        ? "Có thể thiết lập ngay; cần setup VPS trước khi xác nhận render."
+        : selectedJob === null
+          ? "Xem trước, lưu thiết lập rồi xác nhận render."
+          : "Job đã tạo; theo dõi tiến độ trong Jobs.";
 
   // Track the cursor as a CSS variable so the ambient glow follows it without re-rendering.
   function trackPointer(event: React.PointerEvent<HTMLElement>): void {
@@ -228,6 +255,14 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
     setSourceFiles((current) => ({ ...current, [projectId]: file }));
     setSelectedProjectId(projectId);
     setSurface("workspace");
+  }
+
+  function openSetup(): void {
+    if (!selectedSourceReady) {
+      setSurface("files");
+      return;
+    }
+    sceneSetupRef.current?.focus();
   }
 
   async function logout(): Promise<void> {
@@ -290,24 +325,41 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
           </div>
         </header>
 
-        {surface === "workspace" && (
+        <div hidden={surface !== "workspace"}>
           <SurfaceShell>
             <div className="workspace-hero">
               <div>
                 <p className="micro-label">Daily run</p>
                 <h2>Run your daily jobs</h2>
+                <p>Mỗi video tạo đúng một job render.</p>
               </div>
               <div className="hero-actions">
                 <button type="button" onClick={() => setSurface("files")}>Thêm video</button>
-                <button className="button-secondary" type="button" onClick={() => setSurface(hasReadyWorker ? "jobs" : "workers")}>{hasReadyWorker ? "Theo dõi job" : "Setup VPS"}</button>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => {
+                    if (selectedJob !== null) setSurface("jobs");
+                    else if (!hasReadyWorker) setSurface("workers");
+                    else openSetup();
+                  }}
+                >
+                  {selectedJob !== null
+                    ? "Theo dõi job"
+                    : !hasReadyWorker
+                      ? "Setup VPS"
+                      : selectedSourceReady
+                        ? "Tiếp tục thiết lập"
+                        : "Thêm video nguồn"}
+                </button>
               </div>
             </div>
 
             <section className="readiness-grid" aria-label="Tóm tắt sẵn sàng">
-              <ReadinessCard label="Drive" value={driveReady ? "Sẵn sàng" : "Cần kết nối"} tone={driveReady ? "good" : "warn"} />
               <ReadinessCard label="Nguồn" value={sourceReady ? `${videoItems.filter((project) => project.sourceStatus === "SOURCE_READY").length} sẵn sàng` : "Chưa có"} tone={sourceReady ? "good" : "neutral"} />
+              <ReadinessCard label="Thiết lập" value={readiness.scene} tone={readiness.scene === "Đã xác nhận" ? "good" : "warn"} />
               <ReadinessCard label="VPS" value={hasReadyWorker ? "Sẵn sàng" : hasConnectedWorker ? "Đang kiểm tra" : "Chưa gắn"} tone={hasReadyWorker ? "good" : "warn"} />
-              <ReadinessCard label="Output" value={outputReady ? "Đã có file" : "Chưa render"} tone={outputReady ? "good" : "neutral"} />
+              <ReadinessCard label="Job" value={selectedJob === null ? "Chưa tạo" : jobProgressLabel(selectedJob)} tone={selectedJob === null ? "neutral" : "good"} />
             </section>
 
             <div className="workspace-layout">
@@ -328,10 +380,10 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
                 ) : (
                   <div className="project-table" aria-label="Danh sách dự án">
                     <div className="project-table-head" role="presentation">
-                      <span>Tên</span>
-                      <span>Nguồn</span>
+                      <span>Video</span>
+                      <span>Thiết lập</span>
                       <span>Job</span>
-                      <span>Output</span>
+                      <span>ETA / Output</span>
                     </div>
                     {videoItems.map((project) => {
                       const job = latestJobForProject(jobs, project);
@@ -348,11 +400,11 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
                         >
                           <span>
                             <strong>{project.name}</strong>
-                            <small>{project.updatedAt}</small>
+                            <small>{projectSourceLabel(project.sourceStatus)}</small>
                           </span>
-                          <ProjectStatePill project={project} />
-                          <span>{job === null ? "Chưa queue" : `${JOB_LABELS[job.state]} ${job.progressPercent}%`}</span>
-                          <span>{job?.state === "COMPLETED" ? "Sẵn sàng" : "Chưa có"}</span>
+                          <span>{settingReadiness(project, job)}</span>
+                          <span>{jobProgressLabel(job)}</span>
+                          <span>{jobEtaLabel(job)}</span>
                         </button>
                       );
                     })}
@@ -364,7 +416,7 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
                 <div className="section-heading compact">
                   <div>
                     <h2>{selectedProject?.name ?? "Chưa chọn dự án"}</h2>
-                    <p>{selectedProject === null ? "Thêm video để bắt đầu." : `Cập nhật ${selectedProject.updatedAt}`}</p>
+                    <p>{selectedProject === null ? "Thêm video để bắt đầu." : "1 video • 1 thiết lập • 1 job"}</p>
                   </div>
                 </div>
                 <div className="inspector-stack">
@@ -375,16 +427,36 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
                   <div><span>Output</span><strong>{readiness.output}</strong></div>
                 </div>
                 <div className="inspector-actions">
-                  <button aria-describedby={queueBlockReason === null ? undefined : "queue-block-reason"} disabled={!canQueue} type="button" onClick={() => setSurface("jobs")}>Queue render</button>
-                  <button className="button-secondary" disabled={selectedProject === null} type="button" onClick={() => setSurface("files")}>Xem file</button>
+                  <button aria-describedby="setup-help" type="button" onClick={openSetup}>
+                    {selectedSourceReady ? "Thiết lập & xem trước" : selectedProject === null ? "Thêm video đầu tiên" : "Thêm video nguồn"}
+                  </button>
+                  {!hasReadyWorker ? (
+                    <button className="button-secondary" type="button" onClick={() => setSurface("workers")}>Setup VPS để render</button>
+                  ) : selectedJob !== null ? (
+                    <button className="button-secondary" type="button" onClick={() => setSurface("jobs")}>Theo dõi job</button>
+                  ) : (
+                    <button className="button-secondary" disabled={selectedProject === null} type="button" onClick={() => setSurface("files")}>Xem file</button>
+                  )}
                 </div>
-                {queueBlockReason !== null && <p className="helper-inline" id="queue-block-reason">{queueBlockReason}</p>}
+                <p className="helper-inline" id="setup-help">{setupHelp}</p>
               </aside>
             </div>
 
-            <section className="scene-workbench" aria-label="Review scene và voice">
+            <section
+              className="scene-workbench"
+              aria-label="Review scene và voice"
+              ref={sceneSetupRef}
+              tabIndex={-1}
+            >
               {selectedProject?.sourceStatus === "SOURCE_READY" ? (
-                <SceneEditor projectId={selectedProject.id} sourceFile={selectedSourceFile} />
+                <SceneEditor
+                  projectId={selectedProject.id}
+                  projectName={selectedProject.name}
+                  quotaMode={health.mode}
+                  sourceFile={selectedSourceFile}
+                  sourceReady
+                  workerReady={hasReadyWorker}
+                />
               ) : (
                 <div className="empty-state">
                   <strong>Scene chờ video nguồn.</strong>
@@ -394,7 +466,7 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
               )}
             </section>
           </SurfaceShell>
-        )}
+        </div>
 
         {surface === "files" && (
           <SurfaceShell>

@@ -71,13 +71,19 @@ describe("DashboardShell", () => {
           createdAt: "2026-07-19T00:00:00.000Z",
           updatedAt: "2026-07-19T00:00:00.000Z",
         }]}
-        jobs={[{ id: "j1", projectName: "Test 1", state: "QUEUED", progressPercent: 0, updatedAt: "2026-07-19T00:00:00Z" }]}
+        jobs={[
+          { id: "j1", projectName: "Test 1", state: "QUEUED", progressPercent: 0, updatedAt: "2026-07-19T00:00:00Z" },
+          { id: "j2", projectName: "Video tháng 7", state: "QUEUED", progressPercent: 0, updatedAt: "2026-07-19T00:00:00Z" },
+        ]}
         workers={[]}
       />,
     );
 
     // Workspace surface lists the project (board row + inspector heading).
     expect(screen.getAllByText("Video tháng 7").length).toBeGreaterThan(0);
+    const projectTable = screen.getByLabelText("Danh sách dự án");
+    expect(within(projectTable).getByText("Đang chờ · 0%")).toBeVisible();
+    expect(within(projectTable).getByText("Chưa có ETA")).toBeVisible();
 
     const nav = screen.getByRole("navigation", { name: "Điều hướng Zeus MMO" });
     fireEvent.click(within(nav).getByRole("button", { name: /Jobs/ }));
@@ -88,6 +94,114 @@ describe("DashboardShell", () => {
     expect(workerRegion).toBeVisible();
     expect(within(workerRegion).getByRole("button", { name: "Tạo lệnh gắn VPS" })).toBeEnabled();
     expect(within(workerRegion).getByText("Chưa gắn")).toBeVisible();
+  });
+
+  it("guides a source-ready video through setup before monitoring its job", () => {
+    render(
+      <DashboardShell
+        workerOnline
+        drive={{ status: "CONNECTED", accountHint: null, rootReady: true }}
+        health={health}
+        projects={[{
+          id: "10000000-0000-4000-8000-000000000001",
+          status: "READY",
+          name: "Video một job",
+          sourceStatus: "SOURCE_READY",
+          createdAt: "2026-07-19T00:00:00.000Z",
+          updatedAt: "2026-07-19T00:00:00.000Z",
+        }]}
+        jobs={[{
+          id: "j1",
+          projectName: "Video một job",
+          state: "RENDER",
+          progressPercent: 42,
+          etaSeconds: 90,
+          updatedAt: "2026-07-19T00:00:00Z",
+        }]}
+        workers={[]}
+      />,
+    );
+
+    expect(screen.getByText("Mỗi video tạo đúng một job render.")).toBeVisible();
+    const inspector = screen.getByLabelText("Project inspector");
+    expect(within(inspector).getByText("1 video • 1 thiết lập • 1 job")).toBeVisible();
+    expect(within(inspector).queryByRole("button", { name: "Queue render" })).not.toBeInTheDocument();
+
+    const projectTable = screen.getByLabelText("Danh sách dự án");
+    expect(within(projectTable).getByText("Đã xác nhận")).toBeVisible();
+    expect(within(projectTable).getByText("Render · 42%")).toBeVisible();
+    expect(within(projectTable).getByText("Còn khoảng 2 phút")).toBeVisible();
+
+    const setup = within(inspector).getByRole("button", { name: "Thiết lập & xem trước" });
+    expect(setup).toBeEnabled();
+    fireEvent.click(setup);
+
+    expect(screen.getByRole("region", { name: "Review scene và voice" })).toHaveFocus();
+    const scene = screen.getByRole("region", { name: "Blur và voice" });
+    expect(within(scene).getByText("Video một job")).toBeVisible();
+    expect(within(scene).getByText("Đọc/ghi")).toBeVisible();
+    expect(within(scene).getByText("Worker VPS").parentElement).toHaveTextContent("Sẵn sàng");
+  });
+
+  it("preserves the selected project and local preview draft across surfaces", () => {
+    render(
+      <DashboardShell
+        workerOnline
+        drive={{ status: "CONNECTED", accountHint: null, rootReady: true }}
+        health={health}
+        projects={[{
+          id: "10000000-0000-4000-8000-000000000001",
+          status: "READY",
+          name: "Video giữ preview",
+          sourceStatus: "SOURCE_READY",
+          createdAt: "2026-07-19T00:00:00.000Z",
+          updatedAt: "2026-07-19T00:00:00.000Z",
+        }]}
+        jobs={[]}
+        workers={[]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Tiếp tục thiết lập" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Theo dõi job" })).not.toBeInTheDocument();
+    const draft = screen.getByLabelText("Nghe thử câu voice");
+    fireEvent.change(draft, { target: { value: "Bản nghe thử chưa lưu" } });
+
+    const nav = screen.getByRole("navigation", { name: "Điều hướng Zeus MMO" });
+    fireEvent.click(within(nav).getByRole("button", { name: /Files/ }));
+    fireEvent.click(within(nav).getByRole("button", { name: /Jobs/ }));
+    expect(screen.getByRole("region", { name: "Danh sách job" })).toBeVisible();
+    fireEvent.click(within(nav).getByRole("button", { name: /Workspace/ }));
+
+    expect(screen.getByLabelText("Nghe thử câu voice")).toHaveValue("Bản nghe thử chưa lưu");
+    expect(within(screen.getByLabelText("Project inspector")).getByText("Video giữ preview")).toBeVisible();
+  });
+
+  it("keeps worker setup reachable when a source-ready video has no ready worker", () => {
+    render(
+      <DashboardShell
+        workerOnline={false}
+        drive={{ status: "CONNECTED", accountHint: null, rootReady: true }}
+        health={health}
+        projects={[{
+          id: "10000000-0000-4000-8000-000000000001",
+          status: "READY",
+          name: "Video chờ VPS",
+          sourceStatus: "SOURCE_READY",
+          createdAt: "2026-07-19T00:00:00.000Z",
+          updatedAt: "2026-07-19T00:00:00.000Z",
+        }]}
+        jobs={[]}
+        workers={[]}
+      />,
+    );
+
+    const inspector = screen.getByLabelText("Project inspector");
+    expect(within(inspector).getByRole("button", { name: "Thiết lập & xem trước" })).toBeEnabled();
+    fireEvent.click(within(inspector).getByRole("button", { name: "Setup VPS để render" }));
+
+    expect(screen.getByRole("heading", { level: 1, name: "Workers" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Gắn VPS" })).toBeVisible();
   });
 
   it("makes a project source-ready after an upload completes in Files", async () => {
