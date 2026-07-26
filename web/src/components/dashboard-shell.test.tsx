@@ -113,7 +113,8 @@ describe("DashboardShell", () => {
           artifactId: project.id,
           sessionUri: "https://www.googleapis.com/upload/drive/v3/files/source?upload_id=synthetic-capability",
           chunkBytes: 8_388_608,
-          expiresAt: "2026-07-26T00:00:00.000Z",
+          // Must stay in the future relative to the real clock — upload-store rejects expired sessions.
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url.startsWith("https://www.googleapis.com/upload/drive/v3/files/")) {
