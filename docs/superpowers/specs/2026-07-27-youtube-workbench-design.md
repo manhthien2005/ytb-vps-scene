@@ -95,9 +95,15 @@ Cả hai chỉ đọc. Đặt thành hằng trong `lib/domain/youtube.ts`, kiể
 một dòng) và CHECK ép `scope = 'https://www.googleapis.com/auth/drive.file'`. YouTube cần nhiều
 dòng, scope khác.
 
-Bảng mới `youtube_channels`, mỗi kênh một dòng, refresh token mã hoá bằng chính
-`lib/security/credential-cipher.ts` nhưng với khoá riêng `YOUTUBE_TOKEN_KEY_V1` — tách khoá để lộ
-khoá Drive không kéo theo YouTube và ngược lại.
+Bảng mới `youtube_channels`, mỗi kênh một dòng, refresh token mã hoá với khoá riêng
+`YOUTUBE_TOKEN_KEY_V1` — tách khoá để lộ khoá Drive không kéo theo YouTube và ngược lại.
+
+`lib/security/credential-cipher.ts` **không dùng lại nguyên được**: nó khoá cứng vào
+`DRIVE_FILE_SCOPE` ở ba chỗ — kiểu `EncryptedCredential.scope`, chuỗi AAD
+`ytb-vps:drive-refresh-token:v1:…`, và `encrypt()` ném lỗi nếu scope khác. Phải tham số hoá factory
+bằng một **domain string** và tập scope hợp lệ. Đường Drive truyền đúng giá trị hiện hành
+(`drive-refresh-token`, `[DRIVE_FILE_SCOPE]`) nên **ciphertext đã lưu vẫn giải mã được** — đây là
+ràng buộc bắt buộc, đổi AAD là mất toàn bộ credential Drive đang có.
 
 Mỗi lần "Thêm kênh" là một lần cấp quyền riêng. Sau khi đổi code, gọi ngay
 `channels.list?part=snippet,statistics&mine=true` để biết vừa nối kênh nào và upsert theo
@@ -167,6 +173,10 @@ Tổng giờ xem query khoảng ngày từ **ngày tạo kênh** (`snippet.publi
 phép làm mới mỗi giờ vẫn thừa. Snapshot ghi vào `youtube_channel_stats`; trang đọc snapshot, **không
 gọi API mỗi lần load**.
 
+**Bắt buộc dùng `fields` mask trên mọi lượt gọi.** `googleJson` chặn cứng `maxResponseBytes`
+≤ 64 KB; một trang `videos.list` 50 phần tử không cắt trường sẽ vượt. Chỉ xin đúng trường cần
+(`items(id,snippet/title,snippet/thumbnails/medium/url,statistics/viewCount),nextPageToken`).
+
 ---
 
 ## 5. Mảnh C — Worker sinh nguyên liệu
@@ -235,8 +245,10 @@ GB. Vẫn ghi vào `artifacts` để dọn dẹp và kiểm kê hoạt động b
    (`files.get?alt=media`), **chặn cứng 2 MB**.
 2. **Rút gọn trước khi gửi.** Phim hai tiếng có thể ra 200 KB text. Gộp cue, bỏ câu trùng, lấy mẫu
    đều theo timeline đến một ngân sách ký tự cấu hình được. Vừa nhanh vừa đủ để đặt tiêu đề.
-3. Gọi `gemini-3.5-flash-lite` bằng `fetch` qua helper kiểu `googleJson` — **không thêm package
-   npm nào**, đúng cách dự án đang gọi Google API. Dùng `responseSchema` ép JSON có cấu trúc:
+3. Gọi `gemini-3.5-flash-lite` bằng `fetch` — **không thêm package npm nào**, đúng cách dự án đang
+   gọi Google API. Lưu ý: **không dùng lại được `googleJson`** vì nó chặn `timeoutMs` ≤ 5 s và
+   `maxResponseBytes` ≤ 64 KB; cần một helper bị chặn riêng với hạn mức rộng hơn.
+   Dùng `responseSchema` ép JSON có cấu trúc:
    **3 phương án tiêu đề**, mô tả, danh sách tag.
    System prompt lấy từ `youtube_channels` của kênh đã chọn.
 4. Ghi vào `publication_drafts`.
@@ -267,9 +279,13 @@ do mọi ô đều phải có nút copy.
 
 ---
 
-## 8. Mô hình dữ liệu — migration v11
+## 8. Mô hình dữ liệu — migration v11 và v12
 
-### 8.1 Nới `artifacts.kind`
+Tách làm hai vì hai plan thi công độc lập: **v11** (§8.1–8.3) đi cùng phần kênh và số liệu,
+**v12** (§8.4) đi cùng phần composer. Nới `artifacts.kind` nằm ở v11 dù người dùng đầu tiên của nó
+là plan sau — để plan sau không phải thêm migration riêng cho việc đó.
+
+### 8.1 Nới `artifacts.kind` (v11)
 
 Theo đúng khuôn migration v3 đã dùng với `artifacts_status_check`:
 
@@ -309,7 +325,7 @@ Snapshot mới nhất, một dòng mỗi kênh — không lưu chuỗi thời gi
 - `top_videos` jsonb (5 phần tử: videoId, title, thumbnailUrl, viewCount), giới hạn `pg_column_size`
 - `observed_at` · `updated_at`
 
-### 8.4 `publication_drafts`
+### 8.4 `publication_drafts` (v12)
 
 Một dòng mỗi job đã render xong.
 
