@@ -93,7 +93,10 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     APP_ORIGIN: source.APP_ORIGIN,
   });
   const tokenDefaults = value.NODE_ENV === "production" ? {} : {
-    YOUTUBE_TOKEN_KEY_V1: "A".repeat(43),
+    // E has index 4 (000100 binary), so low 2 bits are zero — canonical for base64url round-trip.
+    // Must differ from WORKER_AUTH_KEY_V1's placeholder to avoid key confusion during debugging.
+    // Valid single-character choices: A E I M Q U Y c g k o s w 0 4 8 (all have index ≡ 0 mod 4).
+    YOUTUBE_TOKEN_KEY_V1: "E".repeat(43),
   };
   const workerDefaults = value.NODE_ENV === "production" ? {} : {
     WORKER_AUTH_KEY_V1: "A".repeat(43),

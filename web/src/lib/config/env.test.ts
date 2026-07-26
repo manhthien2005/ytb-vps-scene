@@ -114,6 +114,6 @@ describe("parseServerEnv", () => {
   it("accepts missing YOUTUBE_TOKEN_KEY_V1 in development with default", () => {
     const { YOUTUBE_TOKEN_KEY_V1, ...missingYoutubeKey } = { ...cp2Valid, NODE_ENV: "development" };
     const env = parseServerEnv(missingYoutubeKey);
-    expect(env.youtubeTokenKeyV1).toBe("A".repeat(43));
+    expect(env.youtubeTokenKeyV1).toBe("E".repeat(43));
   });
 });
