@@ -461,4 +461,133 @@ describe("worker control plane repository", () => {
       now: NOW,
     })).resolves.toBe("REPLAY");
   });
+
+  it("never claims a job whose READY source is gone, leaving no orphaned lease", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "6".repeat(64),
+      now: NOW,
+    });
+    await db.query("update artifacts set status='DELETED' where kind='SOURCE' and project_id=$1", [projectId]);
+
+    await expect(repository.claimJob(worker.id, NOW, "bridge-v1")).resolves.toBeNull();
+
+    // The claim must not half-commit: no lease, no attempt, job still QUEUED, worker READY.
+    const leases = await db.query("select job_id from job_leases where job_id=$1", [job!.id]);
+    expect(leases.rows).toHaveLength(0);
+    const attempts = await db.query("select id from job_attempts where job_id=$1", [job!.id]);
+    expect(attempts.rows).toHaveLength(0);
+    const stored = await db.query("select state from jobs where id=$1", [job!.id]);
+    expect(stored.rows[0]).toMatchObject({ state: "QUEUED" });
+    const storedWorker = await db.query("select state from workers where id=$1", [worker.id]);
+    expect(storedWorker.rows[0]).toMatchObject({ state: "READY" });
+  });
+
+  it("closes the attempt, releases the lease, and frees the worker on a terminal failure report", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "7".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+    await expect(repository.updateJobProgress({
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      fromState: "CLAIMED",
+      state: "FAILED_FINAL",
+      progressPercent: 5,
+      errorCode: "PIPELINE_CRASHED",
+      now: BEFORE_EXPIRY,
+    })).resolves.toBe("UPDATED");
+
+    const attempt = await db.query<{ outcome: string; ended_at: string }>(
+      "select outcome,ended_at from job_attempts where job_id=$1",
+      [job!.id],
+    );
+    expect(attempt.rows[0]?.outcome).toBe("FAILED");
+    expect(attempt.rows[0]?.ended_at).not.toBeNull();
+    const leases = await db.query("select job_id from job_leases where job_id=$1", [job!.id]);
+    expect(leases.rows).toHaveLength(0);
+    const storedWorker = await db.query("select state from workers where id=$1", [worker.id]);
+    expect(storedWorker.rows[0]).toMatchObject({ state: "READY" });
+  });
+
+  it("supersedes a stale PENDING output from a crashed attempt instead of wedging the job", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "8".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+    const staleReservation = {
+      artifactId: "50000000-0000-4000-8000-000000000001",
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveFileId: "drive-output-001",
+      driveParentId: "drive-project-001",
+      sizeBytes: 1234,
+      checksumSha256: "b".repeat(64),
+      now: NOW,
+    };
+    await expect(repository.reserveOutput(staleReservation)).resolves.toBe("RESERVED");
+
+    // Retry after a crash re-renders the video: new checksum, new content-derived id.
+    await expect(repository.reserveOutput({
+      ...staleReservation,
+      artifactId: "50000000-0000-4000-8000-000000000002",
+      checksumSha256: "c".repeat(64),
+      now: BEFORE_EXPIRY,
+    })).resolves.toBe("RESERVED");
+
+    const artifacts = await db.query(
+      "select id,status from artifacts where job_id=$1 and kind='OUTPUT' order by id",
+      [job!.id],
+    );
+    expect(artifacts.rows).toEqual([
+      { id: "50000000-0000-4000-8000-000000000001", status: "DELETED" },
+      { id: "50000000-0000-4000-8000-000000000002", status: "PENDING" },
+    ]);
+  });
+
+  it("finalizes a CANCEL_REQUESTED job whose lease expired during the recovery sweep", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "9".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+    await db.query(
+      "update jobs set state='CANCEL_REQUESTED',cancel_requested_at=$2 where id=$1",
+      [job!.id, BEFORE_EXPIRY.toISOString()],
+    );
+
+    await repository.expireWorkersAndLeases(AFTER_EXPIRY);
+
+    const stored = await db.query<{ state: string; completed_at: string }>(
+      "select state,completed_at from jobs where id=$1",
+      [job!.id],
+    );
+    expect(stored.rows[0]?.state).toBe("CANCELLED");
+    expect(stored.rows[0]?.completed_at).not.toBeNull();
+    const attempt = await db.query<{ outcome: string; ended_at: string }>(
+      "select outcome,ended_at from job_attempts where job_id=$1",
+      [job!.id],
+    );
+    expect(attempt.rows[0]?.outcome).toBe("CANCELLED");
+    expect(attempt.rows[0]?.ended_at).not.toBeNull();
+  });
 });

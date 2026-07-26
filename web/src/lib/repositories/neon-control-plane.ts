@@ -450,16 +450,39 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
       if (isTerminalJobState(state)) return "ALREADY_TERMINAL";
       if (!isCancelableJobState(state)) return "NOT_CANCELABLE";
 
-      const updated = await sql.query(
-        `update jobs
-         set state='CANCEL_REQUESTED',
-             cancel_requested_at=coalesce(cancel_requested_at,$2),
-             updated_at=$2
-         where id=$1 and state=$3
-         returning id`,
-        [jobId, now.toISOString(), state],
-      );
-      if (updated.rows.length > 0) return "REQUESTED";
+      if (state === "QUEUED") {
+        // A QUEUED job has no live lease, so no worker could ever finalize a
+        // CANCEL_REQUESTED transition — cancel it terminally right here.
+        const finalized = await sql.query(
+          `with finalized as (
+             update jobs
+             set state='CANCELLED',
+                 cancel_requested_at=coalesce(cancel_requested_at,$2),
+                 completed_at=coalesce(completed_at,$2),
+                 updated_at=$2
+             where id=$1 and state='QUEUED'
+             returning id
+           ), attempts_closed as (
+             update job_attempts a set ended_at=$2,outcome='CANCELLED'
+             from finalized f where a.job_id=f.id and a.ended_at is null
+             returning a.id
+           )
+           select id from finalized`,
+          [jobId, now.toISOString()],
+        );
+        if (finalized.rows.length > 0) return "REQUESTED";
+      } else {
+        const updated = await sql.query(
+          `update jobs
+           set state='CANCEL_REQUESTED',
+               cancel_requested_at=coalesce(cancel_requested_at,$2),
+               updated_at=$2
+           where id=$1 and state=$3
+           returning id`,
+          [jobId, now.toISOString(), state],
+        );
+        if (updated.rows.length > 0) return "REQUESTED";
+      }
 
       const raced = await sql.query(
         "select state from jobs where id=$1",

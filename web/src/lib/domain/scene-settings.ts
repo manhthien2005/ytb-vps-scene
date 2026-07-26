@@ -137,9 +137,6 @@ const versionTwoSchema = versionTwoInput.transform((value) => {
 const schema = z.union([versionTwoSchema, legacySchema]);
 
 export type SceneRectangle = Readonly<z.infer<typeof rectangle>>;
-export type RenderSplitSettings = Readonly<z.infer<typeof renderSplitSettings>>;
-export type BlurRegionSettings = Readonly<z.infer<typeof blurRegionSettings>>;
-export type SceneSettingsPresetDraft = Readonly<z.infer<typeof presetMetadata>>;
 export type SceneSettings = Readonly<z.infer<typeof schema>>;
 
 export function parseSceneSettings(value: unknown): SceneSettings {

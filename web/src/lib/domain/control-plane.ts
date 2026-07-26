@@ -65,14 +65,6 @@ export type JobProgressEvent = Readonly<{
   recordedAt: string;
 }>;
 
-export type RenderSettingsPreset = Readonly<{
-  id: string;
-  name: string;
-  settings: SceneSettings;
-  createdAt: string;
-  updatedAt: string;
-}>;
-
 export type JobSummary = Readonly<{
   id: string;
   projectName: string;

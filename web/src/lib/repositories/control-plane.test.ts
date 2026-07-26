@@ -82,7 +82,7 @@ describe("persisted control-plane job regressions", () => {
     });
   }
 
-  async function seedJob(state: "RENDER" | "COMPLETED" = "RENDER") {
+  async function seedJob(state: "QUEUED" | "RENDER" | "COMPLETED" = "RENDER") {
     await db.query(
       `insert into jobs(
          id,project_name,state,progress_percent,created_at,updated_at,settings_snapshot,
@@ -150,6 +150,25 @@ describe("persisted control-plane job regressions", () => {
       canRetry: false,
     });
     await expect(repository().getJobDetail("missing-job")).resolves.toBeNull();
+  });
+
+  it("cancels a QUEUED job terminally right away — no worker exists to finalize it later", async () => {
+    await seedJob("QUEUED");
+    const requestedAt = new Date("2026-07-25T01:16:00.000Z");
+
+    await expect(repository().requestJobCancellation(JOB_ID, requestedAt)).resolves.toBe("REQUESTED");
+
+    const stored = await db.query<{
+      state: string;
+      cancel_requested_at: string;
+      completed_at: string;
+    }>(
+      "select state,cancel_requested_at,completed_at from jobs where id=$1",
+      [JOB_ID],
+    );
+    expect(stored.rows[0]?.state).toBe("CANCELLED");
+    expect(new Date(stored.rows[0]!.cancel_requested_at).toISOString()).toBe(requestedAt.toISOString());
+    expect(stored.rows[0]?.completed_at).not.toBeNull();
   });
 
   it("makes cancellation idempotent without moving the timestamp on a repeated request", async () => {

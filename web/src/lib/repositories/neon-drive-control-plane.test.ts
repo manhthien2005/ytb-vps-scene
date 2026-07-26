@@ -447,7 +447,7 @@ describe("Drive control-plane repository", () => {
       actualSizeBytes: 100,
     });
     await expect(repository.appManagedDriveBytes()).resolves.toBe(100);
-    await expect(repository.markSourceInvalid(ARTIFACT_ID))
+    await expect(repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN))
       .rejects.toThrow("Source cannot be marked invalid");
   });
 
@@ -491,8 +491,8 @@ describe("Drive control-plane repository", () => {
   it("atomically audits one INVALID winner and replays after a lost response", async () => {
     const { repository } = await reserveTrackedSource();
 
-    await expect(repository.markSourceInvalid(ARTIFACT_ID)).resolves.toBe("CHANGED");
-    await expect(repository.markSourceInvalid(ARTIFACT_ID)).resolves.toBe("REPLAY");
+    await expect(repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN)).resolves.toBe("CHANGED");
+    await expect(repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN)).resolves.toBe("REPLAY");
 
     const audits = await db.query<{
       event_type: string;
@@ -644,7 +644,7 @@ describe("Drive control-plane repository", () => {
       };
       await repository.reserveSourceArtifact(source, CLAIM_TOKEN);
       if (terminalStatus === "INVALID") {
-        await repository.markSourceInvalid(ARTIFACT_ID);
+        await repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN);
       } else {
         await repository.claimSourceDeletion(ARTIFACT_ID);
         await repository.markSourceDeleted(ARTIFACT_ID);
@@ -878,7 +878,7 @@ describe("Drive control-plane repository", () => {
         await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
         await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
       } else if (terminal === "INVALID") {
-        await repository.markSourceInvalid(ARTIFACT_ID);
+        await repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN);
       } else {
         await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
         await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");

@@ -232,6 +232,11 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
   }
 
+  async getManagedArtifact(artifactId: string): Promise<ManagedArtifactRecord | null> {
+    const records = await this.listManagedArtifacts();
+    return records.find((record) => record.artifact.id === artifactId) ?? null;
+  }
+
   async listManagedArtifacts(): Promise<readonly ManagedArtifactRecord[]> {
     return [...this.artifacts.values()]
       .filter((artifact) => (artifact.kind === "SOURCE" || artifact.kind === "OUTPUT") && artifact.status !== "DELETED")
@@ -495,10 +500,17 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return "CHANGED";
   }
 
-  async markSourceInvalid(artifactId: string): Promise<"CHANGED" | "REPLAY"> {
+  async markSourceInvalid(artifactId: string, claimToken: string | null): Promise<"CHANGED" | "REPLAY"> {
     const artifact = this.artifacts.get(artifactId);
     if (artifact?.kind === "SOURCE" && artifact.status === "INVALID") return "REPLAY";
     if (!artifact || artifact.kind !== "SOURCE" || !["PENDING", "UPLOADING"].includes(artifact.status)) {
+      throw new Error("Source cannot be marked invalid");
+    }
+    // Mirror the real repository's fencing: claim holders must present their token;
+    // claimless callers may only invalidate when no fenced owner is active.
+    const activeClaim = this.provisioningClaims.get(`SOURCE:${artifactId}`);
+    const claimActive = activeClaim !== undefined && activeClaim.expiresAt > this.now().getTime();
+    if (claimToken !== null ? !this.ownsProvisioning("SOURCE", artifactId, claimToken) : claimActive) {
       throw new Error("Source cannot be marked invalid");
     }
     this.artifacts.set(artifactId, { ...artifact, status: "INVALID" });

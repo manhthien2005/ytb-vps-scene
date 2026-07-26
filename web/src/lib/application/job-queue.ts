@@ -76,9 +76,10 @@ export function createJobQueueService(dependencies: JobQueueDependencies) {
     },
 
     async claim(worker: WorkerView, now: Date) {
+      // Control-only deployments never hand out media jobs; otherwise the worker's
+      // bridge must match exactly (which also rejects control-only workers).
       if (
         dependencies.pipelineBridgeVersion === "cp3-control-only" ||
-        worker.capabilities.pipelineBridgeVersion === "cp3-control-only" ||
         worker.capabilities.pipelineBridgeVersion !== dependencies.pipelineBridgeVersion
       ) throw new AppError("WORKER_INCOMPATIBLE", 409);
       const assignment = await dependencies.repository.claimJob(worker.id, now, dependencies.pipelineBridgeVersion);

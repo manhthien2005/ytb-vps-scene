@@ -24,13 +24,24 @@ type DriveAccessDependencies = Readonly<{
   oauth: DriveOAuthPort;
 }>;
 
-async function markReauthentication(repository: DriveControlPlaneRepository): Promise<void> {
+export async function markReauthentication(repository: DriveControlPlaneRepository): Promise<void> {
   await repository.setCredentialStatus("REAUTH_REQUIRED");
   await repository.recordAudit({
     eventType: "DRIVE_REAUTH_REQUIRED",
     actorClass: "admin",
     payload: { reasonCode: "DRIVE_REAUTH_REQUIRED", status: "REAUTH_REQUIRED" },
   });
+}
+
+/** One shared definition of an acceptable Google access token for both the
+ * connection flow and the access provider. */
+export function validGoogleAccessToken(token: unknown): token is string {
+  return (
+    typeof token === "string" &&
+    token.length >= 1 &&
+    token.length <= 8_192 &&
+    /^[\x21-\x7E]+$/.test(token)
+  );
 }
 
 function reauthenticationRequired(): AppError {
@@ -71,12 +82,7 @@ export function createDriveAccessProvider(
           refreshToken,
           PROVIDER_TIMEOUT_MS,
         );
-        if (
-          typeof accessToken !== "string" ||
-          accessToken.length < 1 ||
-          accessToken.length > 8_192 ||
-          !/^[\x21-\x7E]+$/.test(accessToken)
-        ) {
+        if (!validGoogleAccessToken(accessToken)) {
           throw new AppError("DRIVE_PROVIDER_REJECTED", 502);
         }
         cachedAccessToken = {

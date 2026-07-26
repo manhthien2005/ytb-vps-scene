@@ -7,6 +7,7 @@ import type { DriveFilesPort, DriveOAuthPort } from "@/lib/ports/drive";
 import type { DriveControlPlaneRepository } from "@/lib/repositories/drive-control-plane";
 import type { CredentialCipher } from "@/lib/security/credential-cipher";
 import { issueOAuthState, verifyOAuthState } from "@/lib/security/oauth-state";
+import { markReauthentication, validGoogleAccessToken } from "./drive-access";
 
 const STATE_LIFETIME_MS = 10 * 60 * 1_000;
 const PROVIDER_TIMEOUT_MS = 5_000;
@@ -76,14 +77,6 @@ function validBoundedText(value: unknown, minimum: number, maximum: number): val
   );
 }
 
-async function recordReauthentication(repository: DriveControlPlaneRepository): Promise<void> {
-  await repository.setCredentialStatus("REAUTH_REQUIRED");
-  await repository.recordAudit({
-    eventType: "DRIVE_REAUTH_REQUIRED",
-    actorClass: "admin",
-    payload: { reasonCode: "DRIVE_REAUTH_REQUIRED", status: "REAUTH_REQUIRED" },
-  });
-}
 
 export async function beginDriveConnection(
   input: BeginDriveConnectionInput,
@@ -159,7 +152,7 @@ export async function completeDriveConnection(
     exchanged.refreshToken,
     PROVIDER_TIMEOUT_MS,
   ));
-  if (!validBoundedText(accessToken, 1, 8_192)) throw providerRejected();
+  if (!validGoogleAccessToken(accessToken)) throw providerRejected();
   const account = await providerCall(() => dependencies.files.inspectAccount(accessToken));
   if (
     !validBoundedText(account.permissionId, 1, 256) ||
@@ -233,7 +226,7 @@ export async function disconnectDrive(
   if (!credential || credential.status === "DISCONNECTED") return { status: "DISCONNECTED" };
   if (credential.status === "REAUTH_REQUIRED") return { status: "REAUTH_REQUIRED" };
   if (credential.envelope === null) {
-    await recordReauthentication(dependencies.repository);
+    await markReauthentication(dependencies.repository);
     return { status: "REAUTH_REQUIRED" };
   }
 
@@ -241,7 +234,7 @@ export async function disconnectDrive(
   try {
     refreshToken = dependencies.cipher.decrypt(CREDENTIAL_ID, credential.envelope);
   } catch {
-    await recordReauthentication(dependencies.repository);
+    await markReauthentication(dependencies.repository);
     return { status: "REAUTH_REQUIRED" };
   }
 
@@ -250,7 +243,7 @@ export async function disconnectDrive(
     outcome = await dependencies.oauth.revokeRefreshToken(refreshToken, PROVIDER_TIMEOUT_MS);
   } catch (error) {
     if (error instanceof AppError && error.code === "DRIVE_REAUTH_REQUIRED") {
-      await recordReauthentication(dependencies.repository);
+      await markReauthentication(dependencies.repository);
       return { status: "REAUTH_REQUIRED" };
     }
     if (error instanceof AppError) throw error;

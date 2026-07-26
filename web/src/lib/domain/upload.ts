@@ -35,7 +35,11 @@ export function validateUploadIntent(source: UploadIntentInput, maximumBytes: nu
 
   const fileName = canonicalUploadFileName(source.fileName);
   if (fileName === null) throw new AppError("UPLOAD_TYPE_REJECTED", 400);
-  const extension = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+  // Mirror upload-filename.ts: names without a real extension ("mp4", ".mp4")
+  // must not fall through to the whole-name-as-extension case.
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 1) throw new AppError("UPLOAD_TYPE_REJECTED", 400);
+  const extension = fileName.slice(dot + 1).toLowerCase();
   if (
     !(extension in EXTENSION_MIME_TYPES) ||
     EXTENSION_MIME_TYPES[extension as UploadExtension] !== source.mimeType

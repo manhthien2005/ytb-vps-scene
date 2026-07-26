@@ -439,6 +439,15 @@ export function createWorkerControlPlaneRepository(
            where exists(select 1 from eligible)
              and not exists(select 1 from job_leases active_lease where active_lease.expires_at>$2)
              and (j.settings_snapshot is not null or current_settings.project_id is not null)
+             /* Every condition the final assignment select requires must hold here
+                too: the claim CTEs commit even when that select returns no row, so
+                selecting an unassignable job would orphan the claim and starve the
+                single-lease queue for the whole lease TTL. */
+             and j.project_id is not null
+             and exists(
+               select 1 from artifacts sa
+               where sa.project_id=j.project_id and sa.kind='SOURCE' and sa.status='READY'
+             )
              and (
                j.state='QUEUED'
                or (current_lease.expires_at<=$2 and j.state in (
@@ -563,8 +572,16 @@ export function createWorkerControlPlaneRepository(
       addOptionalAssignment("eta_seconds", "etaSeconds", "integer");
       addOptionalAssignment("error_code", "errorCode", "text");
 
-      const result = await sql.query(
-        `with updated as (
+      // Terminal (CANCELLED/FAILED_FINAL) and releasing (FAILED_RETRYABLE) reports
+      // must also close the attempt with its true outcome, drop the lease, and free
+      // the worker — otherwise the attempt is later mislabeled LEASE_LOST and the
+      // still-live lease blocks the single-lease claim gate for the whole TTL.
+      const attemptOutcome = input.state === "CANCELLED"
+        ? "CANCELLED"
+        : input.state === "FAILED_FINAL" || input.state === "FAILED_RETRYABLE"
+          ? "FAILED"
+          : null;
+      const baseCtes = `with updated as (
            update jobs j set ${assignments.join(",")}
            from job_leases l
            where j.id=$1 and l.job_id=j.id and l.worker_id=$2 and l.fencing_token=$3
@@ -575,10 +592,29 @@ export function createWorkerControlPlaneRepository(
            select id,coalesce(active_phase,$5),$6,latest_message
            from updated
            returning id
+         )`;
+      let statement = `${baseCtes}
+         select id from updated`;
+      if (attemptOutcome !== null) {
+        parameters.push(attemptOutcome);
+        const outcomeParam = `$${parameters.length}`;
+        statement = `${baseCtes}, attempt_closed as (
+           update job_attempts a set ended_at=$7,outcome=${outcomeParam}
+           from updated u
+           where a.job_id=u.id and a.worker_id=$2 and a.fencing_token=$3 and a.ended_at is null
+           returning a.id
+         ), lease_released as (
+           delete from job_leases l using updated u
+           where l.job_id=u.id and l.worker_id=$2 and l.fencing_token=$3
+           returning l.job_id
+         ), worker_freed as (
+           update workers w set state='READY',updated_at=$7
+           from updated u where w.id=$2 and w.state='BUSY'
+           returning w.id
          )
-         select id from updated`,
-        parameters,
-      );
+         select id from updated`;
+      }
+      const result = await sql.query(statement, parameters);
       return result.rows.length === 1 ? "UPDATED" : "LEASE_LOST";
     },
 
@@ -615,6 +651,15 @@ export function createWorkerControlPlaneRepository(
            where job_id=$2 and kind='OUTPUT' and status<>'DELETED'
              and id=$1 and drive_file_id=$5 and drive_parent_id=$6
              and expected_size_bytes=$7 and checksum_sha256=$8
+         ), superseded as (
+           /* A crashed attempt leaves a PENDING OUTPUT with a different content-derived
+              id; the partial unique index (one live OUTPUT per job) would otherwise
+              block every future reservation forever. A valid lease holder may retire it. */
+           update artifacts a set status='DELETED',updated_at=$9
+           where a.job_id=$2 and a.kind='OUTPUT' and a.status='PENDING' and a.id<>$1
+             and exists(select 1 from eligible)
+             and not exists(select 1 from existing)
+           returning a.id
          ), inserted as (
            insert into artifacts(
              id,project_id,job_id,kind,status,drive_file_id,drive_parent_id,
@@ -622,7 +667,9 @@ export function createWorkerControlPlaneRepository(
            )
            select $1,e.project_id,$2,'OUTPUT','PENDING',$5,$6,
                   $10,'video/mp4',$7,$8,$9,$9
-           from eligible e where not exists(select 1 from existing)
+           from eligible e
+           cross join (select count(*) as retired from superseded) s
+           where not exists(select 1 from existing)
            on conflict do nothing returning id
          )
          select 'REPLAY' as outcome from existing
@@ -666,7 +713,14 @@ export function createWorkerControlPlaneRepository(
          ), job_done as (
            update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,
              completed_at=$7,updated_at=$7
-           from eligible e, artifact_done a where j.id=e.job_id returning j.id
+           from eligible e, artifact_done a
+           /* CANCEL_REQUESTED -> COMPLETED stays allowed by design (a cancel that
+              lands after the upload started finishes the safest already-started
+              operation), but a job already in a terminal state must never be
+              re-completed. */
+           where j.id=e.job_id
+             and j.state not in ('COMPLETED','FAILED_FINAL','CANCELLED','DELETING','DELETED')
+           returning j.id
          ), worker_ready as (
            update workers w set state='READY',updated_at=$7
            from eligible e, job_done j where w.id=e.worker_id returning w.id
@@ -708,6 +762,22 @@ export function createWorkerControlPlaneRepository(
            update job_attempts a set ended_at=$1,outcome='LEASE_LOST'
            from expired e
            where a.job_id=e.job_id and a.fencing_token=e.fencing_token and a.ended_at is null
+           returning a.id
+         ), cancels_finalized as (
+           /* A CANCEL_REQUESTED job whose lease expired (or that never had one) has
+              no worker left to acknowledge the cancel — finalize it here so it does
+              not stay non-terminal forever. */
+           update jobs j set state='CANCELLED',active_stage=null,
+             completed_at=coalesce(j.completed_at,$1),updated_at=$1
+           where j.state='CANCEL_REQUESTED'
+             and not exists(
+               select 1 from job_leases l where l.job_id=j.id and l.expires_at>$1
+             )
+           returning j.id
+         ), cancel_attempts_closed as (
+           update job_attempts a set ended_at=$1,outcome='CANCELLED'
+           from cancels_finalized c
+           where a.job_id=c.id and a.ended_at is null
            returning a.id
          )
          update workers set state='OFFLINE',updated_at=$1

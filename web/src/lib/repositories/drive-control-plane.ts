@@ -102,6 +102,7 @@ export interface DriveControlPlaneRepository {
   ): Promise<Project>;
   listProjects(): Promise<readonly Project[]>;
   listManagedArtifacts(): Promise<readonly ManagedArtifactRecord[]>;
+  getManagedArtifact(artifactId: string): Promise<ManagedArtifactRecord | null>;
   claimManagedArtifactDeletion(artifactId: string): Promise<ManagedDeletionClaim>;
   markManagedArtifactDeleted(artifactId: string): Promise<"CHANGED" | "REPLAY">;
   reserveSourceCapacity(input: SourceCapacityReservation): Promise<SourceCapacityOutcome>;
@@ -119,7 +120,7 @@ export interface DriveControlPlaneRepository {
     verifiedAt: Date,
     claimToken?: string,
   ): Promise<SourceTerminalOutcome>;
-  markSourceInvalid(artifactId: string): Promise<SourceTerminalOutcome>;
+  markSourceInvalid(artifactId: string, claimToken: string | null): Promise<SourceTerminalOutcome>;
   claimSourceDeletion(artifactId: string): Promise<"CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT">;
   markSourceDeleted(artifactId: string): Promise<SourceTerminalOutcome>;
   getUsage(provider: "DRIVE" | "NEON"): Promise<UsageSnapshot | null>;

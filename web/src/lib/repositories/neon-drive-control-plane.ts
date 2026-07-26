@@ -464,6 +464,17 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       return result.rows.map(parseManagedArtifact);
     },
 
+    async getManagedArtifact(artifactId) {
+      const result = await sql.query(
+        `select ${artifactColumns("a")},a.job_id,p.name as project_name
+         from artifacts a join projects p on p.id=a.project_id
+         where a.id=$1 and a.kind in ('SOURCE','OUTPUT') and a.status <> 'DELETED'`,
+        [artifactId],
+      );
+      const row = result.rows[0];
+      return row === undefined ? null : parseManagedArtifact(row);
+    },
+
     async claimManagedArtifactDeletion(artifactId) {
       const result = await sql.query(
         `with changed as (
@@ -700,11 +711,26 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       throw new Error("Source cannot be marked ready");
     },
 
-    async markSourceInvalid(artifactId) {
+    async markSourceInvalid(artifactId, claimToken) {
       const result = await sql.query(
         `with changed as (
            update artifacts set status='INVALID',updated_at=now()
            where id=$1 and kind='SOURCE' and status in ('PENDING','UPLOADING')
+             /* Same fencing as the sibling source mutations: a claim holder must
+                present its token; a claimless caller may only invalidate when no
+                fenced owner is actively driving the upload. */
+             and (
+               ($2::text is not null and exists(
+                 select 1 from drive_provisioning_claims
+                 where resource_kind='SOURCE' and resource_id=$1
+                   and claim_token=$2 and expires_at > now()
+               ))
+               or
+               ($2::text is null and not exists(
+                 select 1 from drive_provisioning_claims
+                 where resource_kind='SOURCE' and resource_id=$1 and expires_at > now()
+               ))
+             )
            returning id,project_id,expected_size_bytes,mime_type
          ), released as (
            update drive_upload_reservations set remaining_bytes=0,released_at=now(),updated_at=now()
@@ -728,7 +754,7 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
          select exists(select 1 from changed) as changed,
                 exists(select 1 from audited) as audited,
                 exists(select 1 from project_updated) as project_updated`,
-        [artifactId],
+        [artifactId, claimToken ?? null],
       );
       if (
         result.rows[0]?.changed === true && result.rows[0]?.audited === true &&

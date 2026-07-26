@@ -44,8 +44,12 @@ function dependencies() {
       cancelRequested: false,
     }),
     updateJobProgress: vi.fn().mockResolvedValue("UPDATED"),
-  } as unknown as WorkerControlPlaneRepository;
-  const health = { assertUploadAllowed: vi.fn().mockResolvedValue(undefined) } as unknown as FreeTierHealthService;
+    // satisfies Partial<> keeps the implemented members' signatures checked even
+    // though the double intentionally omits the rest of the interface.
+  } satisfies Partial<WorkerControlPlaneRepository> as unknown as WorkerControlPlaneRepository;
+  const health = {
+    assertUploadAllowed: vi.fn().mockResolvedValue(undefined),
+  } satisfies Partial<FreeTierHealthService> as unknown as FreeTierHealthService;
   return {
     repository,
     health,

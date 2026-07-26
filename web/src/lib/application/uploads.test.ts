@@ -93,6 +93,7 @@ function repositoryDouble(): Mocked<DriveControlPlaneRepository> {
     completeProjectFolders: vi.fn(),
     listProjects: vi.fn(),
     listManagedArtifacts: vi.fn(),
+    getManagedArtifact: vi.fn(),
     claimManagedArtifactDeletion: vi.fn(),
     markManagedArtifactDeleted: vi.fn(),
     reserveSourceCapacity: vi.fn(),
@@ -315,7 +316,7 @@ describe("UploadService sessions", () => {
     await expect(service.createSession({ projectId: PROJECT_ID, intent: validIntent, now: NOW }))
       .rejects.toMatchObject({ code: "DRIVE_PROVIDER_REJECTED" });
 
-    expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID);
+    expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID, expect.any(String));
     expect(diagnostics).toHaveBeenCalledWith({
       stage: "create-resumable-session",
       code: "DRIVE_PROVIDER_REJECTED",
@@ -556,7 +557,7 @@ describe("UploadService sessions", () => {
       await expect(service.complete({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
         .rejects.toMatchObject({ code: "UPLOAD_REMOTE_MISMATCH", status: 409 });
       expect(repository.markSourceReady).not.toHaveBeenCalled();
-      expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID);
+      expect(repository.markSourceInvalid).toHaveBeenCalledWith(PROJECT_ID, null);
       expect(repository.recordAudit).not.toHaveBeenCalled();
     },
   );

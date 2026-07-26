@@ -364,7 +364,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
           );
         } catch (error) {
           if (error instanceof AppError && error.code === "DRIVE_PROVIDER_REJECTED") {
-            await dependencies.repository.markSourceInvalid(artifactId);
+            await dependencies.repository.markSourceInvalid(artifactId, claimToken);
           }
           throw error;
         }
@@ -427,7 +427,9 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
         evidence = classifyEvidence(artifact, remote);
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== "UPLOAD_REMOTE_MISMATCH") throw error;
-        await dependencies.repository.markSourceInvalid(artifact.id);
+        // Claimless by design: the guard inside markSourceInvalid refuses this call
+        // whenever a fenced session owner is actively driving the upload.
+        await dependencies.repository.markSourceInvalid(artifact.id, null);
         throw error;
       }
       await dependencies.repository.observeSourceProgress(artifact.id, remote.sizeBytes);

@@ -70,7 +70,7 @@ describe("DriveWorkspaceService", () => {
   let records: ManagedArtifactRecord[];
   let repository: Pick<
     DriveControlPlaneRepository,
-    "listManagedArtifacts" | "claimManagedArtifactDeletion" | "markManagedArtifactDeleted"
+    "listManagedArtifacts" | "getManagedArtifact" | "claimManagedArtifactDeletion" | "markManagedArtifactDeleted"
   >;
   let access: DriveAccessProvider;
   let files: Pick<DriveFilesPort, "inspectVideoMetadata" | "deleteFile">;
@@ -94,6 +94,8 @@ describe("DriveWorkspaceService", () => {
     ];
     repository = {
       listManagedArtifacts: vi.fn(async () => structuredClone(records)),
+      getManagedArtifact: vi.fn(async (artifactId: string) =>
+        structuredClone(records.find((item) => item.artifact.id === artifactId) ?? null)),
       claimManagedArtifactDeletion: vi.fn(async (): Promise<ManagedDeletionClaim> => "CLAIMED"),
       markManagedArtifactDeleted: vi.fn(async (): Promise<"CHANGED" | "REPLAY"> => "CHANGED"),
     };
@@ -428,6 +430,7 @@ describe("DriveWorkspaceService", () => {
 
   it("returns a deletion replay without obtaining a token or touching Drive", async () => {
     repository.listManagedArtifacts = vi.fn(async () => []);
+    repository.getManagedArtifact = vi.fn(async () => null);
     repository.claimManagedArtifactDeletion = vi.fn(
       async (): Promise<ManagedDeletionClaim> => "DELETED",
     );

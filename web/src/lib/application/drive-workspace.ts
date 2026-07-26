@@ -203,8 +203,7 @@ export function createDriveWorkspaceService(
     },
 
     async delete(artifactId) {
-      const records = await dependencies.repository.listManagedArtifacts();
-      const record = records.find((item) => item.artifact.id === artifactId);
+      const record = await dependencies.repository.getManagedArtifact(artifactId);
       const claim = await dependencies.repository.claimManagedArtifactDeletion(artifactId);
       if (claim === "CONFLICT") {
         throw new AppError("DRIVE_FILE_DELETE_CONFLICT", 409);

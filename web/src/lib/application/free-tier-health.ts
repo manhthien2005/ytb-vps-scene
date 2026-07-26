@@ -28,10 +28,11 @@ export interface FreeTierHealthService {
   assertUploadAllowed(incomingBytes: number, now: Date): Promise<void>;
 }
 
-type SnapshotResult = Readonly<{
-  snapshot: UsageSnapshot | null;
-  reason: string | null;
-}>;
+// Discriminated: a null reason guarantees a usable snapshot, so consumers never
+// need an unreachable null-snapshot branch.
+type SnapshotResult =
+  | Readonly<{ snapshot: UsageSnapshot; reason: null }>
+  | Readonly<{ snapshot: null; reason: string }>;
 
 function validNow(value: Date): boolean {
   return value instanceof Date && Number.isFinite(value.getTime());
@@ -128,12 +129,11 @@ function decisionError(reason: string): AppError {
 }
 
 function snapshotReasons(
-  snapshot: UsageSnapshot | null,
+  snapshot: UsageSnapshot,
   now: Date,
   dependencies: FreeTierHealthDependencies,
   provider: "DRIVE" | "NEON",
 ): readonly string[] {
-  if (snapshot === null) return ["DRIVE_QUOTA_STALE"];
   const decision = assessProjectedUpload({
     usedBytes: snapshot.usedBytes,
     limitBytes: snapshot.limitBytes,
