@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createCipheriv } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { YOUTUBE_SCOPES } from "@/lib/domain/youtube";
@@ -16,6 +17,29 @@ function replaceEnvelope(
   replacement: Partial<Record<keyof EncryptedCredential, unknown>>,
 ): EncryptedCredential {
   return { ...envelope, ...replacement } as EncryptedCredential;
+}
+
+// Builds an envelope entirely independently of `aad()` / DRIVE_CIPHER_PROFILE, using the
+// pre-change wire-format AAD string spelled out as a literal. This is the only test in the
+// file that pins the actual byte layout: it never routes through the production AAD builder,
+// so a future edit to `aad()` or to `DRIVE_CIPHER_PROFILE.domain` (including a silent typo)
+// breaks this test even though it would not break the self-consistent round-trip tests above.
+function knownAnswerEnvelope(
+  key: Buffer,
+  nonce: Buffer,
+  aadLiteral: string,
+  plaintext: string,
+): EncryptedCredential {
+  const cipher = createCipheriv("aes-256-gcm", key, nonce, { authTagLength: 16 });
+  cipher.setAAD(Buffer.from(aadLiteral, "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return {
+    ciphertext: ciphertext.toString("base64url"),
+    nonce: nonce.toString("base64url"),
+    authTag: cipher.getAuthTag().toString("base64url"),
+    keyVersion: 1,
+    scope: DRIVE_FILE_SCOPE,
+  };
 }
 
 describe("credential cipher", () => {
@@ -137,5 +161,33 @@ describe("credential cipher", () => {
     const envelope = youtube.encrypt("abc", YOUTUBE_SCOPES[0], "secret");
 
     expect(() => drive.decrypt("abc", envelope)).toThrow("CREDENTIAL_UNAVAILABLE");
+  });
+
+  it("decrypts a known-answer envelope built independently with the literal pre-change Drive AAD", () => {
+    const key = Buffer.alloc(32, 7);
+    const nonce = Buffer.alloc(12, 3);
+    const envelope = knownAnswerEnvelope(
+      key,
+      nonce,
+      "ytb-vps:drive-refresh-token:v1:1:https://www.googleapis.com/auth/drive.file",
+      "known-plaintext-value",
+    );
+
+    const cipher = createCredentialCipher(key.toString("base64url"), DRIVE_CIPHER_PROFILE);
+    expect(cipher.decrypt("1", envelope)).toBe("known-plaintext-value");
+  });
+
+  it("refuses a known-answer envelope encrypted under the wrong AAD literal", () => {
+    const key = Buffer.alloc(32, 7);
+    const nonce = Buffer.alloc(12, 3);
+    const envelope = knownAnswerEnvelope(
+      key,
+      nonce,
+      "ytb-vps:drive-refresh-tokenX:v1:1:https://www.googleapis.com/auth/drive.file",
+      "known-plaintext-value",
+    );
+
+    const cipher = createCredentialCipher(key.toString("base64url"), DRIVE_CIPHER_PROFILE);
+    expect(() => cipher.decrypt("1", envelope)).toThrow("CREDENTIAL_UNAVAILABLE");
   });
 });
