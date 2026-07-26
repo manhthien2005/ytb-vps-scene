@@ -47,6 +47,21 @@ class FakeClient:
         return {"outcome": "COMPLETED"}
 
 
+class CancelOnRenewClient(FakeClient):
+    def __init__(self, cancel_on_renew: int) -> None:
+        super().__init__()
+        self.cancel_on_renew = cancel_on_renew
+        self.renew_count = 0
+
+    def renew(self, job_id: str, fencing_token: int) -> dict[str, object]:
+        self.events.append(("renew", (job_id, fencing_token)))
+        self.renew_count += 1
+        return {
+            "outcome": "RENEWED",
+            "cancelRequested": self.renew_count == self.cancel_on_renew,
+        }
+
+
 def assignment(source_sha256: str) -> dict[str, object]:
     return {
         "job": {"id": "job-1", "state": "CLAIMED"},
@@ -91,9 +106,39 @@ class MediaJobTests(unittest.TestCase):
         self.assertEqual(
             progress_updates,
             [
-                {"fencingToken": 4, "fromState": "CLAIMED", "state": "DOWNLOADING", "progressPercent": 5},
-                {"fencingToken": 4, "fromState": "DOWNLOADING", "state": "OCR", "progressPercent": 20},
-                {"fencingToken": 4, "fromState": "OCR", "state": "UPLOADING", "progressPercent": 90},
+                {
+                    "fencingToken": 4,
+                    "fromState": "CLAIMED",
+                    "state": "DOWNLOADING",
+                    "progressPercent": 5,
+                    "phase": "download",
+                    "phaseProgressPercent": 0,
+                    "message": "Downloading source media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+                {
+                    "fencingToken": 4,
+                    "fromState": "DOWNLOADING",
+                    "state": "OCR",
+                    "progressPercent": 20,
+                    "phase": "process",
+                    "phaseProgressPercent": 0,
+                    "message": "Processing source media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+                {
+                    "fencingToken": 4,
+                    "fromState": "OCR",
+                    "state": "UPLOADING",
+                    "progressPercent": 90,
+                    "phase": "upload",
+                    "phaseProgressPercent": 0,
+                    "message": "Uploading processed media",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
             ],
         )
         uploading_progress_index = client.events.index(("progress", progress_updates[-1]))
@@ -102,6 +147,117 @@ class MediaJobTests(unittest.TestCase):
         )
         self.assertLess(uploading_progress_index, output_session_index)
         self.assertEqual([event for event, _ in client.events], ["progress", "progress", "renew", "renew", "progress", "output-session", "complete"])
+
+    def test_cancel_requested_on_first_renew_stops_before_pipeline(self) -> None:
+        client = CancelOnRenewClient(cancel_on_renew=1)
+        pipeline_called = False
+
+        def pipeline(*_args: object) -> Path:
+            nonlocal pipeline_called
+            pipeline_called = True
+            raise AssertionError("pipeline must not run after cancellation")
+
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            result = executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+
+        self.assertEqual(result, "CANCELLED")
+        self.assertEqual(pipeline_called, False)
+        self.assertEqual(
+            client.events[-1],
+            (
+                "progress",
+                {
+                    "fencingToken": 4,
+                    "fromState": "CANCEL_REQUESTED",
+                    "state": "CANCELLED",
+                    "progressPercent": 20,
+                    "phase": "cancel",
+                    "phaseProgressPercent": 100,
+                    "message": "Cancellation acknowledged",
+                    "currentPart": 1,
+                    "totalParts": 1,
+                },
+            ),
+        )
+        self.assertEqual([event for event, _ in client.events], ["progress", "progress", "renew", "progress"])
+
+    def test_cancel_requested_on_second_renew_stops_before_upload(self) -> None:
+        client = CancelOnRenewClient(cancel_on_renew=2)
+
+        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
+            result = workspace / "published" / "part-001.mp4"
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_bytes(b"rendered-output")
+            return result
+
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            result = executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+
+        self.assertEqual(result, "CANCELLED")
+        self.assertEqual(FakeTransfer.instances[0].uploads, [])
+        self.assertEqual([event for event, _ in client.events], ["progress", "progress", "renew", "renew", "progress"])
+        cancellation = client.events[-1][1]
+        self.assertEqual(cancellation["fromState"], "CANCEL_REQUESTED")  # type: ignore[index]
+        self.assertEqual(cancellation["state"], "CANCELLED")  # type: ignore[index]
+        self.assertEqual(cancellation["progressPercent"], 90)  # type: ignore[index]
+
+    def test_lease_lost_renew_response_is_a_media_job_error(self) -> None:
+        class LeaseLostClient(FakeClient):
+            def renew(self, job_id: str, fencing_token: int) -> dict[str, object]:
+                self.events.append(("renew", (job_id, fencing_token)))
+                return {"outcome": "LEASE_LOST"}
+
+        pipeline_called = False
+
+        def pipeline(*_args: object) -> Path:
+            nonlocal pipeline_called
+            pipeline_called = True
+            return Path("unexpected.mp4")
+
+        executor = MediaJobExecutor(LeaseLostClient(), transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(MediaJobError, "lease renewal"):
+                executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+        self.assertEqual(pipeline_called, False)
+
+    def test_progress_rejection_is_a_media_job_error(self) -> None:
+        class RejectingProgressClient(FakeClient):
+            def progress(self, job_id: str, update: dict[str, object]) -> dict[str, object]:
+                raise RuntimeError("INVALID_REQUEST")
+
+        executor = MediaJobExecutor(RejectingProgressClient(), transfer_factory=FakeTransfer, pipeline=lambda *_args: Path("unexpected.mp4"))
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(MediaJobError, "progress update"):
+                executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+
+    def test_progress_messages_do_not_expose_tokens_secrets_or_paths(self) -> None:
+        client = FakeClient()
+
+        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
+            result = workspace / "published" / "part-001.mp4"
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_bytes(b"rendered-output")
+            return result
+
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+            messages = "\n".join(
+                str(payload["message"])
+                for event, payload in client.events
+                if event == "progress" and "message" in payload  # type: ignore[operator]
+            )
+            for sensitive_value in (
+                "token-1",
+                "session-secret-sentinel",
+                "upload_id=abc",
+                str(Path(root)),
+            ):
+                self.assertNotIn(sensitive_value, messages)
 
     def test_rejects_missing_source_digest(self) -> None:
         invalid = assignment("a" * 64)
