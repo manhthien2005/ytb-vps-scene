@@ -5,6 +5,7 @@ import { parseSceneSettings } from "@/lib/domain/scene-settings";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { HttpError, readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createSql } from "@/lib/db/client";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -13,7 +14,7 @@ type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
 
 function errorResponse(error: unknown) {
   if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
 }
 

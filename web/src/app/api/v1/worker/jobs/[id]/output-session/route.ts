@@ -8,6 +8,7 @@ import { requireWorkerSession } from "@/lib/http/worker-auth";
 import { createConfiguredDrive } from "@/lib/application/configured-drive";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest, context: Context) {
     return NextResponse.json({ artifactId, driveFileId, ...session }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

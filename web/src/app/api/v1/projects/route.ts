@@ -15,6 +15,7 @@ import {
 } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const BODY_BYTES = 1_024;
@@ -40,7 +41,7 @@ function errorResponse(error: AppError): NextResponse {
 }
 
 function unexpectedErrorResponse(error: unknown): NextResponse {
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: { "cache-control": "no-store" } },

@@ -4,6 +4,7 @@ import { parseServerEnv } from "@/lib/config/env";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { synthesizeCapCutBv074Preview } from "@/lib/server/capcut-bv074-preview";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -11,7 +12,7 @@ const bodySchema = z.object({ text: z.string().trim().min(1).max(500), rate: z.n
 
 function errorResponse(error: unknown) {
   if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
-  console.error("[api] tts-preview failed", error);
+  console.error("[api] tts-preview failed", redactSecrets(error));
   return NextResponse.json({ code: "TTS_PREVIEW_UNAVAILABLE" }, { status: 503, headers: HEADERS });
 }
 

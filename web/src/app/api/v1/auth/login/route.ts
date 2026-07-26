@@ -5,6 +5,7 @@ import { ADMIN_COOKIE } from "@/lib/auth/current-admin";
 import { issueSession } from "@/lib/auth/session";
 import { parseServerEnv } from "@/lib/config/env";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const MAX_LOGIN_BODY_BYTES = 2_048;
@@ -70,7 +71,7 @@ export async function POST(request: NextRequest) {
   try {
     return await handleLogin(request);
   } catch (error) {
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

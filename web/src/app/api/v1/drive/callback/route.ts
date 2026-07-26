@@ -10,6 +10,7 @@ import { AppError, type PublicCode } from "@/lib/domain/errors";
 import { HttpError, requireAdmin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 
@@ -125,7 +126,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     if (error instanceof AppError) return errorRedirect(env, error.code);
     // Browser-facing OAuth flow: land the admin back in the UI instead of a raw 500 page.
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return errorRedirect(env, "DRIVE_PROVIDER_REJECTED");
   }
 }

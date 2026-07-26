@@ -12,6 +12,7 @@ import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { HttpError, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const uuid = z.string().uuid();
@@ -29,7 +30,7 @@ function errorResponse(error: AppError): NextResponse {
 }
 
 function unexpectedErrorResponse(error: unknown): NextResponse {
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: RESPONSE_HEADERS },

@@ -1,18 +1,11 @@
 import { isDriveResumableSessionUri } from "../domain/resumable-session-uri";
-import { isCanonicalUploadFileName } from "../domain/upload-filename";
+import { isCanonicalUploadFileName, uploadMimeTypeForFileName } from "../domain/upload-filename";
 
 const DATABASE_NAME = "ytb-vps-upload-v1";
 const DATABASE_VERSION = 1;
 const OBJECT_STORE = "sessions";
 const CHUNK_BYTES = 8_388_608;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"]);
-const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  mp4: "video/mp4",
-  mov: "video/quicktime",
-  mkv: "video/x-matroska",
-  webm: "video/webm",
-};
 
 export type StoredUploadSession = Readonly<{
   projectId: string;
@@ -66,15 +59,16 @@ function validFileIdentity(value: unknown): value is StoredUploadSession["fileId
     !isRecord(value) ||
     !hasExactKeys(value, ["displayName", "sizeBytes", "mimeType", "lastModified"]) ||
     !isCanonicalUploadFileName(value.displayName) ||
-    !MIME_TYPES.has(value.mimeType as string) ||
     !safeIntegerInRange(value.sizeBytes, 1, Number.MAX_SAFE_INTEGER) ||
     !safeIntegerInRange(value.lastModified, 0, Number.MAX_SAFE_INTEGER)
   ) {
     return false;
   }
 
-  const extension = value.displayName.slice(value.displayName.lastIndexOf(".") + 1).toLowerCase();
-  return MIME_BY_EXTENSION[extension] === value.mimeType;
+  // Single source of truth for the extension/MIME contract lives in the domain;
+  // a local copy here silently deleted users' sessions whenever the two drifted.
+  const expectedMime = uploadMimeTypeForFileName(value.displayName);
+  return expectedMime !== null && expectedMime === value.mimeType;
 }
 
 function validExpiration(value: unknown, now: Date): value is string {

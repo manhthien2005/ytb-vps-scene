@@ -4,6 +4,7 @@ import { createConfiguredUploadService } from "@/lib/application/configured-uplo
 import { parseServerEnv } from "@/lib/config/env";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { HttpError, readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const BODY_BYTES = 1_024;
@@ -21,7 +22,7 @@ function errorResponse(error: AppError): NextResponse {
 }
 
 function unexpectedErrorResponse(error: unknown): NextResponse {
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: RESPONSE_HEADERS },

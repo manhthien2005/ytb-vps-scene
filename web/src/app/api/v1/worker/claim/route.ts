@@ -7,6 +7,7 @@ import { createJobQueueService } from "@/lib/application/job-queue";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createConfiguredFreeTierHealthService } from "@/lib/application/configured-health";
 import { createConfiguredDrive } from "@/lib/application/configured-drive";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
       if (error.status === 204) return new NextResponse(null, { status: 204, headers: HEADERS });
       return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
     }
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

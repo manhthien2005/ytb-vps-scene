@@ -4,6 +4,7 @@ import type { JobSummary } from "@/lib/domain/control-plane";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { requireAdmin } from "@/lib/http/requests";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const RESPONSE_HEADERS = { "cache-control": "no-store" } as const;
@@ -37,7 +38,7 @@ function errorResponse(error: AppError): NextResponse {
 }
 
 function unexpectedErrorResponse(error: unknown): NextResponse {
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: RESPONSE_HEADERS },

@@ -44,7 +44,9 @@ export function createDriveUploadFetcher(): typeof fetch {
     xhr.onabort = () => finish(() => reject(new DOMException("The operation was aborted", "AbortError")));
 
     if (signal?.aborted) {
-      xhr.abort();
+      // xhr.abort() before send() fires no event, so the promise would never
+      // settle; reject immediately to match real fetch semantics.
+      finish(() => reject(new DOMException("The operation was aborted", "AbortError")));
       return;
     }
     signal?.addEventListener("abort", abortRequest, { once: true });

@@ -21,7 +21,15 @@ export async function requireWorkerSession(
   key: string,
   now: Date,
 ): Promise<WorkerView> {
-  const digest = digestBearerSecret(readWorkerBearer(request), key);
+  let digest: string;
+  try {
+    digest = digestBearerSecret(readWorkerBearer(request), key);
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    // A syntactically plausible but non-canonical bearer (43 chars whose last
+    // character carries stray bits) is an authentication failure, not a 500.
+    throw new AppError("WORKER_AUTH_REQUIRED", 401);
+  }
   const worker = await repository.authenticateWorker(digest, now);
   if (worker === null) throw new AppError("WORKER_SESSION_EXPIRED", 401);
   if (worker.state === "REVOKED") throw new AppError("WORKER_REVOKED", 401);

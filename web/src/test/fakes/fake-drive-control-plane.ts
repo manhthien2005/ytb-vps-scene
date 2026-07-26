@@ -198,6 +198,15 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return claim?.token === claimToken && claim.expiresAt > this.now().getTime();
   }
 
+  /** Mirrors the real repository's SOURCE fencing: a supplied token must match an
+   * unexpired claim; an omitted token is only valid when no claim is active. */
+  private assertSourceClaim(artifactId: string, claimToken: string | undefined, message: string): void {
+    const claim = this.provisioningClaims.get(`SOURCE:${artifactId}`);
+    const active = claim !== undefined && claim.expiresAt > this.now().getTime();
+    const owned = active && claim.token === claimToken;
+    if (claimToken !== undefined ? !owned : active) throw new Error(message);
+  }
+
   async markProjectFailed(projectId: string, claimToken: string): Promise<void> {
     if (
       this.ownsProvisioning("PROJECT", PROJECT_TREE_CLAIM_ID, claimToken) &&
@@ -370,7 +379,8 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return "RESERVED";
   }
 
-  async observeSourceProgress(artifactId: string, observedSizeBytes: number): Promise<number> {
+  async observeSourceProgress(artifactId: string, observedSizeBytes: number, claimToken?: string): Promise<number> {
+    this.assertSourceClaim(artifactId, claimToken, "Source progress cannot be observed");
     const capacity = this.sourceCapacities.get(artifactId);
     if (
       !capacity || capacity.released || !Number.isSafeInteger(observedSizeBytes) ||
@@ -458,7 +468,8 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     return artifact?.projectId === projectId ? structuredClone(artifact) : null;
   }
 
-  async markArtifactUploading(artifactId: string): Promise<void> {
+  async markArtifactUploading(artifactId: string, claimToken?: string): Promise<void> {
+    this.assertSourceClaim(artifactId, claimToken, "Artifact cannot start uploading");
     const artifact = this.artifacts.get(artifactId);
     if (!artifact || artifact.kind !== "SOURCE" || !["PENDING", "UPLOADING"].includes(artifact.status)) {
       throw new Error("Artifact cannot start uploading");
@@ -470,7 +481,9 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     artifactId: string,
     actualSizeBytes: number,
     verifiedAt: Date,
+    claimToken?: string,
   ): Promise<"CHANGED" | "REPLAY"> {
+    this.assertSourceClaim(artifactId, claimToken, "Source provisioning claim lost or source cannot become ready");
     const artifact = this.artifacts.get(artifactId);
     if (
       artifact?.kind === "SOURCE" && artifact.status === "READY" &&

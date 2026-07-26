@@ -91,7 +91,10 @@ async function readBoundedBytes(response: Response, maxBytes: number): Promise<U
     } catch {
       // Cancellation is best-effort; provider details must never escape.
     }
-    throw providerError("DRIVE_PROVIDER_REJECTED");
+    // Rethrow unwrapped: a mid-body abort or network drop is as transient as the
+    // same failure during the connection phase, so the caller's attempt loop must
+    // classify it retryable. Stable AppErrors (byte cap) already rethrew above.
+    throw error;
   }
 
   const bytes = new Uint8Array(size);

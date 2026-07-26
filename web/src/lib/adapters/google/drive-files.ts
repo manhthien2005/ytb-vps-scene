@@ -204,18 +204,24 @@ function boundedDriveTimestamp(value: unknown): value is string {
 function parseVideoMediaMetadata(value: unknown): VideoMediaMetadata | null {
   if (value === undefined) return { width: null, height: null, durationMillis: null };
   const record = objectRecord(value);
-  const width = record?.width;
-  const height = record?.height;
-  if (
-    !record ||
-    !hasExactKeys(record, ["width", "height", "durationMillis"]) ||
-    typeof width !== "number" || !Number.isSafeInteger(width) || width <= 0 ||
-    typeof height !== "number" || !Number.isSafeInteger(height) || height <= 0
-  ) {
+  // Drive commonly returns PARTIAL videoMediaMetadata (e.g. dimensions before the
+  // duration is extracted, or duration-only for some codecs): each field is
+  // independently nullable, and only present-but-invalid values or unknown keys
+  // are a remote mismatch.
+  if (!record || !hasOnlyKeys(record, ["width", "height", "durationMillis"])) return null;
+  const dimension = (item: unknown): number | null | undefined => {
+    if (item === undefined) return null;
+    if (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0) return undefined;
+    return item;
+  };
+  const width = dimension(record.width);
+  const height = dimension(record.height);
+  const durationMillis = record.durationMillis === undefined
+    ? null
+    : parseDriveInteger(record.durationMillis, 0);
+  if (width === undefined || height === undefined || (durationMillis === null && record.durationMillis !== undefined)) {
     return null;
   }
-  const durationMillis = parseDriveInteger(record.durationMillis, 0);
-  if (durationMillis === null) return null;
   return { width, height, durationMillis };
 }
 
@@ -320,9 +326,10 @@ function parseList(value: unknown): readonly unknown[] {
   const record = objectRecord(value);
   if (
     !record || !hasOnlyKeys(record, ["files", "nextPageToken"]) ||
-    !Array.isArray(record.files) || record.files.length > 17 ||
-    (record.nextPageToken !== undefined && !boundedAscii(record.nextPageToken, 1, 2_048)) ||
-    record.nextPageToken !== undefined || record.files.length > 16
+    // The invariant is simply: any pagination token (i.e. any 17th result) is a
+    // remote mismatch — the earlier >17/boundedAscii clauses were dead weight.
+    !Array.isArray(record.files) || record.files.length > 16 ||
+    record.nextPageToken !== undefined
   ) {
     throw remoteMismatch();
   }
@@ -436,7 +443,9 @@ async function readAndDiscardBounded(response: Response): Promise<void> {
     } catch {
       // Cancellation is best-effort; provider details must never escape.
     }
-    throw stableError("DRIVE_PROVIDER_REJECTED");
+    // Rethrow unwrapped so the caller's attempt loop treats mid-body transport
+    // failures as retryable, mirroring readBoundedBytes in http.ts.
+    throw error;
   }
 }
 

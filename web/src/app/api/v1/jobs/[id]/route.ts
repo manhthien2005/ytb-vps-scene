@@ -9,6 +9,7 @@ import {
   requireMutationOrigin,
 } from "@/lib/http/requests";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -25,7 +26,7 @@ function errorResponse(error: unknown): NextResponse {
       headers: HEADERS,
     });
   }
-  console.error("[api] unhandled error", error);
+  console.error("[api] unhandled error", redactSecrets(error));
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: HEADERS },

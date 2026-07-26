@@ -5,6 +5,7 @@ import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { readStrictJson } from "@/lib/http/requests";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
 import { createWorkerControlService } from "@/lib/application/worker-control";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -30,7 +31,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(await service.enroll(body, new Date()), { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

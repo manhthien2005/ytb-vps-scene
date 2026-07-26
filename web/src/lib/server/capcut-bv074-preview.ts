@@ -146,7 +146,9 @@ function task(data: unknown): Record<string, unknown> {
 }
 
 function firstAudioUrl(value: unknown): string | null {
-  if (typeof value === "string" && (value.startsWith("https://") || value.startsWith("http://"))) return value;
+  // Only surface candidates safeAudioTarget can accept (https-only): matching an
+  // http entry first would discard a viable https backup URL later in the payload.
+  if (typeof value === "string" && value.startsWith("https://")) return value;
   if (Array.isArray(value)) {
     for (const nested of value) {
       const found = firstAudioUrl(nested);
@@ -162,6 +164,30 @@ function firstAudioUrl(value: unknown): string | null {
   return null;
 }
 
+const MAX_PROVIDER_JSON_BYTES = 262_144;
+
+async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("CAPCUT_REQUEST_FAILED");
+    return JSON.parse(text) as unknown;
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("CAPCUT_REQUEST_FAILED");
+    }
+    chunks.push(value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
 async function postJson(url: string, body: unknown, device: Device, fetchImpl: typeof fetch, timeoutMs: number): Promise<unknown> {
   const bodyText = compactJson(body);
   try {
@@ -173,7 +199,9 @@ async function postJson(url: string, body: unknown, device: Device, fetchImpl: t
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) throw new Error("CAPCUT_REQUEST_FAILED");
-    return response.json();
+    // await + bounded read: body/parse failures must map to the stable code, and an
+    // untrusted endpoint must not stream an arbitrarily large body into memory.
+    return await readBoundedJson(response, MAX_PROVIDER_JSON_BYTES);
   } catch {
     throw new Error("CAPCUT_REQUEST_FAILED");
   }
@@ -269,10 +297,20 @@ async function loadDevice(): Promise<Device> {
   let raw: unknown;
   if (inline?.trim()) {
     const trimmed = inline.trim();
-    const text = trimmed.startsWith("{") ? trimmed : Buffer.from(trimmed, "base64").toString("utf8");
-    raw = JSON.parse(text);
+    try {
+      const text = trimmed.startsWith("{") ? trimmed : Buffer.from(trimmed, "base64").toString("utf8");
+      raw = JSON.parse(text);
+    } catch {
+      // Never let a raw SyntaxError escape: V8 embeds a snippet of the parsed
+      // source, which here is credential material.
+      throw new Error("CAPCUT_DEVICE_INVALID");
+    }
   } else if (path?.trim()) {
-    raw = JSON.parse(await readFile(path, "utf8"));
+    try {
+      raw = JSON.parse(await readFile(path, "utf8"));
+    } catch {
+      throw new Error("CAPCUT_DEVICE_INVALID");
+    }
   } else {
     throw new Error("CAPCUT_DEVICE_MISSING");
   }
@@ -310,14 +348,26 @@ export function createCapCutBv074Preview(dependencies: PreviewDependencies = {})
     const queryUrl = `${BASE}/lv/v1/common_task/query?${commonQuery(device, undefined, false).toString()}`;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const queryData = await postJson(queryUrl, { tasks: [{ bind_id: "", id: created.id, req_key: "sami_text_to_speech", task_version: "v3", token: created.token }] }, device, fetchImpl, requestTimeoutMs);
+      // A non-zero envelope or a terminal task failure will never become "succeed":
+      // fail fast instead of burning the full 20-attempt window on a dead task.
+      if ((queryData as { ret?: unknown }).ret !== "0") throw new Error("CAPCUT_TASK_REJECTED");
       const queried = task(queryData);
+      if (typeof queried.status === "string" && ["failed", "fail", "cancelled", "canceled"].includes(queried.status)) {
+        throw new Error("CAPCUT_TASK_REJECTED");
+      }
       if (queried.status === "succeed" && typeof queried.payload === "string") {
-        const audioUrl = firstAudioUrl(JSON.parse(queried.payload));
+        let payload: unknown;
+        try {
+          payload = JSON.parse(queried.payload);
+        } catch {
+          throw new Error("CAPCUT_AUDIO_MISSING");
+        }
+        const audioUrl = firstAudioUrl(payload);
         if (!audioUrl) throw new Error("CAPCUT_AUDIO_MISSING");
         const target = await safeAudioTarget(audioUrl, lookupImpl);
         return downloadAudioImpl(target.url, target.address, { timeoutMs: audioTimeoutMs, maxBytes: maxAudioBytes });
       }
-      await sleep(1000);
+      if (attempt < 19) await sleep(1000);
     }
     throw new Error("CAPCUT_QUERY_TIMEOUT");
   };

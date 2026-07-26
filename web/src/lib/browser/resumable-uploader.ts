@@ -215,6 +215,9 @@ export function createResumableUploader(
       currentRecord = initialRecord;
       let record = initialRecord;
       let failedAttempts = 0;
+      // Transfer-rate tracker for the published bytesPerSecond (feeds the upload ETA).
+      let lastAckedOffset = initialRecord.nextOffset;
+      let lastAckedAt = dependencies.now();
       const locallyExpired = Date.parse(record.expiresAt) <= dependencies.now();
       let action: "UPLOAD" | "COMPLETE" | "QUERY" | "RENEW" = record.nextOffset === file.size
         ? "COMPLETE"
@@ -292,6 +295,14 @@ export function createResumableUploader(
             status: 308,
             rangeVisible: rangeHeader !== null,
           });
+          if (rangeHeader === null) {
+            // A CORS-hidden Range on a 308 is ambiguous, not a regression: recover
+            // through QUERY like every other hidden-header case. (Parsing null as
+            // offset 0 used to hard-fail every mid-file chunk with REMOTE_MISMATCH.)
+            await recordFailure();
+            action = "QUERY";
+            continue;
+          }
           const nextOffset = parseAcknowledgedRange(rangeHeader);
           if (nextOffset < record.nextOffset || nextOffset > endExclusive) {
             throw new AppError("UPLOAD_REMOTE_MISMATCH", 409);
@@ -306,7 +317,14 @@ export function createResumableUploader(
           if (disposed || cancelRequested) return;
           failedAttempts = 0;
           currentRecord = record;
-          publish({ ...value, committedBytes: nextOffset });
+          const ackedAt = dependencies.now();
+          const elapsedMs = ackedAt - lastAckedAt;
+          const bytesPerSecond = elapsedMs > 0
+            ? Math.max(0, Math.round(((nextOffset - lastAckedOffset) * 1_000) / elapsedMs))
+            : value.bytesPerSecond;
+          lastAckedOffset = nextOffset;
+          lastAckedAt = ackedAt;
+          publish({ ...value, committedBytes: nextOffset, bytesPerSecond });
           action = nextOffset === file.size ? "COMPLETE" : "UPLOAD";
           verifying = action === "COMPLETE";
           continue;

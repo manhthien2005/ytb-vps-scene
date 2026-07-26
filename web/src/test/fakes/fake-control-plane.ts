@@ -14,7 +14,7 @@ import type {
 
 export class FakeControlPlaneRepository implements ControlPlaneRepository {
   readonly auditEvents: AuditEvent[] = [];
-  private readonly loginWindows = new Map<string, { startedAt: number; attempts: number }>();
+  private readonly loginWindows = new Map<string, { startedAt: number; attempts: number; blockedUntil?: number }>();
   private readonly jobsById: Map<string, JobSummary>;
 
   constructor(jobs: readonly JobSummary[] = []) {
@@ -87,16 +87,26 @@ export class FakeControlPlaneRepository implements ControlPlaneRepository {
   }
 
   async consumeLoginAttempt(keyHash: string, now: Date): Promise<LoginAttemptDecision> {
+    // Mirrors neon-control-plane: the block lasts 15 minutes from the BLOCKING
+    // attempt (not the window start), attempts stop counting while blocked, and
+    // retryAfterSeconds reports the actual remaining time.
     const timestamp = now.getTime();
     const existing = this.loginWindows.get(keyHash);
+    if (existing?.blockedUntil !== undefined && existing.blockedUntil > timestamp) {
+      return {
+        allowed: false,
+        retryAfterSeconds: Math.max(1, Math.ceil((existing.blockedUntil - timestamp) / 1000)),
+      };
+    }
     const window = !existing || timestamp - existing.startedAt >= 15 * 60 * 1000
-      ? { startedAt: timestamp, attempts: 0 }
+      ? { startedAt: timestamp, attempts: 0, blockedUntil: undefined as number | undefined }
       : existing;
     window.attempts += 1;
+    if (window.attempts > 5) window.blockedUntil = timestamp + 15 * 60 * 1000;
     this.loginWindows.set(keyHash, window);
     return window.attempts <= 5
       ? { allowed: true, retryAfterSeconds: 0 }
-      : { allowed: false, retryAfterSeconds: 900 };
+      : { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((window.blockedUntil! - timestamp) / 1000)) };
   }
 
   async clearLoginAttempts(keyHash: string): Promise<void> {

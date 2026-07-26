@@ -8,6 +8,7 @@ import { AppError } from "@/lib/domain/errors";
 import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
 const BODY_BYTES = 128;
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    console.error("[api] unhandled error", error);
+    console.error("[api] unhandled error", redactSecrets(error));
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: { "cache-control": "no-store" } });
   }
 }
