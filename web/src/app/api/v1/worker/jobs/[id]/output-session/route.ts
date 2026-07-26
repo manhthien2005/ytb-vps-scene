@@ -70,12 +70,17 @@ export async function POST(request: NextRequest, context: Context) {
       now: new Date(),
     });
     if (outcome === "LEASE_LOST") {
-      await drive.files.deleteFile(accessToken, driveFileId).catch(() => undefined);
+      // Never delete the Drive file here: artifactId derives only from
+      // (jobId, sizeBytes, checksum), so the CURRENT lease holder resolves to the
+      // same file via ensureOutputFile and may be uploading to it right now. An
+      // unfenced delete by a stale worker would destroy the active attempt's output;
+      // the file is reused (find-or-create) by any future attempt with this identity.
       throw new AppError("LEASE_LOST", 409);
     }
     return NextResponse.json({ artifactId, driveFileId, ...session }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

@@ -11,6 +11,8 @@ import { createConfiguredFreeTierHealthService } from "@/lib/application/configu
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
 const uuid = z.string().uuid();
+// Same contract as the sibling projects route's idempotency-key header.
+const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
 
 export async function POST(request: NextRequest, context: Context) {
@@ -20,20 +22,21 @@ export async function POST(request: NextRequest, context: Context) {
     requireMutationOrigin(request, env.appOrigin);
     const id = (await context.params).id;
     if (!uuid.safeParse(id).success) throw new HttpError(400, "INVALID_REQUEST");
-    const requestKey = request.headers.get("idempotency-key");
-    if (requestKey === null) throw new HttpError(400, "INVALID_REQUEST");
+    const requestKey = idempotencyKey.safeParse(request.headers.get("idempotency-key"));
+    if (!requestKey.success) throw new HttpError(400, "INVALID_REQUEST");
     const repository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
     const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const service = createJobQueueService({
       repository,
       health: createConfiguredFreeTierHealthService(env, driveRepository),
       pipelineBridgeVersion: env.workerPipelineBridgeVersion,
-      generateId: crypto.randomUUID,
+      generateId: () => crypto.randomUUID(),
     });
-    const job = await service.queueProject(id, requestKey, new Date());
+    const job = await service.queueProject(id, requestKey.data, new Date());
     return NextResponse.json({ job }, { status: 201, headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

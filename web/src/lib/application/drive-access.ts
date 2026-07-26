@@ -7,6 +7,16 @@ import type { CredentialCipher } from "@/lib/security/credential-cipher";
 
 const CREDENTIAL_ID = "1";
 const PROVIDER_TIMEOUT_MS = 5_000;
+// Google access tokens live ~1h; a short reuse window removes the per-request OAuth
+// grant (claim polls, upload sessions) while keeping the revocation blast radius small.
+const TOKEN_REUSE_MS = 5 * 60_000;
+
+type CachedAccessToken = Readonly<{ ciphertext: string; token: string; expiresAt: number }>;
+let cachedAccessToken: CachedAccessToken | null = null;
+
+export function resetDriveAccessTokenCache(): void {
+  cachedAccessToken = null;
+}
 
 type DriveAccessDependencies = Readonly<{
   repository: DriveControlPlaneRepository;
@@ -38,6 +48,16 @@ export function createDriveAccessProvider(
         throw new AppError("DRIVE_NOT_CONNECTED", 409);
       }
 
+      // Same envelope ciphertext means the same refresh token; the credential status
+      // above was still checked live, so disconnect/revoke takes effect immediately.
+      if (
+        cachedAccessToken !== null &&
+        cachedAccessToken.ciphertext === credential.envelope.ciphertext &&
+        Date.now() < cachedAccessToken.expiresAt
+      ) {
+        return cachedAccessToken.token;
+      }
+
       let refreshToken: string;
       try {
         refreshToken = dependencies.cipher.decrypt(CREDENTIAL_ID, credential.envelope);
@@ -59,6 +79,11 @@ export function createDriveAccessProvider(
         ) {
           throw new AppError("DRIVE_PROVIDER_REJECTED", 502);
         }
+        cachedAccessToken = {
+          ciphertext: credential.envelope.ciphertext,
+          token: accessToken,
+          expiresAt: Date.now() + TOKEN_REUSE_MS,
+        };
         return accessToken;
       } catch (error) {
         if (error instanceof AppError && error.code === "DRIVE_REAUTH_REQUIRED") {

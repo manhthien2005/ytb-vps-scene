@@ -80,13 +80,13 @@ export default async function HomePage() {
   const workerRepository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
   const now = new Date();
   await workerRepository.expireWorkersAndLeases(now);
-  const [jobs, credential, health, projects] = await Promise.all([
+  const [jobs, credential, health, projects, workers] = await Promise.all([
     createNeonControlPlaneRepository(env.databaseUrl).listJobs(),
     repository.getCredential(),
     healthService.getHealth(new Date()),
     repository.listProjects(),
+    workerRepository.listWorkers(now),
   ]);
-  const workers = await workerRepository.listWorkers(now);
   const healthView: FreeTierHealthView = {
     mode: health.mode,
     reasons: [...health.reasons],

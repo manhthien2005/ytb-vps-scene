@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useMemo, useRef, useState, type SVGProps } from "react";
-import type { JobSummary, JobState } from "@/lib/domain/control-plane";
+import { isActiveJobState, type JobSummary, type JobState } from "@/lib/domain/control-plane";
 import type { DriveConnectionView, FreeTierHealthView, PublicProject, UsageView, WorkerViewModel } from "./dashboard-types";
 import { DriveWorkspace } from "./drive-workspace";
 import { JobList } from "./job-list";
@@ -89,7 +89,11 @@ function projectSourceLabel(status: PublicProject["sourceStatus"]): string {
 
 function latestJobForProject(jobs: readonly JobSummary[], project: PublicProject | null): JobSummary | null {
   if (project === null) return null;
-  return jobs.find((job) => job.projectName === project.name) ?? null;
+  // Prefer the stable projectId linkage; fall back to name only for legacy
+  // summaries that predate the projectId column (names are not unique).
+  return jobs.find((job) => (
+    job.projectId != null ? job.projectId === project.id : job.projectName === project.name
+  )) ?? null;
 }
 
 function settingReadiness(project: PublicProject | null, job: JobSummary | null): string {
@@ -123,7 +127,9 @@ function jobEtaLabel(job: JobSummary | null): string {
 }
 
 function activeJobs(jobs: readonly JobSummary[]): readonly JobSummary[] {
-  return jobs.filter((job) => !["COMPLETED", "FAILED_FINAL", "CANCELLED", "DELETED"].includes(job.state));
+  // Domain-owned definition: excludes terminal states AND idle ones (DRAFT, READY,
+  // PAUSED_*, REVIEW_READY), which the hand-rolled list here used to count as running.
+  return jobs.filter((job) => isActiveJobState(job.state));
 }
 
 function storagePercent(snapshot: UsageView | null): number | null {
@@ -267,12 +273,17 @@ export function DashboardShell({ workerOnline, jobs, drive, health, projects, wo
 
   async function logout(): Promise<void> {
     setLogoutMessage(null);
-    const response = await fetch("/api/v1/auth/logout", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { origin: window.location.origin },
-    });
-    if (!response.ok) {
+    try {
+      const response = await fetch("/api/v1/auth/logout", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { origin: window.location.origin },
+      });
+      if (!response.ok) {
+        setLogoutMessage("Chưa đăng xuất được. Hãy thử lại.");
+        return;
+      }
+    } catch {
       setLogoutMessage("Chưa đăng xuất được. Hãy thử lại.");
       return;
     }

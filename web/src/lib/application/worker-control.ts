@@ -131,7 +131,10 @@ export function createWorkerControlService(dependencies: WorkerControlDependenci
     list: (now: Date) => dependencies.repository.listWorkers(now),
 
     async revoke(workerId: string, now: Date): Promise<void> {
-      await dependencies.repository.revokeWorker(workerId, now);
+      const revoked = await dependencies.repository.revokeWorker(workerId, now);
+      // Revoke is an emergency control: reporting success for a mistyped or stale
+      // worker id would leave the intended session authenticating undisturbed.
+      if (!revoked) throw new AppError("INVALID_REQUEST", 404);
     },
   };
 }

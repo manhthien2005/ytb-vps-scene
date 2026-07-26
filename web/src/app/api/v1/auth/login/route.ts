@@ -67,6 +67,15 @@ async function readLoginBody(request: NextRequest): Promise<LoginBodyResult> {
 }
 
 export async function POST(request: NextRequest) {
+  try {
+    return await handleLogin(request);
+  } catch (error) {
+    console.error("[api] unhandled error", error);
+    return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500 });
+  }
+}
+
+async function handleLogin(request: NextRequest) {
   const env = parseServerEnv(process.env);
   if (request.headers.get("origin") !== env.appOrigin) {
     return NextResponse.json({ code: "ORIGIN_REJECTED" }, { status: 403 });

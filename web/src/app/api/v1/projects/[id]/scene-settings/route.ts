@@ -13,6 +13,7 @@ type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
 
 function errorResponse(error: unknown) {
   if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+  console.error("[api] unhandled error", error);
   return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
 }
 
@@ -44,13 +45,24 @@ export async function PUT(request: NextRequest, context: Context) {
     requireMutationOrigin(request, env.appOrigin);
     const id = await projectId(context);
     const body = await readStrictJson(request, z.object({ settings: z.unknown() }).strict(), 4_096);
-    const settings = parseSceneSettings(body.settings);
+    let settings: ReturnType<typeof parseSceneSettings>;
+    try {
+      settings = parseSceneSettings(body.settings);
+    } catch {
+      throw new HttpError(400, "INVALID_REQUEST");
+    }
     const sql = createSql(env.databaseUrl);
-    await sql.query(
-      `insert into project_scene_settings(project_id,settings,updated_at) values ($1,$2::jsonb,now())
-       on conflict(project_id) do update set settings=excluded.settings,updated_at=excluded.updated_at`,
-      [id, JSON.stringify(settings)],
-    );
+    try {
+      await sql.query(
+        `insert into project_scene_settings(project_id,settings,updated_at) values ($1,$2::jsonb,now())
+         on conflict(project_id) do update set settings=excluded.settings,updated_at=excluded.updated_at`,
+        [id, JSON.stringify(settings)],
+      );
+    } catch (error) {
+      // Foreign-key violation: the project row no longer exists (stale tab, deleted project).
+      if ((error as { code?: unknown }).code === "23503") throw new HttpError(404, "INVALID_REQUEST");
+      throw error;
+    }
     return NextResponse.json({ settings }, { headers: HEADERS });
   } catch (error) {
     return errorResponse(error);

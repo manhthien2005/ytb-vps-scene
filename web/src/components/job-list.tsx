@@ -57,7 +57,9 @@ function formatEta(seconds: number): string {
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
-  return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 ** 3) return `${Math.round(bytes / 1024 ** 2)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 }
 
 function firstLine(text: string | null | undefined): string | null {
@@ -81,6 +83,9 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
   const [detailData, setDetailData] = useState<JobDetailReadModel | null>(null);
   const [detailError, setDetailError] = useState(false);
   const lastFocusRef = useRef<HTMLElement | null>(null);
+  // Bumped on every openDetail/closeDetail so a slow response for a previously
+  // opened job can never fill (or reopen) the sheet for a different job.
+  const detailGenerationRef = useRef(0);
   const fetcherRef = useRef(fetcher);
   useEffect(() => {
     fetcherRef.current = fetcher;
@@ -100,6 +105,7 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
         const r = await fetcherRef.current("/api/v1/jobs", { cache: "no-store", credentials: "same-origin" });
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d: { jobs: readonly JobSummary[] } = await r.json();
+        if (!Array.isArray(d.jobs)) throw new Error("MALFORMED_JOBS_PAYLOAD");
         setDisplayJobs(d.jobs);
         setPollError(false);
       } catch {
@@ -107,6 +113,9 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
         backoffTicksRef.current = BACKOFF_MS / POLL_MS - 1;
       }
     };
+    // Refresh immediately: the component is remounted on every surface switch and
+    // would otherwise show the page-load SSR snapshot for up to 15s.
+    void poll();
     const id = setInterval(() => { void poll(); }, POLL_MS);
     return () => clearInterval(id);
   }, []);
@@ -167,6 +176,7 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
 
   function openDetail(jid: string, name: string) {
     lastFocusRef.current = document.activeElement as HTMLElement;
+    const generation = ++detailGenerationRef.current;
     setDetail({ id: jid, name });
     setDetailData(null);
     setDetailError(false);
@@ -174,12 +184,23 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
     setQueueMsg(null);
     fetcherRef.current(`/api/v1/jobs/${jid}`, { cache: "no-store", credentials: "same-origin" })
       .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json() as Promise<{ job: JobDetailReadModel }>; })
-      .then((d) => { setDetailData(d.job); setDetailError(false); })
-      .catch(() => { setDetailError(true); })
-      .finally(() => setDetailLoading(false));
+      .then((d) => {
+        if (detailGenerationRef.current !== generation) return;
+        setDetailData(d.job);
+        setDetailError(false);
+      })
+      .catch(() => {
+        if (detailGenerationRef.current !== generation) return;
+        setDetailError(true);
+      })
+      .finally(() => {
+        if (detailGenerationRef.current !== generation) return;
+        setDetailLoading(false);
+      });
   }
 
   const closeDetail = useCallback(() => {
+    detailGenerationRef.current += 1;
     setDetail(null);
     setDetailData(null);
     setDetailError(false);
@@ -216,10 +237,8 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
           const ph = j.activePhase != null
             ? `Pha: ${cap(j.activePhase)}${j.phaseProgressPercent != null ? ` (${j.phaseProgressPercent}%)` : ""}`
             : null;
-          const workerLabel = (j as Record<string, unknown>).workerSummary as
-            | { accountLabel: string }
-            | undefined;
-          const output = (j as Record<string, unknown>).outputMetadata as unknown;
+          const workerLabel = j.workerSummary?.accountLabel ?? null;
+          const outputReady = j.outputMetadata != null;
           return (
             <li key={j.id} aria-label={`Job ${j.projectName}`}>
               <div>
@@ -236,8 +255,8 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
                   <div style={{ width: `${j.progressPercent}%` }} />
                 </div>
                 <span>{j.etaSeconds != null ? formatEta(j.etaSeconds) : "Chưa có ước tính thời gian"}</span>
-                <span>Worker: {workerLabel?.accountLabel ?? ""}</span>
-                <span>Output: {output != null ? "Đã sẵn sàng" : "Chưa sẵn sàng"}</span>
+                {workerLabel !== null && <span>Worker: {workerLabel}</span>}
+                <span>Output: {outputReady ? "Đã sẵn sàng" : "Chưa sẵn sàng"}</span>
                 <time dateTime={j.updatedAt}>Cập nhật {new Date(j.updatedAt).toLocaleString("vi-VN")}</time>
               </div>
               <div>

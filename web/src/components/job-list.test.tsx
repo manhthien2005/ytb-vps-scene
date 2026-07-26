@@ -148,6 +148,19 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+// JobList polls /api/v1/jobs once on mount; tests route that URL separately from the
+// endpoint under test so the mount poll never consumes a scripted response.
+function routedFetcher(
+  jobs: readonly JobSummary[],
+  other: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/v1/jobs") return jsonResponse({ jobs });
+    return other(url, init);
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -159,6 +172,7 @@ describe("JobList", () => {
       <JobList
         jobs={[]}
         projects={[READY_PROJECT, MISSING_SOURCE_PROJECT]}
+        fetcher={routedFetcher([], () => jsonResponse({}, 404))}
       />,
     );
 
@@ -170,7 +184,7 @@ describe("JobList", () => {
 
   it("queues through the project endpoint and suppresses repeated pending clicks", async () => {
     let resolveQueue!: (response: Response) => void;
-    const fetcher = vi.fn<typeof fetch>(() => new Promise((resolve) => {
+    const fetcher = routedFetcher([], () => new Promise((resolve) => {
       resolveQueue = resolve;
     }));
     render(<JobList jobs={[]} projects={[READY_PROJECT]} fetcher={fetcher} />);
@@ -179,8 +193,9 @@ describe("JobList", () => {
     fireEvent.click(queueButton);
     fireEvent.click(queueButton);
 
+    const queueCalls = fetcher.mock.calls.filter(([url]) => String(url).includes("/jobs") && String(url) !== "/api/v1/jobs");
     expect(queueButton).toBeDisabled();
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(queueCalls).toHaveLength(1);
     expect(fetcher).toHaveBeenCalledWith(
       `/api/v1/projects/${READY_PROJECT.id}/jobs`,
       expect.objectContaining({
@@ -196,7 +211,13 @@ describe("JobList", () => {
   });
 
   it("shows progress, phase, ETA, worker, output, timestamps, and a bounded error state", () => {
-    render(<JobList jobs={[ACTIVE_JOB, FAILED_JOB]} projects={[]} />);
+    render(
+      <JobList
+        jobs={[ACTIVE_JOB, FAILED_JOB]}
+        projects={[]}
+        fetcher={routedFetcher([ACTIVE_JOB, FAILED_JOB], () => jsonResponse({}, 404))}
+      />,
+    );
 
     const activeRow = screen.getByRole("listitem", { name: `Job ${ACTIVE_JOB.projectName}` });
     expect(within(activeRow).getByText("Đang render")).toBeVisible();
@@ -215,7 +236,7 @@ describe("JobList", () => {
   });
 
   it("fetches detail on demand and renders only allowed settings, metadata, telemetry, and actions", async () => {
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ job: DETAIL }));
+    const fetcher = routedFetcher([ACTIVE_JOB], () => jsonResponse({ job: DETAIL }));
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
 
     fireEvent.click(screen.getByRole("button", { name: `Xem chi tiết ${ACTIVE_JOB.projectName}` }));
@@ -240,9 +261,11 @@ describe("JobList", () => {
   });
 
   it("keeps the detail panel open with a recoverable error", async () => {
-    const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ code: "INTERNAL_ERROR" }, 500))
-      .mockResolvedValueOnce(jsonResponse({ job: DETAIL }));
+    const detailResponses = [
+      () => jsonResponse({ code: "INTERNAL_ERROR" }, 500),
+      () => jsonResponse({ job: DETAIL }),
+    ];
+    const fetcher = routedFetcher([ACTIVE_JOB], () => (detailResponses.shift() ?? (() => jsonResponse({ job: DETAIL })))());
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
 
     fireEvent.click(screen.getByRole("button", { name: `Xem chi tiết ${ACTIVE_JOB.projectName}` }));
@@ -264,13 +287,16 @@ describe("JobList", () => {
     const confirm = vi.spyOn(window, "confirm")
       .mockReturnValueOnce(false)
       .mockReturnValueOnce(true);
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ outcome: "REQUESTED" }));
+    const fetcher = routedFetcher([ACTIVE_JOB, completedJob], () => jsonResponse({ outcome: "REQUESTED" }));
     render(<JobList jobs={[ACTIVE_JOB, completedJob]} projects={[]} fetcher={fetcher} />);
     const cancel = screen.getByRole("button", { name: `Hủy job ${ACTIVE_JOB.projectName}` });
 
     expect(screen.queryByRole("button", { name: `Hủy job ${completedJob.projectName}` })).not.toBeInTheDocument();
     fireEvent.click(cancel);
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalledWith(
+      `/api/v1/jobs/${ACTIVE_JOB.id}`,
+      expect.objectContaining({ method: "POST" }),
+    );
     fireEvent.click(cancel);
 
     expect(confirm).toHaveBeenCalledWith(`Hủy job "${ACTIVE_JOB.projectName}"?`);
@@ -288,7 +314,7 @@ describe("JobList", () => {
 
   it("does not change visible state when cancellation fails", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ outcome: "NOT_CANCELABLE" }));
+    const fetcher = routedFetcher([ACTIVE_JOB], () => jsonResponse({ outcome: "NOT_CANCELABLE" }));
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
 
     fireEvent.click(screen.getByRole("button", { name: `Hủy job ${ACTIVE_JOB.projectName}` }));
@@ -298,7 +324,7 @@ describe("JobList", () => {
     expect(screen.getByRole("button", { name: `Hủy job ${ACTIVE_JOB.projectName}` })).toBeEnabled();
   });
 
-  it("polls conservatively with no-store and lets manual refresh update the retained list", async () => {
+  it("refreshes on mount, polls conservatively with no-store, and lets manual refresh update the retained list", async () => {
     vi.useFakeTimers();
     const refreshedJob = {
       ...ACTIVE_JOB,
@@ -306,26 +332,33 @@ describe("JobList", () => {
       etaSeconds: 30,
       updatedAt: "2026-07-25T01:16:00.000Z",
     };
-    const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ jobs: [refreshedJob] }))
-      .mockResolvedValueOnce(jsonResponse({ jobs: [FAILED_JOB] }));
+    const listResponses = [
+      () => jsonResponse({ jobs: [ACTIVE_JOB] }),
+      () => jsonResponse({ jobs: [refreshedJob] }),
+      () => jsonResponse({ jobs: [FAILED_JOB] }),
+    ];
+    const fetcher = vi.fn<typeof fetch>(async () => (listResponses.shift() ?? (() => jsonResponse({ jobs: [FAILED_JOB] })))());
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(14_999); });
-    expect(fetcher).not.toHaveBeenCalled();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-
+    // Mount refresh fires immediately; the interval waits the full 15s after it.
+    await act(async () => {});
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/v1/jobs",
       expect.objectContaining({ cache: "no-store", credentials: "same-origin" }),
     );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(14_999); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("progressbar", { name: `Tiến độ ${ACTIVE_JOB.projectName}` })).toHaveAttribute("aria-valuenow", "81");
 
     fireEvent.click(screen.getByRole("button", { name: "Làm mới danh sách job" }));
     // waitFor cannot advance vitest fake timers — flush the fetch chain via act instead
     await act(async () => {});
     expect(screen.getByText(FAILED_JOB.projectName)).toBeVisible();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the last success and backs polling off after an error", async () => {
@@ -335,12 +368,16 @@ describe("JobList", () => {
       .mockResolvedValueOnce(jsonResponse({ jobs: [FAILED_JOB] }));
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    // The mount refresh fails; the SSR list is retained with a warning.
+    await act(async () => {});
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(screen.getByText(ACTIVE_JOB.projectName)).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("Đang giữ danh sách gần nhất");
 
+    // The 15s tick inside the backoff window is skipped…
     await act(async () => { await vi.advanceTimersByTimeAsync(29_999); });
     expect(fetcher).toHaveBeenCalledTimes(1);
+    // …and the tick 30s after the failure retries.
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -353,7 +390,7 @@ describe("JobList", () => {
     vi.useFakeTimers();
     let visibility: DocumentVisibilityState = "visible";
     vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ job: DETAIL }));
+    const fetcher = routedFetcher([ACTIVE_JOB], () => jsonResponse({ job: DETAIL }));
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
     const detailButton = screen.getByRole("button", { name: `Xem chi tiết ${ACTIVE_JOB.projectName}` });
     detailButton.focus();
@@ -370,6 +407,7 @@ describe("JobList", () => {
     visibility = "hidden";
     fireEvent(document, new Event("visibilitychange"));
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    // Only the mount refresh and the detail fetch — hidden-tab ticks never fire.
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

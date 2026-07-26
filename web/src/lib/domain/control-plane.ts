@@ -79,6 +79,10 @@ export type JobSummary = Readonly<{
   state: JobState;
   progressPercent: number;
   updatedAt: string;
+  /** Stable project linkage; prefer this over projectName (names are not unique). */
+  projectId?: string | null;
+  workerSummary?: Readonly<{ id: string; state: WorkerState; accountLabel: string | null }> | null;
+  outputMetadata?: Readonly<{ artifactId: string | null; sizeBytes: number | null }> | null;
   settingsSnapshot?: SceneSettings | null;
   sourceMetadata?: JobSourceMetadata | null;
   activePhase?: string | null;
@@ -109,4 +113,14 @@ export function isTerminalJobState(state: string): state is JobState {
 
 export function isCancelableJobState(state: string): state is JobState {
   return next[state as JobState]?.includes("CANCEL_REQUESTED") ?? false;
+}
+
+const active = new Set<JobState>([
+  "QUEUED", "CLAIMED", "DOWNLOADING", "OCR", "TRANSLATE", "TTS", "RENDER",
+  "UPLOADING", "CANCEL_REQUESTED",
+]);
+
+/** States where the pipeline is genuinely executing or queued to execute. */
+export function isActiveJobState(state: string): state is JobState {
+  return active.has(state as JobState);
 }

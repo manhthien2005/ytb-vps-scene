@@ -36,6 +36,7 @@ const VI_MESSAGES: Readonly<Record<string, string>> = {
   UPLOAD_TOO_LARGE: "Video vượt quá giới hạn 10 GiB.",
   UPLOAD_TYPE_REJECTED: "Chỉ nhận video MP4, MOV, MKV hoặc WEBM.",
   UPLOAD_LOCAL_CLEANUP_FAILED: "Chưa thể dọn phiên tải cục bộ. Hãy bấm Dừng và huỷ để thử lại.",
+  INDEXEDDB_UNAVAILABLE: "Trình duyệt đang chặn bộ nhớ cục bộ (IndexedDB) nên chưa thể tải lên. Hãy tắt chế độ chặn hoặc dùng trình duyệt khác.",
 };
 
 const EMPTY_SNAPSHOT: UploadSnapshot = {
@@ -173,7 +174,11 @@ export function useUploadQueue({
   const cleanupRequiredRef = useRef(new Set<string>());
   const cancellationsInProgressRef = useRef(new Set<string>());
 
-  const anyUploading = items.some((item) => item.state === "ACTIVE" && item.snapshot.phase === "UPLOADING");
+  // VERIFYING is still in-flight work (the complete() retry loop); closing the tab
+  // there would abandon an upload whose bytes are already fully transferred.
+  const anyUploading = items.some((item) =>
+    item.state === "ACTIVE" &&
+    (item.snapshot.phase === "UPLOADING" || item.snapshot.phase === "VERIFYING"));
 
   useEffect(() => {
     let active = true;
@@ -368,7 +373,8 @@ export function useUploadQueue({
     let projectId = item.projectId;
     try {
       const identity = fileIdentity(item.file, item.mimeType);
-      if (identity === null || store === null) throw new Error("UPLOAD_TYPE_REJECTED");
+      if (identity === null) throw new Error("UPLOAD_TYPE_REJECTED");
+      if (store === null) throw new Error("INDEXEDDB_UNAVAILABLE");
       const recovery = matchingRecovery(recoveriesRef.current, item.file, item.mimeType);
       if (recovery !== null) {
         projectId = recovery.projectId;
@@ -386,12 +392,9 @@ export function useUploadQueue({
           return;
         }
         if (project.status !== "READY") throw new Error("DRIVE_TEMPORARILY_UNAVAILABLE");
-        const body = await jsonRequest(fetcher, `/api/v1/projects/${project.id}/upload-session`, {
-          fileName: identity.displayName,
-          mimeType: identity.mimeType,
-          sizeBytes: identity.sizeBytes,
-          lastModified: identity.lastModified,
-        });
+        // Session creation goes through the same api used for mid-upload renewal so
+        // the request contract lives in exactly one place.
+        const body = await controlPlaneApi(fetcher).renewSession(project.id, identity);
         if (pendingCancellationsRef.current.has(item.id)) {
           await settleProvisioningCancellation(
             item.id,
@@ -400,7 +403,8 @@ export function useUploadQueue({
           );
           return;
         }
-        if (body.status === "SOURCE_READY") {
+        if ("status" in body) {
+          if (body.status !== "SOURCE_READY") throw new Error("UPLOAD_REMOTE_MISMATCH");
           patchItem(item.id, {
             snapshot: {
               phase: "READY",
@@ -543,7 +547,10 @@ export function useUploadQueue({
         await pump();
         return;
       }
-      patchItem(id, { message: uploadMessageForCode(error instanceof Error ? error.message : null) });
+      const code = error instanceof Error ? error.message : null;
+      // Mirror runItem's catch: the dashboard project row must reflect the failure.
+      if (code === "DRIVE_PROVIDER_REJECTED") updateProjectSource(item.projectId, "UPLOAD_FAILED");
+      patchItem(id, { message: uploadMessageForCode(code) });
     }
     if (currentItem(id)?.state !== "ACTIVE") await pump();
   }

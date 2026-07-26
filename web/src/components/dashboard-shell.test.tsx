@@ -96,6 +96,42 @@ describe("DashboardShell", () => {
     expect(within(workerRegion).getByText("Chưa gắn")).toBeVisible();
   });
 
+  it("associates jobs to projects by projectId so duplicate names cannot cross-attribute", () => {
+    const shared = {
+      status: "READY" as const,
+      sourceStatus: "SOURCE_READY" as const,
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:00:00.000Z",
+    };
+    render(
+      <DashboardShell
+        workerOnline
+        drive={{ status: "CONNECTED", accountHint: null, rootReady: true }}
+        health={health}
+        projects={[
+          { ...shared, id: "10000000-0000-4000-8000-000000000001", name: "video.mp4" },
+          { ...shared, id: "10000000-0000-4000-8000-000000000002", name: "video.mp4" },
+        ]}
+        jobs={[{
+          id: "j1",
+          projectId: "10000000-0000-4000-8000-000000000002",
+          projectName: "video.mp4",
+          state: "RENDER",
+          progressPercent: 42,
+          updatedAt: "2026-07-19T00:00:00Z",
+        }]}
+        workers={[]}
+      />,
+    );
+
+    const projectTable = screen.getByLabelText("Danh sách dự án");
+    // Only the second project (the job's real owner) shows the running job; the
+    // first same-named project must not inherit it. The job-less row renders
+    // "Chưa có job" in both its job and ETA cells.
+    expect(within(projectTable).getAllByText("Render · 42%")).toHaveLength(1);
+    expect(within(projectTable).getAllByText("Chưa có job")).toHaveLength(2);
+  });
+
   it("guides a source-ready video through setup before monitoring its job", () => {
     render(
       <DashboardShell

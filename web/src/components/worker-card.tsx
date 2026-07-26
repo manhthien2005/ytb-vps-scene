@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { WorkerViewModel } from "./dashboard-types";
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -29,7 +29,11 @@ export function WorkerCard({
   const [setupPercent, setSetupPercent] = useState(0);
   const [setupBusy, setSetupBusy] = useState(false);
 
-  useEffect(() => () => setCommand(null), []);
+  // The setup SSE stream must die with the component: without this, a setup left
+  // running in the background fires onWorkerChange (a full page reload by default)
+  // minutes later while the user is editing elsewhere.
+  const setupAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => setupAbortRef.current?.abort(), []);
 
   function applyEvent(event: { stage?: string; percent?: number; message?: string }) {
     if (event.stage) setSetupStage(event.stage);
@@ -38,18 +42,21 @@ export function WorkerCard({
     if (event.stage === "READY") onWorkerChange();
   }
 
-  async function streamSetupEvents(response: Response) {
+  async function streamSetupEvents(response: Response, signal: AbortSignal) {
     // Parse the SSE stream incrementally so each stage renders as it arrives, instead
     // of buffering the whole response and only showing the terminal event.
     const reader = response.body?.getReader();
     if (!reader) {
-      for (const line of (await response.text()).split("\n")) parseSetupLine(line);
+      const text = await response.text();
+      if (signal.aborted) return;
+      for (const line of text.split("\n")) parseSetupLine(line);
       return;
     }
     const decoder = new TextDecoder();
     let buffer = "";
     for (;;) {
       const { done, value } = await reader.read();
+      if (signal.aborted) return;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
@@ -67,26 +74,34 @@ export function WorkerCard({
   }
 
   async function createCommand() {
-    const response = await fetcher("/api/v1/workers/enrollment", { method: "POST", headers: { origin: window.location.origin } });
-    if (!response.ok) {
+    try {
+      const response = await fetcher("/api/v1/workers/enrollment", { method: "POST", headers: { origin: window.location.origin } });
+      if (!response.ok) {
+        setMessage("Không tạo được lệnh gắn VPS.");
+        return;
+      }
+      const body = await response.json() as { command?: string; expiresAt?: string };
+      if (typeof body.command !== "string" || typeof body.expiresAt !== "string") {
+        setMessage("Phản hồi gắn VPS không hợp lệ.");
+        return;
+      }
+      setCommand(body.command);
+      setExpiresAt(body.expiresAt);
+      setMessage("Lệnh chỉ hiển thị trong phiên này và sẽ tự hết hạn.");
+    } catch {
       setMessage("Không tạo được lệnh gắn VPS.");
-      return;
     }
-    const body = await response.json() as { command?: string; expiresAt?: string };
-    if (typeof body.command !== "string" || typeof body.expiresAt !== "string") {
-      setMessage("Phản hồi gắn VPS không hợp lệ.");
-      return;
-    }
-    setCommand(body.command);
-    setExpiresAt(body.expiresAt);
-    setMessage("Lệnh chỉ hiển thị trong phiên này và sẽ tự hết hạn.");
   }
 
   async function copyCommand() {
     if (command === null) return;
-    const target = clipboard ?? navigator.clipboard;
-    await target.writeText(command);
-    setMessage("Đã sao chép lệnh.");
+    try {
+      const target = clipboard ?? navigator.clipboard;
+      await target.writeText(command);
+      setMessage("Đã sao chép lệnh.");
+    } catch {
+      setMessage("Chưa sao chép được. Hãy bấm vào trang rồi thử lại.");
+    }
   }
 
   async function revoke(workerId: string) {
@@ -115,6 +130,9 @@ export function WorkerCard({
     if (!sshCommand.trim() || !password) { setMessage("Nhập SSH command và mật khẩu VPS trước."); return; }
     setSetupBusy(true);
     setSetupStage("CONNECTING"); setSetupPercent(5); setMessage("Đang xin phiên setup an toàn…");
+    setupAbortRef.current?.abort();
+    const controller = new AbortController();
+    setupAbortRef.current = controller;
     try {
       const enrollment = await fetcher("/api/v1/workers/enrollment", { method: "POST", headers: { origin: window.location.origin } });
       if (!enrollment.ok) { setSetupStage("FAILED"); setMessage("Không tạo được phiên setup worker."); return; }
@@ -125,20 +143,27 @@ export function WorkerCard({
         method: "POST",
         headers: { "content-type": "application/json", origin: window.location.origin },
         body: JSON.stringify({ sshCommand, password, originNonce, bootstrapCommand: enrollmentBody.command }),
+        signal: controller.signal,
       }).catch(() => null);
       setPassword("");
+      if (controller.signal.aborted) return;
       if (!connector?.ok) { setSetupStage("FAILED"); setMessage("Chưa kết nối được Local VPS Connector. Hãy mở connector trên máy này rồi thử lại."); return; }
       const job = await connector.json() as { jobId?: string };
       if (typeof job.jobId !== "string") { setSetupStage("FAILED"); setMessage("Connector trả về mã setup không hợp lệ."); return; }
-      const events = await connectorFetcher(`${CONNECTOR_URL}/setup/${job.jobId}/events`, { headers: { accept: "text/event-stream", origin: window.location.origin } }).catch(() => null);
+      const events = await connectorFetcher(`${CONNECTOR_URL}/setup/${job.jobId}/events`, {
+        headers: { accept: "text/event-stream", origin: window.location.origin },
+        signal: controller.signal,
+      }).catch(() => null);
+      if (controller.signal.aborted) return;
       if (!events?.ok) { setSetupStage("FAILED"); setMessage("Không đọc được tiến trình setup VPS."); return; }
-      await streamSetupEvents(events);
+      await streamSetupEvents(events, controller.signal);
     } catch {
+      if (controller.signal.aborted) return;
       setSetupStage("FAILED");
       setMessage("Setup VPS bị gián đoạn. Kiểm tra kết nối rồi thử lại.");
     } finally {
       setPassword("");
-      setSetupBusy(false);
+      if (!controller.signal.aborted) setSetupBusy(false);
     }
   }
 

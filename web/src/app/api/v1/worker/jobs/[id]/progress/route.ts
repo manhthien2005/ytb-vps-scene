@@ -6,7 +6,9 @@ import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { readStrictJson } from "@/lib/http/requests";
 import { requireWorkerSession } from "@/lib/http/worker-auth";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
+import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createJobQueueService } from "@/lib/application/job-queue";
+import { createConfiguredFreeTierHealthService } from "@/lib/application/configured-health";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -37,12 +39,18 @@ export async function POST(request: NextRequest, context: Context) {
     const repository = createNeonWorkerControlPlaneRepository(env.databaseUrl);
     const worker = await requireWorkerSession(request, repository, env.workerAuthKeyV1, new Date());
     const body = await readStrictJson(request, schema, 2_048);
-    const service = createJobQueueService({ repository, health: {} as never, pipelineBridgeVersion: env.workerPipelineBridgeVersion, generateId: crypto.randomUUID });
+    const service = createJobQueueService({
+      repository,
+      health: createConfiguredFreeTierHealthService(env, createNeonDriveControlPlaneRepository(env.databaseUrl)),
+      pipelineBridgeVersion: env.workerPipelineBridgeVersion,
+      generateId: () => crypto.randomUUID(),
+    });
     const { id } = await context.params;
     await service.progress(worker, { ...body, jobId: id }, new Date());
     return NextResponse.json({ status: "UPDATED" }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

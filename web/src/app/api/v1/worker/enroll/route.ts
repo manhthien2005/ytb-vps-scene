@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(await service.enroll(body, new Date()), { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

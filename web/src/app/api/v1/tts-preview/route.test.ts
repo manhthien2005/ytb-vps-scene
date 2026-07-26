@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "@/lib/domain/errors";
 
 const { env, requireAdmin, requireMutationOrigin, synthesize } = vi.hoisted(() => ({
@@ -22,6 +22,10 @@ vi.mock("@/lib/server/capcut-bv074-preview", () => ({ synthesizeCapCutBv074Previ
 import { POST } from "./route";
 
 describe("POST /api/v1/tts-preview", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("requires admin before calling CapCut", async () => {
     requireAdmin.mockRejectedValueOnce(new AppError("AUTH_REQUIRED", 401));
     const response = await POST(new Request("https://app.example/api/v1/tts-preview", { method: "POST", body: JSON.stringify({ text: "xin chào", rate: 1 }) }) as never);
@@ -41,7 +45,7 @@ describe("POST /api/v1/tts-preview", () => {
   it("rejects client supplied voice and invalid text", async () => {
     const response = await POST(new Request("https://app.example/api/v1/tts-preview", { method: "POST", body: JSON.stringify({ text: "", rate: 1, voice: "vi-VN-HoaiMyNeural" }) }) as never);
     expect(response.status).toBe(400);
-    expect(synthesize).toHaveBeenCalledTimes(1);
+    expect(synthesize).not.toHaveBeenCalled();
   });
 
   it("maps CapCut failures to one public error", async () => {

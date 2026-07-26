@@ -188,6 +188,32 @@ function parseJobSummaryRow(row: Record<string, unknown>): JobSummary {
   const summary: JobSummary = Object.freeze({
     id: boundedText(row.id, "job id", 1, 256),
     projectName,
+    // Optional expansion columns: emitted only when the query selected them, so
+    // narrower selects (queue inserts, legacy rows) keep parsing unchanged.
+    ...(row.project_id !== undefined
+      ? { projectId: nullableText(row.project_id, "job project id", 1, 256) }
+      : {}),
+    ...("worker_id" in row
+      ? {
+        workerSummary: row.worker_id === null || row.worker_id === undefined
+          ? null
+          : Object.freeze({
+            id: boundedText(String(row.worker_id), "worker id", 1, 256),
+            state: parseWorkerState(row.worker_state),
+            accountLabel: nullableText(row.worker_account_label, "worker account label", 1, 80),
+          }),
+      }
+      : {}),
+    ...("output_artifact_id" in row
+      ? {
+        outputMetadata: row.output_artifact_id === null || row.output_artifact_id === undefined
+          ? null
+          : Object.freeze({
+            artifactId: boundedText(row.output_artifact_id, "output artifact id", 1, 256),
+            sizeBytes: nullableSafeInteger(row.output_size_bytes, "output artifact size", 0, 1_099_511_627_776),
+          }),
+      }
+      : {}),
     state: parseJobState(row.state),
     progressPercent,
     updatedAt: asIso(row.updated_at, "job update timestamp"),
@@ -308,13 +334,27 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
   return {
     async listJobs(): Promise<readonly JobSummary[]> {
       const result = await sql.query(
-        `select id,project_name,state,progress_percent,updated_at,
-                settings_snapshot,source_metadata,active_phase,phase_progress_percent,
-                latest_message,eta_seconds,started_at,completed_at,cancel_requested_at,
-                error_code,error_message
-         from jobs
-         where state <> $1
-         order by updated_at desc,id desc
+        `select j.id,j.project_id,j.project_name,j.state,j.progress_percent,j.updated_at,
+                j.settings_snapshot,j.source_metadata,j.active_phase,j.phase_progress_percent,
+                j.latest_message,j.eta_seconds,j.started_at,j.completed_at,j.cancel_requested_at,
+                j.error_code,j.error_message,
+                out.id as output_artifact_id,
+                out.actual_size_bytes as output_size_bytes,
+                lease.worker_id,
+                worker.state as worker_state,
+                worker.account_label as worker_account_label
+         from jobs j
+         left join lateral (
+           select a.id,a.actual_size_bytes
+           from artifacts a
+           where a.job_id=j.id and a.kind='OUTPUT' and a.status='READY'
+           order by a.created_at desc,a.id desc
+           limit 1
+         ) out on true
+         left join job_leases lease on lease.job_id=j.id
+         left join workers worker on worker.id=lease.worker_id
+         where j.state <> $1
+         order by j.updated_at desc,j.id desc
          limit 100`,
         ["DELETED"],
       );

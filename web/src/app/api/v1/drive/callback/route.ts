@@ -124,6 +124,8 @@ export async function GET(request: NextRequest) {
     return redirect(env, "/?drive=connected");
   } catch (error) {
     if (error instanceof AppError) return errorRedirect(env, error.code);
-    throw error;
+    // Browser-facing OAuth flow: land the admin back in the UI instead of a raw 500 page.
+    console.error("[api] unhandled error", error);
+    return errorRedirect(env, "DRIVE_PROVIDER_REJECTED");
   }
 }

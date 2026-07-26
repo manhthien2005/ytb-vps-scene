@@ -39,7 +39,8 @@ function errorResponse(error: AppError): NextResponse {
   );
 }
 
-function unexpectedErrorResponse(): NextResponse {
+function unexpectedErrorResponse(error: unknown): NextResponse {
+  console.error("[api] unhandled error", error);
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: { "cache-control": "no-store" } },
@@ -90,7 +91,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    return unexpectedErrorResponse();
+    return unexpectedErrorResponse(error);
   }
 }
 
@@ -105,6 +106,6 @@ export async function GET(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    return unexpectedErrorResponse();
+    return unexpectedErrorResponse(error);
   }
 }

@@ -48,6 +48,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    throw error;
+    console.error("[api] unhandled error", error);
+    return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: { "cache-control": "no-store" } });
   }
 }

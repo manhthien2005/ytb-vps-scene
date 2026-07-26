@@ -25,6 +25,7 @@ function errorResponse(error: unknown): NextResponse {
       headers: HEADERS,
     });
   }
+  console.error("[api] unhandled error", error);
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: HEADERS },

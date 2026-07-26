@@ -23,14 +23,18 @@ export async function POST(request: NextRequest) {
       pipelineBridgeVersion: env.workerPipelineBridgeVersion,
       generateId: () => crypto.randomUUID(),
     });
-    const result = await service.claim(worker, new Date());
+    // Token first: a transient token failure must abort BEFORE the claim commits,
+    // otherwise the job sits CLAIMED for the whole lease TTL with no worker knowing.
+    // The access provider caches tokens, so empty claim polls stay cheap.
     const driveAccessToken = await createConfiguredDrive(env, driveRepository).access.getAccessToken();
+    const result = await service.claim(worker, new Date());
     return NextResponse.json({ ...result, driveAccessToken }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) {
       if (error.status === 204) return new NextResponse(null, { status: 204, headers: HEADERS });
       return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
     }
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

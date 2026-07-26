@@ -36,7 +36,8 @@ function errorResponse(error: AppError): NextResponse {
   });
 }
 
-function unexpectedErrorResponse(): NextResponse {
+function unexpectedErrorResponse(error: unknown): NextResponse {
+  console.error("[api] unhandled error", error);
   return NextResponse.json(
     { code: "INTERNAL_ERROR" },
     { status: 500, headers: RESPONSE_HEADERS },
@@ -54,6 +55,6 @@ export async function GET(request: NextRequest) {
     );
   } catch (error) {
     if (error instanceof AppError) return errorResponse(error);
-    return unexpectedErrorResponse();
+    return unexpectedErrorResponse(error);
   }
 }

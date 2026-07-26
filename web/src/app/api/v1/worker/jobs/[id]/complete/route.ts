@@ -27,7 +27,23 @@ export async function POST(request: NextRequest, context: Context) {
     const body = await readStrictJson(request, schema, 2_048);
     const { id: jobId } = await context.params;
     const execution = await repository.getFencedExecution(worker.id, jobId, body.fencingToken, new Date());
-    if (execution === null) throw new AppError("LEASE_LOST", 409);
+    if (execution === null) {
+      // A successful complete deletes the lease, so a worker retrying after a lost
+      // HTTP response finds no lease here. completeOutput's lease-free first query
+      // detects that exact case (artifact already READY with identical identity)
+      // and returns REPLAY without further side effects.
+      const replay = await repository.completeOutput({
+        artifactId: body.artifactId,
+        jobId,
+        workerId: worker.id,
+        fencingToken: body.fencingToken,
+        driveFileId: body.driveFileId,
+        sizeBytes: body.sizeBytes,
+        now: new Date(),
+      });
+      if (replay === "REPLAY") return NextResponse.json({ status: "REPLAY" }, { headers: HEADERS });
+      throw new AppError("LEASE_LOST", 409);
+    }
     const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const drive = createConfiguredDrive(env, driveRepository);
     const accessToken = await drive.access.getAccessToken();
@@ -58,6 +74,7 @@ export async function POST(request: NextRequest, context: Context) {
     return NextResponse.json({ status: outcome }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

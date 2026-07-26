@@ -27,6 +27,7 @@ export async function POST(request: NextRequest, context: Context) {
     return NextResponse.json({ status: "REVOKED" }, { headers: HEADERS });
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
+    console.error("[api] unhandled error", error);
     return NextResponse.json({ code: "INTERNAL_ERROR" }, { status: 500, headers: HEADERS });
   }
 }

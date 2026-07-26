@@ -277,6 +277,12 @@ async function progressRoute() {
   vi.doMock("@/lib/repositories/neon-worker-control-plane", () => ({
     createNeonWorkerControlPlaneRepository: () => ({}),
   }));
+  vi.doMock("@/lib/repositories/neon-drive-control-plane", () => ({
+    createNeonDriveControlPlaneRepository: () => ({ kind: "driveRepository" }),
+  }));
+  vi.doMock("@/lib/application/configured-health", () => ({
+    createConfiguredFreeTierHealthService: () => ({ kind: "health" }),
+  }));
   vi.doMock("@/lib/application/job-queue", () => ({
     createJobQueueService: () => ({ progress }),
   }));
