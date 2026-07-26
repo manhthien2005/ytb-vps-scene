@@ -1,8 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
+import { YOUTUBE_SCOPES } from "@/lib/domain/youtube";
 import {
   createCredentialCipher,
+  DRIVE_CIPHER_PROFILE,
+  YOUTUBE_CIPHER_PROFILE,
   type EncryptedCredential,
 } from "./credential-cipher";
 
@@ -17,7 +20,7 @@ function replaceEnvelope(
 
 describe("credential cipher", () => {
   it("round-trips only with the matching credential id and scope", () => {
-    const cipher = createCredentialCipher(KEY);
+    const cipher = createCredentialCipher(KEY, DRIVE_CIPHER_PROFILE);
     const envelope = cipher.encrypt("1", DRIVE_FILE_SCOPE, "refresh-token");
 
     expect(cipher.decrypt("1", envelope)).toBe("refresh-token");
@@ -29,7 +32,7 @@ describe("credential cipher", () => {
   });
 
   it("enforces the plaintext limit in UTF-8 bytes", () => {
-    const cipher = createCredentialCipher(KEY);
+    const cipher = createCredentialCipher(KEY, DRIVE_CIPHER_PROFILE);
 
     expect(() => cipher.encrypt("1", DRIVE_FILE_SCOPE, "x".repeat(4097)))
       .toThrow("TOKEN_TOO_LARGE");
@@ -42,7 +45,7 @@ describe("credential cipher", () => {
   });
 
   it("rejects tampering without exposing envelope values", () => {
-    const cipher = createCredentialCipher(KEY);
+    const cipher = createCredentialCipher(KEY, DRIVE_CIPHER_PROFILE);
     const envelope = cipher.encrypt("1", DRIVE_FILE_SCOPE, "refresh-token");
     const first = envelope.ciphertext[0] === "A" ? "B" : "A";
     const tampered = replaceEnvelope(envelope, {
@@ -70,7 +73,7 @@ describe("credential cipher", () => {
     ["noncanonical ciphertext", { ciphertext: "A===" }],
     ["oversized ciphertext", { ciphertext: Buffer.alloc(4097).toString("base64url") }],
   ])("rejects an invalid %s before decryption", (_case, replacement) => {
-    const cipher = createCredentialCipher(KEY);
+    const cipher = createCredentialCipher(KEY, DRIVE_CIPHER_PROFILE);
     const envelope = cipher.encrypt("1", DRIVE_FILE_SCOPE, "refresh-token");
 
     expect(() => cipher.decrypt("1", replaceEnvelope(envelope, replacement)))
@@ -84,7 +87,7 @@ describe("credential cipher", () => {
   ])("rejects an invalid encryption key without echoing it", (key) => {
     let thrown: unknown;
     try {
-      createCredentialCipher(key);
+      createCredentialCipher(key, DRIVE_CIPHER_PROFILE);
     } catch (error) {
       thrown = error;
     }
@@ -96,7 +99,7 @@ describe("credential cipher", () => {
   it.each(["nonce", "authTag"] as const)(
     "rejects an oversized %s before base64url decoding",
     (field) => {
-      const cipher = createCredentialCipher(KEY);
+      const cipher = createCredentialCipher(KEY, DRIVE_CIPHER_PROFILE);
       const envelope = cipher.encrypt("1", DRIVE_FILE_SCOPE, "refresh-token");
       const oversized = "A".repeat(100_000);
       const from = vi.spyOn(Buffer, "from");
@@ -111,4 +114,28 @@ describe("credential cipher", () => {
       }
     },
   );
+
+  it("keeps Drive envelopes decryptable after profiles were introduced", () => {
+    const key = Buffer.alloc(32, 7).toString("base64url");
+    const cipher = createCredentialCipher(key, DRIVE_CIPHER_PROFILE);
+    const envelope = cipher.encrypt("1", DRIVE_FILE_SCOPE, "refresh-token-value");
+
+    expect(envelope.scope).toBe(DRIVE_FILE_SCOPE);
+    expect(cipher.decrypt("1", envelope)).toBe("refresh-token-value");
+  });
+
+  it("refuses a scope the profile does not allow", () => {
+    const key = Buffer.alloc(32, 7).toString("base64url");
+    const cipher = createCredentialCipher(key, DRIVE_CIPHER_PROFILE);
+    expect(() => cipher.encrypt("1", YOUTUBE_SCOPES[0], "x")).toThrow();
+  });
+
+  it("cannot decrypt an envelope produced under a different profile", () => {
+    const key = Buffer.alloc(32, 7).toString("base64url");
+    const drive = createCredentialCipher(key, DRIVE_CIPHER_PROFILE);
+    const youtube = createCredentialCipher(key, YOUTUBE_CIPHER_PROFILE);
+    const envelope = youtube.encrypt("abc", YOUTUBE_SCOPES[0], "secret");
+
+    expect(() => drive.decrypt("abc", envelope)).toThrow("CREDENTIAL_UNAVAILABLE");
+  });
 });

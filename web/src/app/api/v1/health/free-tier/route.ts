@@ -8,7 +8,7 @@ import { AppError } from "@/lib/domain/errors";
 import { requireAdmin } from "@/lib/http/requests";
 import type { UsageSnapshot } from "@/lib/ports/drive";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
     const access = createDriveAccessProvider({
       repository,
       oauth,
-      cipher: createCredentialCipher(env.driveTokenKeyV1),
+      cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
     });
     const health = await createFreeTierHealthService({
       repository,

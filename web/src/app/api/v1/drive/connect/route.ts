@@ -7,7 +7,7 @@ import { parseServerEnv } from "@/lib/config/env";
 import { AppError } from "@/lib/domain/errors";
 import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
       repository,
       oauth,
       files: createGoogleDriveFilesAdapter(),
-      cipher: createCredentialCipher(env.driveTokenKeyV1),
+      cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
     });
     return NextResponse.json(
       { authorizationUrl: result.authorizationUrl },

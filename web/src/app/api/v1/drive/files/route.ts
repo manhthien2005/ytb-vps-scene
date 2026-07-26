@@ -11,7 +11,7 @@ import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { requireAdmin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -41,7 +41,7 @@ function workspaceService(env: ServerEnv): DriveWorkspaceService {
   const access = createDriveAccessProvider({
     repository,
     oauth,
-    cipher: createCredentialCipher(env.driveTokenKeyV1),
+    cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
   });
   return createDriveWorkspaceService({
     repository,

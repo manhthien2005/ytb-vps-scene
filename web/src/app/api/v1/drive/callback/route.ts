@@ -9,7 +9,7 @@ import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
 import { AppError, type PublicCode } from "@/lib/domain/errors";
 import { HttpError, requireAdmin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -120,7 +120,7 @@ export async function GET(request: NextRequest) {
         clientSecret: env.googleOAuthClientSecret,
       }),
       files: createGoogleDriveFilesAdapter(),
-      cipher: createCredentialCipher(env.driveTokenKeyV1),
+      cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
     });
     return redirect(env, "/?drive=connected");
   } catch (error) {
