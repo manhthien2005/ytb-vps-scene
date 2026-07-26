@@ -64,6 +64,32 @@ describe("runSetup", () => {
     }
   });
 
+  // Real pools are produced on Windows and half of them carry a UTF-8 BOM; the
+  // remote validator opens them as utf-8-sig, so rejecting one here would fail the
+  // entire VPS setup over a byte-order mark.
+  it("accepts CapCut device files that carry a UTF-8 byte-order mark", async () => {
+    const root = mkdtempSync(join(tmpdir(), "capcut-devices-bom-"));
+    const bom = join(root, "device-021.json");
+    writeFileSync(bom, `﻿{"device_id":"d","iid":"i","tdid":"t"}`);
+    process.env.YTB_VPS_LOCAL_CAPCUT_DEVICES = root;
+    try {
+      const exec = vi.fn().mockResolvedValue({ stdout: "", stderr: "", code: 0 });
+      const upload = vi.fn().mockResolvedValue(undefined);
+      const transport: SetupTransport = { connect: vi.fn().mockResolvedValue({ exec, upload, close: vi.fn() }) };
+      const events = await collect(runSetup({
+        ssh,
+        password: "secret",
+        bootstrapCommand: "curl -fsSL https://raw.githubusercontent.com/acme/repo/abc/ops/native-v2/bootstrap-worker.sh | sudo bash -s -- 'https://app.example' 'token' 'https://github.com/acme/repo.git' 'abc'",
+        transport,
+      }));
+      expect(events.at(-1)?.stage).toBe("READY");
+      expect(upload).toHaveBeenCalledWith(bom, "/var/lib/ytb-vps/secrets/capcut-devices.next/device-021.json");
+    } finally {
+      delete process.env.YTB_VPS_LOCAL_CAPCUT_DEVICES;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails setup when an explicitly configured CapCut pool is missing", async () => {
     process.env.YTB_VPS_LOCAL_CAPCUT_DEVICES = join(tmpdir(), "missing-capcut-pool-for-test");
     try {

@@ -77,7 +77,31 @@ chmod 700 /var/lib/ytb-vps
 chmod 600 /var/lib/ytb-vps/worker-credential.json
 # ExecStart resolves through /opt/ytb-vps/current, so the symlink must exist before the first start.
 ln -sfn "$release" /opt/ytb-vps/current
-install -m 0644 -o root -g root "$release/ops/native-v2/ytb-vps-worker.service" /etc/systemd/system/ytb-vps-worker.service
-systemctl daemon-reload
-systemctl enable --now ytb-vps-worker.service
-echo "native worker attached at commit $commit"
+install -d -m 0755 /opt/ytb-vps/bin
+install -m 0755 -o root -g root "$release/ops/native-v2/worker-ctl.sh" /opt/ytb-vps/bin/ytb-vps-worker-ctl
+
+# The inexpensive GPU templates this profile targets are frequently containers
+# supervised by s6-overlay, where systemctl does not exist at all. Installing only
+# the systemd unit there leaves an enrolled worker that never starts and never
+# claims a job, so pick the init system that is actually running.
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  install -m 0644 -o root -g root "$release/ops/native-v2/ytb-vps-worker.service" /etc/systemd/system/ytb-vps-worker.service
+  systemctl daemon-reload
+  systemctl enable --now ytb-vps-worker.service
+  supervisor=systemd
+elif [[ -x /command/s6-svscanctl && -d /run/service ]]; then
+  # /etc/services.d survives a container restart; /run/s6/legacy-services is the
+  # live copy s6-overlay actually supervises, and only new scandir entries start now.
+  install -d -m 0755 /etc/services.d/ytb-vps-worker /run/s6/legacy-services/ytb-vps-worker
+  for target in /etc/services.d/ytb-vps-worker /run/s6/legacy-services/ytb-vps-worker; do
+    install -m 0755 -o root -g root "$release/ops/native-v2/ytb-vps-worker.s6-run" "$target/run"
+    install -m 0755 -o root -g root "$release/ops/native-v2/ytb-vps-worker.s6-finish" "$target/finish"
+  done
+  ln -sfn /run/s6/legacy-services/ytb-vps-worker /run/service/ytb-vps-worker
+  /opt/ytb-vps/bin/ytb-vps-worker-ctl start
+  supervisor=s6
+else
+  echo "no supported service manager (systemd or s6-overlay) is available" >&2
+  exit 78
+fi
+echo "native worker attached at commit $commit (supervisor: $supervisor)"

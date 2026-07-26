@@ -1,0 +1,18 @@
+#!/command/with-contenv sh
+# s6-overlay counterpart of ytb-vps-worker.service.
+#
+# The cheap Community GPU templates this profile targets are containers whose
+# init is s6-svscan, not systemd: `systemctl` does not exist there, so the unit
+# file alone leaves the worker installed but never started. s6 supervises and
+# restarts the process the same way; the systemd hardening directives
+# (ProtectSystem, PrivateTmp, NoNewPrivileges) have no s6 equivalent, so this
+# path is less isolated - it still drops from root to the ytb-vps account.
+export PATH=/opt/ytb-vps/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
+export YTB_VPS_FFMPEG=/usr/local/bin/ffmpeg-v2
+export YTB_VPS_FFPROBE=/usr/local/bin/ffprobe-v2
+export YTB_VPS_CAPCUT_DEVICE_FILE=/var/lib/ytb-vps/secrets/capcut-device.json
+export YTB_VPS_CAPCUT_DEVICE_POOL_DIR=/var/lib/ytb-vps/secrets/capcut-devices
+cd /var/lib/ytb-vps || exit 1
+exec /command/s6-setuidgid ytb-vps \
+  /opt/ytb-vps/current/.venv/bin/python -m ytb_vps_v2 worker-run \
+  --credential-path /var/lib/ytb-vps/worker-credential.json

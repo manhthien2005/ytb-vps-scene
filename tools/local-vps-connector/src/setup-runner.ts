@@ -33,7 +33,10 @@ function capcutDeviceFiles(root = process.env.YTB_VPS_LOCAL_CAPCUT_DEVICES): Rea
   if (files.length === 0) throw new Error("Configured CapCut device pool is empty");
   return files.map((name) => {
     const source = join(root, name);
-    const value = JSON.parse(readFileSync(source, "utf8")) as Record<string, unknown>;
+    // Device pools are commonly produced by Windows tooling that writes a UTF-8
+    // BOM. The remote validator reads them as utf-8-sig; rejecting them here would
+    // fail the whole VPS setup over a byte-order mark.
+    const value = JSON.parse(readFileSync(source, "utf8").replace(/^﻿/, "")) as Record<string, unknown>;
     for (const key of ["device_id", "iid", "tdid"] as const) {
       if (typeof value[key] !== "string" || value[key].length === 0) throw new Error("CapCut device credential is invalid");
     }
@@ -64,7 +67,7 @@ cp /var/lib/ytb-vps/secrets/capcut-devices/${first} /var/lib/ytb-vps/secrets/cap
 chown ytb-vps:ytb-vps /var/lib/ytb-vps/secrets/capcut-device.json
 chmod 600 /var/lib/ytb-vps/secrets/capcut-device.json
 rm -rf /var/lib/ytb-vps/secrets/capcut-devices.previous
-systemctl restart ytb-vps-worker.service`;
+/opt/ytb-vps/bin/ytb-vps-worker-ctl restart`;
 }
 
 export async function* runSetup(input: SetupInput): AsyncIterable<SetupEvent> {
