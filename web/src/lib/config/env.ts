@@ -92,6 +92,9 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     SESSION_SECRET: source.SESSION_SECRET,
     APP_ORIGIN: source.APP_ORIGIN,
   });
+  const tokenDefaults = value.NODE_ENV === "production" ? {} : {
+    YOUTUBE_TOKEN_KEY_V1: "A".repeat(43),
+  };
   const workerDefaults = value.NODE_ENV === "production" ? {} : {
     WORKER_AUTH_KEY_V1: "A".repeat(43),
     WORKER_RELEASE_REPOSITORY: "https://github.com/manhthien2005/ytb-vps-scene.git",
@@ -102,7 +105,7 @@ export function parseServerEnv(source: Record<string, string | undefined>): Serv
     GOOGLE_OAUTH_CLIENT_ID: source.GOOGLE_OAUTH_CLIENT_ID,
     GOOGLE_OAUTH_CLIENT_SECRET: source.GOOGLE_OAUTH_CLIENT_SECRET,
     DRIVE_TOKEN_KEY_V1: source.DRIVE_TOKEN_KEY_V1,
-    YOUTUBE_TOKEN_KEY_V1: source.YOUTUBE_TOKEN_KEY_V1,
+    YOUTUBE_TOKEN_KEY_V1: source.YOUTUBE_TOKEN_KEY_V1 ?? tokenDefaults.YOUTUBE_TOKEN_KEY_V1,
     NEON_STORAGE_LIMIT_BYTES: source.NEON_STORAGE_LIMIT_BYTES,
     DRIVE_UPLOAD_MAX_BYTES: source.DRIVE_UPLOAD_MAX_BYTES,
     FREE_TIER_SOFT_PERCENT: source.FREE_TIER_SOFT_PERCENT,
