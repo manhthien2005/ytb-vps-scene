@@ -1,4 +1,4 @@
-#!/command/with-contenv sh
+#!/bin/sh
 # s6 restarts a supervised service immediately. Without this pause a worker that
 # fails at startup (bad credential, missing FFmpeg) would spin at full CPU; the
 # delay mirrors RestartSec=10 in the systemd unit.

@@ -14,7 +14,13 @@ export type SetupInput = Readonly<{ ssh: SshTarget; password: string; bootstrapC
 
 const stages: ReadonlyArray<Readonly<{ stage: Exclude<SetupStage, "FAILED" | "READY">; percent: number; command?: string }>> = [
   { stage: "CONNECTING", percent: 10 },
-  { stage: "INSTALLING", percent: 35, command: "apt-get -o DPkg::Lock::Timeout=600 update -y && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends ca-certificates git ffmpeg python3.10 python3.10-venv" },
+  // This stage exists to make the bootstrap command itself runnable: it is
+  // `curl ... | sudo bash`, and the cheap GPU container templates ship with
+  // neither curl nor sudo even though the SSH session is already root.
+  // System FFmpeg is deliberately absent - Jammy ships 4.4, which lacks the
+  // -fps_mode contract the renderer needs, so bootstrap-worker.sh installs a
+  // pinned static 7.0 build as ffmpeg-v2 instead.
+  { stage: "INSTALLING", percent: 35, command: "apt-get -o DPkg::Lock::Timeout=600 update -y && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends ca-certificates curl git sudo xz-utils python3.10 python3.10-venv" },
   { stage: "CONFIGURING", percent: 65 },
   { stage: "VERIFYING", percent: 90, command: "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader" },
 ];

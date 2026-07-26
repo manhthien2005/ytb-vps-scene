@@ -58,6 +58,10 @@ if [[ ! -d "$release/.git" ]]; then
   mv -- "$temporary" "$release"
   trap - EXIT
 fi
+# mktemp -d creates the staging directory 0700, so the unprivileged ytb-vps
+# service account cannot traverse into the release it is supposed to run:
+# both the systemd unit and the s6 run script fail to exec the venv python.
+chmod 0755 "$release"
 
 python3.10 -m venv "$release/.venv"
 # Jammy's ensurepip ships setuptools 59.6, which predates PEP 621 and would silently
