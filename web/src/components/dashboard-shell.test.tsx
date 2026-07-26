@@ -213,6 +213,49 @@ describe("DashboardShell", () => {
     expect(within(screen.getByLabelText("Project inspector")).getByText("Video giữ preview")).toBeVisible();
   });
 
+  // A worker rendering the current job is attached and healthy; treating BUSY as
+  // "no worker" hid the VPS for the whole render and blocked the next project.
+  it("treats a BUSY worker as an attached worker", () => {
+    render(
+      <DashboardShell
+        workerOnline={false}
+        drive={{ status: "CONNECTED", accountHint: null, rootReady: true }}
+        health={health}
+        projects={[{
+          id: "10000000-0000-4000-8000-000000000001",
+          status: "READY",
+          name: "Video đang render",
+          sourceStatus: "SOURCE_READY",
+          createdAt: "2026-07-19T00:00:00.000Z",
+          updatedAt: "2026-07-19T00:00:00.000Z",
+        }]}
+        jobs={[]}
+        workers={[{
+          id: "20000000-0000-4000-8000-000000000001",
+          state: "BUSY",
+          accountLabel: null,
+          capabilities: {
+            protocolVersion: 1,
+            pipelineBridgeVersion: "cp4-media-v1",
+            os: "ubuntu-22.04",
+            arch: "x86_64",
+            gpuName: "NVIDIA GeForce RTX 3060",
+            vramMiB: 12_288,
+            cudaVersion: "12.4",
+            nvenc: true,
+          },
+          doctor: { status: "PASS", reasonCodes: ["CUDA_AVAILABLE"], observedAt: "2026-07-19T00:00:00.000Z" },
+          lastHeartbeatAt: "2026-07-19T00:00:00.000Z",
+          sessionExpiresAt: "2026-07-20T00:00:00.000Z",
+        }]}
+      />,
+    );
+
+    const inspector = screen.getByLabelText("Project inspector");
+    expect(within(inspector).getByText("Worker sẵn sàng")).toBeVisible();
+    expect(within(inspector).queryByRole("button", { name: "Setup VPS để render" })).not.toBeInTheDocument();
+  });
+
   it("keeps worker setup reachable when a source-ready video has no ready worker", () => {
     render(
       <DashboardShell

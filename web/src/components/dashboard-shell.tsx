@@ -145,7 +145,11 @@ function storageLabel(snapshot: UsageView | null): string {
 }
 
 function workerReady(workers: readonly WorkerViewModel[], workerOnline: boolean): boolean {
-  return workerOnline || workers.some((worker) => worker.state === "READY");
+  // BUSY is a healthy attached worker that happens to hold a lease. Counting only
+  // READY made the cockpit report "Chưa có worker" for the entire render and
+  // blocked queueing the next project - the queue exists precisely so jobs can
+  // wait for the worker that is currently rendering.
+  return workerOnline || workers.some((worker) => worker.state === "READY" || worker.state === "BUSY");
 }
 
 function workerConnected(workers: readonly WorkerViewModel[], workerOnline: boolean): boolean {

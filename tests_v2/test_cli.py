@@ -67,6 +67,35 @@ class CliTests(unittest.TestCase):
                 "--tts-provider", "edge",
             ])
 
+    def test_doctor_fails_without_a_capcut_device_credential(self) -> None:
+        # A worker that cannot synthesise the fixed BV074 voice cannot finish any
+        # render. Only a PASS doctor report is allowed to claim, so this is what
+        # stops it from taking jobs while the credential pool is still being staged.
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from ytb_vps_v2.interfaces import cli
+
+        with tempfile.TemporaryDirectory() as root:
+            empty = Path(root)
+            environment = {
+                "YTB_VPS_CAPCUT_DEVICE_FILE": str(empty / "capcut-device.json"),
+                "YTB_VPS_CAPCUT_DEVICE_POOL_DIR": str(empty / "capcut-devices"),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                self.assertFalse(cli._capcut_credential_present())
+                _, doctor = cli._evidence()
+                self.assertEqual(doctor["status"], "FAIL")
+                self.assertIn("CAPCUT_DEVICE_MISSING", doctor["reasonCodes"])
+
+            (empty / "capcut-devices").mkdir()
+            (empty / "capcut-devices" / "device-001.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, environment, clear=False):
+                self.assertTrue(cli._capcut_credential_present())
+                _, doctor = cli._evidence()
+                self.assertIn("CAPCUT_DEVICE_PRESENT", doctor["reasonCodes"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,12 @@
 # aborts on the missing envdir before the worker is ever exec'd. Nothing here
 # needs container-wide variables.
 set -e
+# systemd hosts get worker output through journald. Under s6 the supervised
+# process inherits the container console, which is unreachable over SSH, so an
+# operator has no way to see why a worker refuses to render. Keep a bounded
+# on-disk log instead.
+umask 077
+exec >>/var/log/ytb-vps-worker.log 2>&1
 export PATH=/opt/ytb-vps/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
 export YTB_VPS_FFMPEG=/usr/local/bin/ffmpeg-v2
 export YTB_VPS_FFPROBE=/usr/local/bin/ffprobe-v2

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -93,9 +94,12 @@ class WorkerLoop:
             return "POLL_COMPLETE"
         try:
             self.executor.execute(assignment, self.workspace_root)
-        except RuntimeError:
+        except RuntimeError as error:
             # The executor already best-effort reported FAILED_RETRYABLE to the
             # control plane; a deterministically failing job must not crash-loop
-            # the whole worker process.
+            # the whole worker process. It still has to be visible: when the lease
+            # was already lost that report is dropped, and a silent worker leaves
+            # the job cycling through claim/fail with no diagnosis anywhere.
+            print(f"media job failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
             return "MEDIA_FAILED"
         return "MEDIA_COMPLETE"

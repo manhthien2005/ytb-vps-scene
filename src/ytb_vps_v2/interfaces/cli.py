@@ -63,6 +63,26 @@ def _credential_path(value: str | None) -> Path:
     return Path(value) if value else DEFAULT_CREDENTIAL_PATH
 
 
+def _capcut_credential_present() -> bool:
+    """The fixed BV074 voice is the only TTS provider, so a worker without a device
+    credential cannot finish any render. Reporting it as healthy makes it claim
+    jobs it is guaranteed to fail - which is what happens while the connector is
+    still staging the pool."""
+    from ytb_vps_v2.adapters.offline.capcut_tts import (
+        DEFAULT_CAPCUT_DEVICE_PATH,
+        DEFAULT_CAPCUT_DEVICE_POOL_DIR,
+    )
+
+    device = Path(os.environ.get("YTB_VPS_CAPCUT_DEVICE_FILE", str(DEFAULT_CAPCUT_DEVICE_PATH)))
+    if device.is_file():
+        return True
+    pool = Path(os.environ.get("YTB_VPS_CAPCUT_DEVICE_POOL_DIR", str(DEFAULT_CAPCUT_DEVICE_POOL_DIR)))
+    try:
+        return any(pool.glob("device-*.json"))
+    except OSError:
+        return False
+
+
 def _evidence() -> tuple[dict[str, Any], dict[str, Any]]:
     gpu_name = "NVIDIA GPU unavailable"
     vram_mib = 256
@@ -86,6 +106,11 @@ def _evidence() -> tuple[dict[str, Any], dict[str, Any]]:
         status = "PASS"
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         reason_codes.append("CUDA_MISSING")
+        status = "FAIL"
+    if _capcut_credential_present():
+        reason_codes.append("CAPCUT_DEVICE_PRESENT")
+    else:
+        reason_codes.append("CAPCUT_DEVICE_MISSING")
         status = "FAIL"
     capabilities = {
         "protocolVersion": 1,
