@@ -38,7 +38,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     } finally {
       await db.close();
     }
@@ -118,7 +118,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
       await expect(db.exec("insert into jobs(id, project_name, state) values ('j1','Demo','WRONG')"))
         .rejects.toThrow();
     } finally {
@@ -337,6 +337,53 @@ describe("control-plane schema", () => {
          ) values ('NEON',1,10,1,'READ_ONLY',$1::jsonb,now())`,
         [JSON.stringify(["unstable reason"])],
       )).rejects.toThrow();
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("migration v11 creates youtube tables and widens artifact kinds", async () => {
+    const db = new PGlite();
+    try {
+      await db.exec(await readFile(new URL("./schema.sql", import.meta.url), "utf8"));
+
+      const version = await db.query<{ count: number }>(
+        "select count(*)::int as count from schema_migrations where version = 11",
+      );
+      expect(version.rows[0]!.count).toBe(1);
+
+      await db.exec(`
+        insert into youtube_channels (id, channel_id, title, status, default_tags)
+        values (
+          '11111111-1111-4111-8111-111111111111',
+          'UCabcdefghijklmnopqrstuv',
+          'Kênh thử',
+          'DISCONNECTED',
+          '[]'::jsonb
+        )
+      `);
+
+      await expect(db.exec(`
+        insert into youtube_channels (id, channel_id, title, status, default_tags)
+        values (
+          '22222222-2222-4222-8222-222222222222',
+          'UCabcdefghijklmnopqrstuv',
+          'Trùng channel_id',
+          'DISCONNECTED',
+          '[]'::jsonb
+        )
+      `)).rejects.toThrow();
+
+      await expect(db.exec(`
+        insert into youtube_channels (id, channel_id, title, status, default_tags)
+        values (
+          '33333333-3333-4333-8333-333333333333',
+          'UCzzzzzzzzzzzzzzzzzzzzzz',
+          'Thiếu ciphertext',
+          'CONNECTED',
+          '[]'::jsonb
+        )
+      `)).rejects.toThrow();
     } finally {
       await db.close();
     }

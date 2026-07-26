@@ -668,3 +668,75 @@ create table if not exists render_settings_presets (
 );
 
 insert into schema_migrations(version) values (10) on conflict (version) do nothing;
+
+-- migration v11: YouTube channel connections, cached stats, and per-channel prompts
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 11) then
+    alter table artifacts drop constraint if exists artifacts_kind_check;
+    alter table artifacts add constraint artifacts_kind_check check (
+      kind in ('SOURCE','CHECKPOINT','OUTPUT','TRANSCRIPT','THUMB_CANDIDATE')
+    );
+  end if;
+end $$;
+
+create table if not exists youtube_channels (
+  id text primary key check (id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+  channel_id text not null unique check (channel_id ~ '^UC[A-Za-z0-9_-]{22}$'),
+  title text not null check (title = btrim(title) and length(title) between 1 and 160),
+  avatar_url text check (avatar_url is null or (length(avatar_url) between 1 and 1024 and avatar_url like 'https://%')),
+  published_at timestamptz,
+  status text not null check (status in ('CONNECTED','REAUTH_REQUIRED','DISCONNECTED')),
+  ciphertext bytea check (ciphertext is null or octet_length(ciphertext) <= 4096),
+  nonce bytea,
+  auth_tag bytea,
+  key_version smallint,
+  scope text,
+  title_prompt text check (title_prompt is null or length(title_prompt) <= 4000),
+  description_prompt text check (description_prompt is null or length(description_prompt) <= 4000),
+  description_template text check (description_template is null or length(description_template) <= 5000),
+  default_tags jsonb not null default '[]'::jsonb check (
+    jsonb_typeof(default_tags) = 'array' and pg_column_size(default_tags) <= 2048
+  ),
+  thumbnail_prompt_template text check (
+    thumbnail_prompt_template is null or length(thumbnail_prompt_template) <= 4000
+  ),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (
+    (
+      status = 'CONNECTED'
+      and ciphertext is not null
+      and nonce is not null
+      and auth_tag is not null
+      and octet_length(nonce) = 12
+      and octet_length(auth_tag) = 16
+      and key_version = 1
+      and scope is not null
+    )
+    or
+    (
+      status in ('REAUTH_REQUIRED','DISCONNECTED')
+      and ciphertext is null
+      and nonce is null
+      and auth_tag is null
+      and key_version is null
+      and scope is null
+    )
+  )
+);
+
+create table if not exists youtube_channel_stats (
+  channel_id text primary key references youtube_channels(id),
+  subscriber_count bigint check (subscriber_count is null or subscriber_count >= 0),
+  view_count bigint check (view_count is null or view_count >= 0),
+  video_count bigint check (video_count is null or video_count >= 0),
+  watch_hours bigint check (watch_hours is null or watch_hours >= 0),
+  top_videos jsonb not null default '[]'::jsonb check (
+    jsonb_typeof(top_videos) = 'array' and pg_column_size(top_videos) <= 8192
+  ),
+  observed_at timestamptz not null,
+  updated_at timestamptz not null default now()
+);
+
+insert into schema_migrations(version) values (11) on conflict (version) do nothing;
