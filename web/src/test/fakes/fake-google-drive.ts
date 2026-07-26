@@ -76,6 +76,7 @@ export class FakeGoogleDriveFiles implements DriveFilesPort {
     parentIds: ["fake-project-input-folder-001"],
     trashed: false,
     appProperties: { schema: "1" },
+    sha256Checksum: null,
   };
   readonly videoMetadataByFileId = new Map<string, DriveVideoMetadata>();
   inspectAccountError: unknown = null;

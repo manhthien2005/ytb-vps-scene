@@ -651,11 +651,15 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
       if (result.rows.length === 0) throw new Error("Source provisioning claim lost or artifact cannot start uploading");
     },
 
-    async markSourceReady(artifactId, actualSizeBytes, verifiedAt, claimToken) {
+    async markSourceReady(artifactId, actualSizeBytes, checksumSha256, verifiedAt, claimToken) {
       if (!Number.isSafeInteger(actualSizeBytes) || actualSizeBytes < 0) throw new Error("Invalid artifact size");
+      if (checksumSha256 !== null && !HASH_PATTERN.test(checksumSha256)) {
+        throw new Error("Invalid artifact checksum");
+      }
       const result = await sql.query(
         `with changed as (
-           update artifacts set status='READY',actual_size_bytes=$2,verified_at=$3,updated_at=now()
+           update artifacts set status='READY',actual_size_bytes=$2,verified_at=$3,
+             checksum_sha256=coalesce($5::text,checksum_sha256),updated_at=now()
            where id=$1 and kind='SOURCE' and status='UPLOADING'
              and (
                ($4::text is not null and exists(
@@ -693,7 +697,7 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
          select exists(select 1 from changed) as changed,
                 exists(select 1 from audited) as audited,
                 exists(select 1 from project_updated) as project_updated`,
-        [artifactId, actualSizeBytes, validDate(verifiedAt), claimToken ?? null],
+        [artifactId, actualSizeBytes, validDate(verifiedAt), claimToken ?? null, checksumSha256],
       );
       if (
         result.rows[0]?.changed === true && result.rows[0]?.audited === true &&

@@ -9,6 +9,7 @@ import { outputPartFileName } from "@/lib/domain/output-part";
 import { googleJson } from "./http";
 
 export const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,appProperties";
+export const VERIFIED_FILE_FIELDS = `${FILE_FIELDS},sha256Checksum`;
 export const VIDEO_METADATA_FIELDS = `${FILE_FIELDS},createdTime,modifiedTime,videoMediaMetadata(width,height,durationMillis),webViewLink,webContentLink`;
 export const ABOUT_FIELDS = "storageQuota(limit,usage),user(permissionId,emailAddress)";
 
@@ -771,12 +772,21 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
 
     async inspectFile(accessToken, fileId): Promise<VerifiedDriveFile> {
       if (!boundedDriveId(fileId)) throw stableError("DRIVE_PROVIDER_REJECTED");
-      const file = parseDriveFile(await driveJson(
+      const value = await driveJson<unknown>(
         accessToken,
-        driveUrl(`/files/${encodeURIComponent(fileId)}`, { fields: FILE_FIELDS }),
+        driveUrl(`/files/${encodeURIComponent(fileId)}`, { fields: VERIFIED_FILE_FIELDS }),
         { method: "GET" },
-      ));
+      );
+      const record = objectRecord(value);
+      if (!record) throw remoteMismatch();
+      const { sha256Checksum, ...rest } = record;
+      const file = parseDriveFile(rest);
       if (!file || file.sizeBytes === null) throw remoteMismatch();
+      // Drive omits the digest until it has hashed the stored bytes, and never
+      // supplies one for folders. Absent is normal; malformed is a mismatch.
+      if (sha256Checksum !== undefined && !(typeof sha256Checksum === "string" && /^[0-9a-f]{64}$/.test(sha256Checksum))) {
+        throw remoteMismatch();
+      }
       return {
         id: file.id,
         name: file.name,
@@ -785,6 +795,7 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
         parentIds: file.parentIds,
         trashed: file.trashed,
         appProperties: file.appProperties,
+        sha256Checksum: sha256Checksum === undefined ? null : sha256Checksum as string,
       };
     },
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createGoogleDriveFilesAdapter } from "./drive-files";
 
 const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,appProperties";
+const VERIFIED_FILE_FIELDS = `${FILE_FIELDS},sha256Checksum`;
 const VIDEO_METADATA_FIELDS = `${FILE_FIELDS},createdTime,modifiedTime,videoMediaMetadata(width,height,durationMillis),webViewLink,webContentLink`;
 const ABOUT_FIELDS = "storageQuota(limit,usage),user(permissionId,emailAddress)";
 const ACCESS_TOKEN = "server-memory-access-token";
@@ -774,6 +775,7 @@ describe("createGoogleDriveFilesAdapter", () => {
         parents: ["drive-input-folder-001"],
         trashed: false,
         appProperties: properties,
+        sha256Checksum: "c".repeat(64),
       }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
 
@@ -786,11 +788,12 @@ describe("createGoogleDriveFilesAdapter", () => {
         parentIds: ["drive-input-folder-001"],
         trashed: false,
         appProperties: properties,
+        sha256Checksum: "c".repeat(64),
       });
     await expect(adapter(fetcher).deleteFile(ACCESS_TOKEN, "drive-source-file-001"))
       .resolves.toBeUndefined();
 
-    expect(requestDetails(fetcher, 0).url.searchParams.get("fields")).toBe(FILE_FIELDS);
+    expect(requestDetails(fetcher, 0).url.searchParams.get("fields")).toBe(VERIFIED_FILE_FIELDS);
     expect(requestDetails(fetcher, 1).init.method).toBe("DELETE");
     expect(fetcher.mock.calls.every(([input]) => !String(input).includes("permissions"))).toBe(true);
   });

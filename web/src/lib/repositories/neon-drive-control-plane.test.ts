@@ -20,6 +20,7 @@ const HASH_B = "b".repeat(64);
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const ARTIFACT_ID = "20000000-0000-4000-8000-000000000001";
 const CLAIM_TOKEN = "30000000-0000-4000-8000-000000000001";
+const SOURCE_CHECKSUM = "a".repeat(64);
 const SOURCE_ID = "20000000-0000-4000-8000-000000000002";
 const OUTPUT_ID = "20000000-0000-4000-8000-000000000003";
 const DELETED_ID = "20000000-0000-4000-8000-000000000004";
@@ -441,11 +442,18 @@ describe("Drive control-plane repository", () => {
     }, CLAIM_TOKEN)).resolves.toEqual(source);
 
     await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
-    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
+    await repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN);
     await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toMatchObject({
       status: "READY",
       actualSizeBytes: 100,
     });
+    // The job queue only admits a project whose source carries a digest.
+    await expect(db.query<{ checksum_sha256: string | null }>(
+      "select checksum_sha256 from artifacts where id=$1",
+      [ARTIFACT_ID],
+    ).then((result) => result.rows[0]?.checksum_sha256)).resolves.toBe(SOURCE_CHECKSUM);
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, "zz", NOW, CLAIM_TOKEN))
+      .rejects.toThrow("Invalid artifact checksum");
     await expect(repository.appManagedDriveBytes()).resolves.toBe(100);
     await expect(repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN))
       .rejects.toThrow("Source cannot be marked invalid");
@@ -456,8 +464,8 @@ describe("Drive control-plane repository", () => {
     await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
     const outcomes = await Promise.all([
-      repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN),
-      repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN),
+      repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN),
+      repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN),
     ]);
 
     expect(outcomes.sort()).toEqual(["CHANGED", "REPLAY"]);
@@ -568,7 +576,7 @@ describe("Drive control-plane repository", () => {
     }, CLAIM_TOKEN);
     await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
-    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
+    await repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN);
 
     await expect(repository.markSourceDeleted(ARTIFACT_ID))
       .rejects.toThrow("Source cannot be marked deleted");
@@ -598,7 +606,7 @@ describe("Drive control-plane repository", () => {
     await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
 
     await expect(repository.claimSourceDeletion(ARTIFACT_ID)).resolves.toBe("CLAIMED");
-    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN))
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN))
       .rejects.toThrow("Source cannot be marked ready");
     await expect(repository.getArtifact(project.id, ARTIFACT_ID)).resolves.toMatchObject({
       status: "DELETING",
@@ -802,9 +810,9 @@ describe("Drive control-plane repository", () => {
       .resolves.toBe(60);
     await expect(repository.markArtifactUploading(ARTIFACT_ID, replacementToken))
       .resolves.toBeUndefined();
-    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN))
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN))
       .rejects.toThrow("Source cannot be marked ready");
-    await expect(repository.markSourceReady(ARTIFACT_ID, 100, NOW, replacementToken))
+    await expect(repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, replacementToken))
       .resolves.toBe("CHANGED");
   });
 
@@ -876,7 +884,7 @@ describe("Drive control-plane repository", () => {
       await repository.observeSourceProgress(ARTIFACT_ID, 40, CLAIM_TOKEN);
       if (terminal === "READY") {
         await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
-        await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
+        await repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN);
       } else if (terminal === "INVALID") {
         await repository.markSourceInvalid(ARTIFACT_ID, CLAIM_TOKEN);
       } else {
@@ -903,7 +911,7 @@ describe("Drive control-plane repository", () => {
     const { repository } = await reserveTrackedSource();
     await db.exec("update usage_guards set used_bytes=700 where provider='DRIVE'");
     await repository.markArtifactUploading(ARTIFACT_ID, CLAIM_TOKEN);
-    await repository.markSourceReady(ARTIFACT_ID, 100, NOW, CLAIM_TOKEN);
+    await repository.markSourceReady(ARTIFACT_ID, 100, SOURCE_CHECKSUM, NOW, CLAIM_TOKEN);
     const fallbackHealth = createFreeTierHealthService({
       repository,
       access: { getAccessToken: async () => "synthetic-access" },

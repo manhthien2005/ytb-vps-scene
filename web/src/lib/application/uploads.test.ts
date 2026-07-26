@@ -11,6 +11,7 @@ const NOW = new Date("2026-07-19T00:00:00.000Z");
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const INPUT_FOLDER_ID = "drive-input-folder-001";
 const SOURCE_FILE_ID = "drive-source-file-001";
+const REMOTE_CHECKSUM = "b".repeat(64);
 const MAXIMUM_BYTES = 10_737_418_240;
 
 const readyProject: Project = {
@@ -58,6 +59,7 @@ function exactRemoteFile(sizeBytes = validIntent.sizeBytes): VerifiedDriveFile {
       ytbVpsRole: "source",
       schema: "1",
     },
+    sha256Checksum: REMOTE_CHECKSUM,
   };
 }
 
@@ -392,6 +394,7 @@ describe("UploadService sessions", () => {
     expect(repository.markSourceReady).toHaveBeenCalledWith(
       PROJECT_ID,
       validIntent.sizeBytes,
+      REMOTE_CHECKSUM,
       NOW,
       expect.any(String),
     );
@@ -504,9 +507,27 @@ describe("UploadService sessions", () => {
     expect(repository.markSourceReady).toHaveBeenCalledWith(
       PROJECT_ID,
       artifact.expectedSizeBytes,
+      REMOTE_CHECKSUM,
       NOW,
     );
     expect(repository.recordAudit).not.toHaveBeenCalled();
+  });
+
+  // Without a persisted source digest the job queue can never admit the project:
+  // queueProjectJob requires artifacts.checksum_sha256 and the render worker
+  // verifies its download against it.
+  it("persists a null source checksum when Drive has not published one yet", async () => {
+    repository.getArtifact.mockResolvedValue(artifact);
+    files.file = { ...exactRemoteFile(), sha256Checksum: null };
+
+    await expect(service.complete({ projectId: PROJECT_ID, artifactId: PROJECT_ID, now: NOW }))
+      .resolves.toEqual({ status: "SOURCE_READY", actualSizeBytes: artifact.expectedSizeBytes });
+    expect(repository.markSourceReady).toHaveBeenCalledWith(
+      PROJECT_ID,
+      artifact.expectedSizeBytes,
+      null,
+      NOW,
+    );
   });
 
   it("moves a crash-left PENDING artifact through UPLOADING before ready", async () => {

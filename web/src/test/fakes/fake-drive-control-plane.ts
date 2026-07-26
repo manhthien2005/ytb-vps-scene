@@ -36,6 +36,7 @@ type ManagedArtifactMetadata = Readonly<{
 
 export class FakeDriveControlPlaneRepository implements DriveControlPlaneRepository {
   readonly auditEvents: AuditEvent[] = [];
+  readonly markSourceReadyChecksums: Array<string | null> = [];
   private readonly nonces = new Map<string, number>();
   private readonly projects = new Map<string, StoredProject>();
   private readonly artifacts = new Map<string, Artifact>();
@@ -480,9 +481,11 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
   async markSourceReady(
     artifactId: string,
     actualSizeBytes: number,
+    checksumSha256: string | null,
     verifiedAt: Date,
     claimToken?: string,
   ): Promise<"CHANGED" | "REPLAY"> {
+    this.markSourceReadyChecksums.push(checksumSha256);
     this.assertSourceClaim(artifactId, claimToken, "Source provisioning claim lost or source cannot become ready");
     const artifact = this.artifacts.get(artifactId);
     if (

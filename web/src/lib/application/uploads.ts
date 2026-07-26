@@ -334,6 +334,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
             await dependencies.repository.markSourceReady(
               existing.id,
               existing.expectedSizeBytes,
+              remote.sha256Checksum,
               input.now,
               claimToken,
             );
@@ -441,6 +442,7 @@ export function createUploadService(dependencies: UploadDependencies): UploadSer
       await dependencies.repository.markSourceReady(
         artifact.id,
         artifact.expectedSizeBytes,
+        remote.sha256Checksum,
         input.now,
       );
       return { status: "SOURCE_READY", actualSizeBytes: artifact.expectedSizeBytes };

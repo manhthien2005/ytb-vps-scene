@@ -117,6 +117,7 @@ export interface DriveControlPlaneRepository {
   markSourceReady(
     artifactId: string,
     actualSizeBytes: number,
+    checksumSha256: string | null,
     verifiedAt: Date,
     claimToken?: string,
   ): Promise<SourceTerminalOutcome>;

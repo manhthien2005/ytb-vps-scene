@@ -49,6 +49,10 @@ export type VerifiedDriveFile = Readonly<{
   parentIds: readonly string[];
   trashed: boolean;
   appProperties: Readonly<Record<string, string>>;
+  // Provider-computed digest of the stored bytes. It is the only source of a
+  // trustworthy source checksum: the control plane never sees the video bytes, and
+  // the render worker refuses to run without one.
+  sha256Checksum: string | null;
 }>;
 
 export type DriveVideoMetadata = Readonly<{
