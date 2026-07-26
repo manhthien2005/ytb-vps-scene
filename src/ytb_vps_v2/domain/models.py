@@ -3,11 +3,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from fractions import Fraction
 from pathlib import PurePosixPath, PureWindowsPath
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
+from ytb_vps_v2.domain.timeline import FrameInterval
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -94,47 +93,8 @@ class BoundingBox:
             ("Bounding box ymax", self.ymax),
         ):
             _require_int(name, value, minimum=0)
-        if min(self.xmin, self.ymin, self.xmax, self.ymax) < 0:
-            raise DomainInvariantError("Bounding box coordinates must be non-negative")
         if self.xmax <= self.xmin or self.ymax <= self.ymin:
             raise DomainInvariantError("Bounding box must have positive area")
-
-
-@dataclass(frozen=True, slots=True)
-class MediaIdentity:
-    duration_seconds: Fraction
-    source_fps: Fraction
-    timeline: Timeline
-    width: int
-    height: int
-    has_audio: bool
-
-    def __post_init__(self) -> None:
-        _require_type("Media duration", self.duration_seconds, Fraction)
-        _require_type("Source FPS", self.source_fps, Fraction)
-        _require_type("Media timeline", self.timeline, Timeline)
-        _require_int("Media width", self.width, minimum=1)
-        _require_int("Media height", self.height, minimum=1)
-        _require_type("Media audio flag", self.has_audio, bool)
-        if self.duration_seconds <= 0:
-            raise DomainInvariantError("Media duration must be positive")
-        if self.source_fps <= 0:
-            raise DomainInvariantError("Source FPS must be positive")
-        if self.width <= 0 or self.height <= 0:
-            raise DomainInvariantError("Media dimensions must be positive")
-
-
-@dataclass(frozen=True, slots=True)
-class Job:
-    job_id: JobId
-    media: MediaIdentity
-    mode: PipelineMode = PipelineMode.CUE_TRANSLATION
-
-    def __post_init__(self) -> None:
-        _require_type("Job ID", self.job_id, JobId)
-        _require_type("Job media", self.media, MediaIdentity)
-        if not isinstance(self.mode, PipelineMode):
-            raise DomainInvariantError(f"Unsupported pipeline mode: {self.mode}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,8 +112,6 @@ class Cue:
         _require_type("Cue source text", self.source_text, str)
         if self.target_text is not None:
             _require_type("Cue target text", self.target_text, str)
-        if self.cue_index <= 0:
-            raise DomainInvariantError("Cue index must be positive")
         if not self.source_text.strip():
             raise DomainInvariantError("Cue source text must be non-empty")
 
@@ -184,8 +142,8 @@ class WorkUnit:
         _require_int("Work unit attempts", self.attempts, minimum=0)
         if not self.key or self.key != self.key.strip():
             raise DomainInvariantError("Work unit key must be non-empty and trimmed")
-        if self.attempts < 0:
-            raise DomainInvariantError("Work unit attempts must be non-negative")
+        if len(self.key) > 512:
+            raise DomainInvariantError("Work unit key must be at most 512 characters")
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,8 +164,6 @@ class Artifact:
         _require_type("Artifact checksum", self.sha256, str)
         _require_type("Artifact owner", self.owner, StageName)
         _require_type("Artifact dependencies", self.dependencies, tuple)
-        if self.size_bytes < 0:
-            raise DomainInvariantError("Artifact size must be non-negative")
         if _SHA256.fullmatch(self.sha256) is None:
             raise DomainInvariantError("Artifact checksum must be lowercase SHA-256")
         if any(
@@ -231,11 +187,9 @@ class Part:
         _require_type("Render chunk indexes", self.chunk_indexes, tuple)
         for index in self.chunk_indexes:
             _require_int("Render chunk index", index, minimum=0)
-        if self.part_count <= 0 or not 1 <= self.part_index <= self.part_count:
+        if not 1 <= self.part_index <= self.part_count:
             raise DomainInvariantError("Part index must be within its Part count")
         if not self.chunk_indexes:
             raise DomainInvariantError("Part must contain at least one render chunk")
-        if any(index < 0 for index in self.chunk_indexes):
-            raise DomainInvariantError("Render chunk indexes must be non-negative")
         if tuple(sorted(set(self.chunk_indexes))) != self.chunk_indexes:
             raise DomainInvariantError("Render chunk indexes must be ordered and unique")

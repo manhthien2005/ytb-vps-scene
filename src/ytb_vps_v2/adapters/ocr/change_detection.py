@@ -7,6 +7,11 @@ from fractions import Fraction
 from ytb_vps_v2.adapters.ocr.stream import RawFrame
 from ytb_vps_v2.ports.ocr import OcrDetection
 
+try:  # numpy is pinned in the OCR worker image; the pure-Python path is the fallback.
+    import numpy as _numpy
+except ImportError:  # pragma: no cover - exercised only on hosts without numpy
+    _numpy = None
+
 
 @dataclass(frozen=True, slots=True)
 class ChangeDetectionPolicy:
@@ -39,6 +44,12 @@ def _difference(previous: bytes, current: bytes) -> Fraction:
         raise ValueError("change detection frames must have equal byte length")
     if not previous:
         raise ValueError("change detection frames must not be empty")
+    if _numpy is not None:
+        # ~100x faster than the interpreter loop; this runs for EVERY frame, so the
+        # pure-Python version cost seconds per job at canonical resolution.
+        left = _numpy.frombuffer(previous, dtype=_numpy.uint8).astype(_numpy.int32)
+        right = _numpy.frombuffer(current, dtype=_numpy.uint8).astype(_numpy.int32)
+        return Fraction(int(_numpy.abs(left - right).sum()), len(previous))
     return Fraction(sum(abs(left - right) for left, right in zip(previous, current)), len(previous))
 
 

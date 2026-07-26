@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from fractions import Fraction
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
@@ -10,11 +9,8 @@ from ytb_vps_v2.domain.models import (
     BlurRegion,
     BoundingBox,
     Cue,
-    Job,
     JobId,
-    MediaIdentity,
     Part,
-    PipelineMode,
     RegionKind,
     StageName,
     WorkStatus,
@@ -29,20 +25,9 @@ class DomainModelTests(unittest.TestCase):
         self.box = BoundingBox(10, 20, 110, 70)
 
     def test_media_cue_and_region_preserve_typed_contracts(self) -> None:
-        media = MediaIdentity(
-            duration_seconds=Fraction(10),
-            source_fps=Fraction(30_000, 1_001),
-            timeline=Timeline(),
-            width=1920,
-            height=1080,
-            has_audio=False,
-        )
-        job = Job(JobId("abc123"), media)
         cue = Cue(1, self.interval, self.box, "你好")
         region = BlurRegion(RegionKind.DYNAMIC, self.interval, self.box)
 
-        self.assertEqual(media.timeline.target_fps, 30)
-        self.assertEqual(job.mode, PipelineMode.CUE_TRANSLATION)
         self.assertEqual(cue.source_text, "你好")
         self.assertIsNone(cue.target_text)
         self.assertEqual(region.kind, RegionKind.DYNAMIC)
@@ -52,9 +37,6 @@ class DomainModelTests(unittest.TestCase):
             lambda: BoundingBox(10, 0, 10, 5),
             lambda: Cue(0, self.interval, self.box, "你好"),
             lambda: Cue(1, self.interval, self.box, ""),
-            lambda: MediaIdentity(Fraction(0), Fraction(30), Timeline(), 1920, 1080, True),
-            lambda: MediaIdentity(Fraction(1), Fraction(0), Timeline(), 1920, 1080, True),
-            lambda: MediaIdentity(Fraction(1), Fraction(30), Timeline(), 0, 1080, True),
         )
         for factory in invalid_factories:
             with self.subTest(factory=factory):
@@ -96,24 +78,10 @@ class DomainModelTests(unittest.TestCase):
                 with self.assertRaises(DomainInvariantError):
                     JobId(value)
 
-    def test_job_rejects_unsupported_scene_voiceover_mode(self) -> None:
-        media = MediaIdentity(
-            Fraction(10),
-            Fraction(30),
-            Timeline(),
-            1920,
-            1080,
-            True,
-        )
-
-        with self.assertRaisesRegex(DomainInvariantError, "Unsupported pipeline mode"):
-            Job(JobId("abc123"), media, "scene_voiceover")  # type: ignore[arg-type]
-
     def test_integer_fields_reject_booleans_and_fractional_values(self) -> None:
         invalid_factories = (
             lambda: BoundingBox(False, 0, 10, 10),
             lambda: BoundingBox(0, 0, 10.5, 10),
-            lambda: MediaIdentity(Fraction(1), Fraction(30), Timeline(), True, 1080, True),
             lambda: Cue(1.5, self.interval, self.box, "text"),
             lambda: WorkUnit("ocr:1", StageName.OCR, attempts=False),
             lambda: Artifact("a", PurePosixPath("a.json"), 1.5, "a" * 64, StageName.OCR),
@@ -128,8 +96,6 @@ class DomainModelTests(unittest.TestCase):
 
     def test_nested_models_and_enums_are_validated_at_runtime(self) -> None:
         invalid_factories = (
-            lambda: Job("abc123", self._media()),
-            lambda: Job(JobId("abc123"), "media"),
             lambda: Cue(1, "interval", self.box, "text"),
             lambda: Cue(1, self.interval, "box", "text"),
             lambda: BlurRegion("dynamic_blur", self.interval, self.box),
@@ -169,10 +135,6 @@ class DomainModelTests(unittest.TestCase):
             StageName.OCR,
         )
         self.assertEqual(artifact.relative_path.as_posix(), "nested/artifact.json")
-
-    @staticmethod
-    def _media() -> MediaIdentity:
-        return MediaIdentity(Fraction(1), Fraction(30), Timeline(), 1920, 1080, True)
 
 
 if __name__ == "__main__":

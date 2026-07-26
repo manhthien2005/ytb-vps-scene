@@ -38,7 +38,7 @@ def _work_keys(name: str, value: object) -> tuple[str, ...]:
         type(item) is not str
         or not item
         or item != item.strip()
-        or len(item) > 256
+        or len(item) > 512
         for item in value
     ):
         raise DomainInvariantError(

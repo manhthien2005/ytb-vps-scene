@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -57,11 +58,15 @@ def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, An
     blur_regions = scene_blur_regions(settings, media_document.width, media_document.height)
     workspace.mkdir(parents=True, exist_ok=True)
     archive_root, remote_root, snapshot_root = workspace / "archive", workspace / "remote", workspace / "snapshots"
+    pipeline_root = workspace / "pipeline"
     state_path = workspace / "state" / "job-v2.sqlite"
-    for directory in (archive_root, remote_root, snapshot_root, state_path.parent):
+    for directory in (archive_root, remote_root, snapshot_root, pipeline_root, state_path.parent):
         directory.mkdir(parents=True, exist_ok=True)
     job_id = JobId(job_id_value)
-    archive = VerifiedInputArchiver(archive_root).archive(canonical_source, job_id, "2026-01-01T00:00:00Z")
+    # Real wall-clock stamps: identical fabricated instants for every job made the
+    # durable state DB useless for incident forensics.
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    archive = VerifiedInputArchiver(archive_root).archive(canonical_source, job_id, started_at)
     archived_source = archive_root.joinpath(*archive.archive.key.parts)
     state = SqliteStateStore(state_path)
     try:
@@ -76,8 +81,9 @@ def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, An
         ).run(OfflineSliceRequest(
             job_id=job_id, source=archived_source, verified_input=archive,
             config_fingerprints=stage_config_fingerprints(EffectiveConfig()),
-            workspace_root=workspace / "pipeline", snapshot_dir=snapshot_root, output_has_audio=True,
-            at="2026-01-01T00:00:01Z", verification_observed_at=1, blur_regions=blur_regions,
+            workspace_root=pipeline_root, snapshot_dir=snapshot_root, output_has_audio=True,
+            at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            verification_observed_at=1, blur_regions=blur_regions,
         ))
     finally:
         state.close()

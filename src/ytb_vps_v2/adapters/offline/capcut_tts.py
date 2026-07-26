@@ -18,7 +18,7 @@ import zlib
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from xml.sax.saxutils import escape
 
 from ytb_vps_v2.domain.backup import FileDigest
@@ -203,12 +203,26 @@ def _decode_response(raw: bytes, encoding: str | None) -> bytes:
     return raw
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+# No redirects, no proxies: the default opener would re-send the signed device
+# headers (tdid, sign, x-ss-stub) to whatever Location the response names.
+_API_OPENER = build_opener(_NoRedirect, ProxyHandler({}))
+
+
 def _post_json(url: str, body: Mapping[str, object], device: Mapping[str, str], timeout: float) -> dict[str, object]:
     body_text = _compact_json(body)
     request = Request(url, data=body_text.encode("utf-8"), headers=_base_headers(device, url, body_text), method="POST")
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with _API_OPENER.open(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise ProviderError("CapCut TTS request failed")
             raw = _decode_response(response.read(), response.headers.get("content-encoding"))
+    except ProviderError:
+        raise
     except OSError as error:
         raise ProviderError("CapCut TTS request failed") from error
     try:

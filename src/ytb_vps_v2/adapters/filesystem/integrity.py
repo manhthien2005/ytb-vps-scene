@@ -309,15 +309,20 @@ def _posix_publication_directory(root: Path, parent: Path) -> Iterator[int]:
     root_fd = os.open(root, flags)
     opened = [root_fd]
     try:
-        relative = parent.relative_to(root)
-        current_fd = root_fd
-        for part in relative.parts:
-            next_fd = os.open(part, flags, dir_fd=current_fd)
-            opened.append(next_fd)
-            current_fd = next_fd
+        # Only the fd-chain opening may be rewrapped as BackupStoreError. The yield
+        # must stay OUTSIDE this try: an exception thrown from the with-body (e.g.
+        # os.link EEXIST from a concurrent identical publish) has to propagate with
+        # its original type so publish_additively's OSError fallback stays reachable.
+        try:
+            relative = parent.relative_to(root)
+            current_fd = root_fd
+            for part in relative.parts:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+                opened.append(next_fd)
+                current_fd = next_fd
+        except (OSError, ValueError) as exc:
+            raise BackupStoreError("Publication directory could not be anchored") from exc
         yield current_fd
-    except (OSError, ValueError) as exc:
-        raise BackupStoreError("Publication directory could not be anchored") from exc
     finally:
         for descriptor in reversed(opened):
             os.close(descriptor)

@@ -142,6 +142,10 @@ class RapidOcrOnnxDetector:
             image = numpy.frombuffer(frame.data, dtype=numpy.uint8).reshape(
                 (self.height, self.width, 3)
             )
+            # RapidOCR expects OpenCV's BGR convention; an RGB stream must be
+            # swapped, not silently fed through with degraded accuracy.
+            if frame.channel_order == "RGB":
+                image = image[:, :, ::-1]
             return image[self.y0 : self.y1, :, :]
         except ModuleNotFoundError as exc:
             raise ProviderError("numpy is not installed") from exc

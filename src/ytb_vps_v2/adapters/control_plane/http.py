@@ -41,9 +41,11 @@ class UrllibTransport:
         request = Request(url, data=body, headers=headers, method=method)
         try:
             response = self._opener.open(request, timeout=timeout)
-            return HttpResponse(response.status, _read_bounded(response, 8192), dict(response.headers.items()))
+            # The transport reads up to the LARGEST per-endpoint limit; _request
+            # enforces the endpoint-specific bound on top of this.
+            return HttpResponse(response.status, _read_bounded(response, 65_536), dict(response.headers.items()))
         except HTTPError as error:
-            body_bytes = _read_bounded(error, 8192)
+            body_bytes = _read_bounded(error, 65_536)
             return HttpResponse(error.code, body_bytes, dict(error.headers.items()))
         except (URLError, TimeoutError, OSError) as error:
             raise ControlPlaneError("NETWORK_UNAVAILABLE", 503, retryable=True) from error
@@ -96,7 +98,7 @@ class ControlPlaneClient:
         self.sleep = sleep
         self.timeout = timeout
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, authenticated: bool = True) -> dict[str, Any]:
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, authenticated: bool = True, max_response_bytes: int = 8192) -> dict[str, Any]:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if authenticated:
             if self.session_secret is None:
@@ -107,8 +109,10 @@ class ControlPlaneClient:
         for attempt in range(3):
             try:
                 response = self.transport.request(method, f"{self.origin}{path}", headers, body, self.timeout)
-            except ControlPlaneError:
-                if attempt == 2:
+            except ControlPlaneError as error:
+                # Deterministic transport failures (e.g. RESPONSE_TOO_LARGE) repeat
+                # identically on retry — only retry errors flagged retryable.
+                if attempt == 2 or not error.retryable:
                     raise
                 self.sleep(0.25 * (attempt + 1))
                 continue
@@ -118,7 +122,7 @@ class ControlPlaneClient:
                     continue
             break
         assert response is not None
-        if len(response.body) > 8192:
+        if len(response.body) > max_response_bytes:
             raise ControlPlaneError("RESPONSE_TOO_LARGE", 502)
         if 300 <= response.status < 400:
             raise ControlPlaneError("REDIRECT_REJECTED", 502)
@@ -139,7 +143,10 @@ class ControlPlaneClient:
         return self._request("POST", "/api/v1/worker/heartbeat", evidence)
 
     def claim(self) -> dict[str, Any] | None:
-        result = self._request("POST", "/api/v1/worker/claim")
+        # A maximal legal claim payload (settings snapshot + long messages) can
+        # exceed the default 8 KB cap; dropping a claim the server already
+        # committed would strand the job for the whole lease TTL.
+        result = self._request("POST", "/api/v1/worker/claim", max_response_bytes=65_536)
         return result or None
 
     def renew(self, job_id: str, fencing_token: int) -> dict[str, Any]:

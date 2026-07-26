@@ -12,7 +12,7 @@ class StateTransitionError(DomainInvariantError):
 
 def _text(name: str, value: object, maximum: int) -> None:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value
         or value != value.strip()
         or len(value) > maximum

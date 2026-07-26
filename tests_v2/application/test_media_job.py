@@ -265,6 +265,80 @@ class MediaJobTests(unittest.TestCase):
         with self.assertRaises(MediaJobError):
             MediaJobExecutor(FakeClient(), transfer_factory=FakeTransfer, pipeline=lambda *_args: Path("missing.mp4")).execute(invalid, Path(tempfile.gettempdir()))
 
+    def test_pipeline_failure_reports_failed_retryable(self) -> None:
+        client = FakeClient()
+
+        def pipeline(*_args: object) -> Path:
+            raise OSError("render crashed")
+
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(MediaJobError, "execution failed"):
+                executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+
+        event, payload = client.events[-1]
+        self.assertEqual(event, "progress")
+        self.assertEqual(payload["state"], "FAILED_RETRYABLE")  # type: ignore[index]
+        self.assertEqual(payload["fromState"], "OCR")  # type: ignore[index]
+        self.assertEqual(payload["errorCode"], "WORKER_EXECUTION_FAILED")  # type: ignore[index]
+
+    def test_progress_racing_a_cancel_acknowledges_the_cancellation(self) -> None:
+        class RacingClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.rejected = False
+
+            def progress(self, job_id: str, update: dict[str, object]) -> dict[str, object]:
+                if update.get("state") == "OCR" and not self.rejected:
+                    # The web flipped the job to CANCEL_REQUESTED between the
+                    # worker's checkpoints; the fenced transition is rejected.
+                    self.rejected = True
+                    error = RuntimeError("LEASE_LOST")
+                    error.code = "LEASE_LOST"  # type: ignore[attr-defined]
+                    raise error
+                return super().progress(job_id, update)
+
+            def renew(self, job_id: str, fencing_token: int) -> dict[str, object]:
+                self.events.append(("renew", (job_id, fencing_token)))
+                return {"outcome": "RENEWED", "cancelRequested": True}
+
+        client = RacingClient()
+        pipeline_called = False
+
+        def pipeline(*_args: object) -> Path:
+            nonlocal pipeline_called
+            pipeline_called = True
+            raise AssertionError("pipeline must not run after cancellation")
+
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            result = executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+
+        self.assertEqual(result, "CANCELLED")
+        self.assertFalse(pipeline_called)
+        event, payload = client.events[-1]
+        self.assertEqual(event, "progress")
+        self.assertEqual(payload["fromState"], "CANCEL_REQUESTED")  # type: ignore[index]
+        self.assertEqual(payload["state"], "CANCELLED")  # type: ignore[index]
+
+    def test_completed_job_cleans_its_workspace(self) -> None:
+        client = FakeClient()
+
+        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
+            result = workspace / "published" / "part-001.mp4"
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_bytes(b"rendered-output")
+            return result
+
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
+        with tempfile.TemporaryDirectory() as root:
+            result = executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
+            self.assertEqual(result, "COMPLETED")
+            self.assertFalse((Path(root) / "job-1").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

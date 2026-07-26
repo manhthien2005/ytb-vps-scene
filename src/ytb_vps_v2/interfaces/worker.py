@@ -7,9 +7,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from ytb_vps_v2.adapters.control_plane.http import ControlPlaneClient
-
-
 _SECRET_PATTERN = __import__("re").compile(r"^[A-Za-z0-9_-]{43}$")
 
 
@@ -94,5 +91,11 @@ class WorkerLoop:
         assignment = self.client.claim()
         if assignment is None or self.executor is None:
             return "POLL_COMPLETE"
-        self.executor.execute(assignment, self.workspace_root)
+        try:
+            self.executor.execute(assignment, self.workspace_root)
+        except RuntimeError:
+            # The executor already best-effort reported FAILED_RETRYABLE to the
+            # control plane; a deterministically failing job must not crash-loop
+            # the whole worker process.
+            return "MEDIA_FAILED"
         return "MEDIA_COMPLETE"

@@ -21,12 +21,16 @@ class DockerOcrSmokeAdapter:
         image: str,
         *,
         runner: Callable[[tuple[str, ...]], str | bytes | Any] | None = None,
+        timeout_seconds: int = 300,
     ) -> None:
         if type(image) is not str or not image.strip() or image != image.strip():
             raise ProviderError("Docker OCR image must be non-empty and trimmed")
         if image.startswith("-") or _UNSAFE_IMAGE.search(image):
             raise ProviderError("Docker OCR image contains unsafe characters")
+        if type(timeout_seconds) is not int or timeout_seconds < 1 or timeout_seconds > 3_600:
+            raise ProviderError("Docker OCR smoke timeout must be within 1..3600 seconds")
         self.image = image
+        self.timeout_seconds = timeout_seconds
         self._runner = runner
 
     def build_argv(self) -> tuple[str, ...]:
@@ -54,7 +58,12 @@ class DockerOcrSmokeAdapter:
                 shell=False,
                 capture_output=True,
                 text=True,
+                timeout=self.timeout_seconds,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise ProviderError(
+                f"Docker OCR smoke timed out after {self.timeout_seconds}s"
+            ) from exc
         except OSError as exc:
             raise ProviderError(f"Docker executable unavailable: {exc}") from exc
         if completed.returncode != 0:

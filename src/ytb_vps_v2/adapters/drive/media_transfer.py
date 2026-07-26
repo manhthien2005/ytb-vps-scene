@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import os
 import ssl
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -103,16 +104,24 @@ class DriveMediaTransfer:
             headers={"Authorization": f"Bearer {self.access_token}", "Accept": "application/octet-stream"},
             method="GET",
         )
-        temporary = destination.with_name(f".{destination.name}.part")
+        # uuid-suffixed like every sibling adapter: a deterministic name would let a
+        # concurrent/retrying download unlink the other call's in-progress temp file.
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
         try:
             response = self.opener.open(request, timeout=self.timeout)
             if response.status != 200:
                 raise DriveTransferError("Drive download was not successful")
+            written = 0
             with temporary.open("xb") as stream:
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
+                    written += len(chunk)
+                    # The expected size is known upfront; abort as soon as the body
+                    # exceeds it instead of filling the VPS disk before the digest check.
+                    if written > expected_size:
+                        raise DriveTransferError("Drive download digest mismatch")
                     stream.write(chunk)
             size, digest = _digest(temporary)
             if size != expected_size or digest != expected_sha256:

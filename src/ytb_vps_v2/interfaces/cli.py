@@ -48,12 +48,15 @@ def _parse_blur(value: str) -> BlurRegion:
     """Parse one static rectangle as xmin:ymin:xmax:ymax source pixels."""
     parts = value.split(":")
     if len(parts) != 4:
-        raise argparse.ArgumentTypeError("blur must be x:y:width:height")
+        raise argparse.ArgumentTypeError("blur must be xmin:ymin:xmax:ymax")
     try:
-        x, y, width, height = (int(item) for item in parts)
-        return BlurRegion(RegionKind.STATIC, FrameInterval(0, 1), BoundingBox(x, y, width, height))
-    except (TypeError, ValueError, DomainInvariantError) as error:
+        xmin, ymin, xmax, ymax = (int(item) for item in parts)
+    except (TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError("blur coordinates must be integers") from error
+    try:
+        return BlurRegion(RegionKind.STATIC, FrameInterval(0, 1), BoundingBox(xmin, ymin, xmax, ymax))
+    except DomainInvariantError as error:
+        raise argparse.ArgumentTypeError(f"blur rectangle is invalid: {error}") from error
 
 
 def _credential_path(value: str | None) -> Path:
@@ -87,8 +90,11 @@ def _evidence() -> tuple[dict[str, Any], dict[str, Any]]:
     capabilities = {
         "protocolVersion": 1,
         "pipelineBridgeVersion": os.environ.get("YTB_VPS_PIPELINE_BRIDGE_VERSION", "cp4-media-v1"),
-        "os": "ubuntu-22.04" if platform.system() == "Linux" else "ubuntu-22.04",
-        "arch": "x86_64" if platform.machine().lower() in {"x86_64", "amd64"} else "x86_64",
+        # Declares the supported deployment target (the bootstrap installs Ubuntu
+        # 22.04 x86_64); the control plane treats these as a compatibility contract,
+        # not as detected host facts.
+        "os": "ubuntu-22.04",
+        "arch": "x86_64",
         "gpuName": gpu_name,
         "vramMiB": vram_mib,
         "cudaVersion": cuda_version,
@@ -232,4 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.once:
                 return 0
             time.sleep(max(5, min(300, arguments.interval)))
+            # Re-probe before the next heartbeat: a mid-run GPU failure must flip
+            # the doctor report, and observedAt must not go permanently stale.
+            loop.capabilities, loop.doctor = _evidence()
     raise AssertionError(f"Unhandled command: {arguments.command}")

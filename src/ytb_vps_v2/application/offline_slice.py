@@ -285,6 +285,11 @@ class OfflineSliceRunner:
                 except OfflineSliceInterrupted:
                     self._discard_prepared(prepared)
                     raise
+                except (KeyboardInterrupt, SystemExit):
+                    # An operator interrupt is not a stage failure: do not record a
+                    # failed attempt or convert it into a domain error.
+                    self._discard_prepared(prepared)
+                    raise
                 except BaseException as exc:
                     self._discard_prepared(prepared)
                     current = self.state.get_work_unit(request.job_id, unit.key)
@@ -358,7 +363,7 @@ class OfflineSliceRunner:
                 final,
                 final_record,
             )
-        except (OfflineSliceError, OfflineSliceInterrupted):
+        except (OfflineSliceError, OfflineSliceInterrupted, KeyboardInterrupt, SystemExit):
             raise
         except BaseException as exc:
             raise OfflineSliceError("Offline slice could not complete") from exc

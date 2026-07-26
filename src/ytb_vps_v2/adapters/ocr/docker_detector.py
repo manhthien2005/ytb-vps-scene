@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from collections.abc import Callable
 
 from ytb_vps_v2.adapters.ocr.docker import _UNSAFE_IMAGE
@@ -60,18 +61,62 @@ class DockerOcrChunkDetector:
             if not isinstance(output, bytes):
                 raise ProviderError("Docker OCR chunk returned non-bytes output")
             return output
+        # Stream stdout with the byte cap enforced DURING the read: subprocess.run
+        # would buffer a runaway container's entire output in memory before the
+        # limit check ever ran.
         try:
-            completed = subprocess.run(
-                list(argv), input=payload, capture_output=True, timeout=self.timeout_seconds,
-                check=False, shell=False,
+            process = subprocess.Popen(
+                list(argv),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                shell=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise ProviderError("Docker OCR chunk timed out") from exc
         except OSError as exc:
             raise ProviderError(f"Docker OCR executable unavailable: {exc}") from exc
-        if completed.returncode != 0:
-            raise ProviderError(f"Docker OCR chunk exited with status {completed.returncode}")
-        return completed.stdout
+        assert process.stdin is not None and process.stdout is not None
+
+        def _feed_stdin() -> None:
+            try:
+                process.stdin.write(payload)
+                process.stdin.close()
+            except OSError:
+                # Reader exited early; wait() below reports the real status.
+                pass
+
+        timed_out = False
+
+        def _kill_on_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+            process.kill()
+
+        feeder = threading.Thread(target=_feed_stdin, daemon=True)
+        watchdog = threading.Timer(self.timeout_seconds, _kill_on_timeout)
+        feeder.start()
+        watchdog.start()
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            while True:
+                chunk = process.stdout.read(65_536)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > self.max_output_bytes:
+                    process.kill()
+                    process.wait()
+                    raise ProviderError("Docker OCR chunk output exceeds limit")
+                chunks.append(chunk)
+            returncode = process.wait()
+        finally:
+            watchdog.cancel()
+            feeder.join(timeout=5)
+        if timed_out:
+            raise ProviderError("Docker OCR chunk timed out")
+        if returncode != 0:
+            raise ProviderError(f"Docker OCR chunk exited with status {returncode}")
+        return b"".join(chunks)
 
     def run_chunk(
         self,

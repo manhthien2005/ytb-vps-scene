@@ -81,6 +81,7 @@ class LocalDeletionTargetPolicy:
 
             resolved_targets: list[Path] = []
             component_sets: list[tuple[Path, ...]] = []
+            before_identities: list[tuple[object, ...]] = []
             for raw_target in target_values:
                 reject_reparse_components(raw_target)
                 if not raw_target.exists():
@@ -99,6 +100,12 @@ class LocalDeletionTargetPolicy:
                         "Deletion target must be strictly below one allowed root"
                     )
                 components = _components(matching_roots[0], target)
+                # Snapshot identities BEFORE the per-component validation: the final
+                # re-check below must span the validation window it protects, not
+                # compare two back-to-back reads taken after everything finished.
+                before_identities.append(
+                    tuple(_identity(component) for component in components)
+                )
                 for component in components:
                     reject_reparse_components(component)
                 resolved_targets.append(target)
@@ -110,15 +117,11 @@ class LocalDeletionTargetPolicy:
                     "Deletion targets must be distinct and non-overlapping"
                 )
 
-            before = tuple(
-                tuple(_identity(component) for component in components)
-                for components in component_sets
-            )
             after = tuple(
                 tuple(_identity(component) for component in components)
                 for components in component_sets
             )
-            if before != after:
+            if tuple(before_identities) != after:
                 raise UnsafeDeletionTargetError(
                     "Deletion target identity changed during preflight"
                 )

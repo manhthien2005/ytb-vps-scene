@@ -199,6 +199,25 @@ def _parts(value: object, *, frame_count: int) -> tuple[Part, ...]:
         or any(item.interval.end_frame > frame_count for item in parts)
     ):
         raise DomainInvariantError("Parts must be ordered, complete, and inside media frames")
+    # "Complete" must actually mean tiling: contiguous intervals covering all media
+    # frames, with chunk indexes strictly increasing across the whole plan.
+    if (
+        parts[0].interval.start_frame != 0
+        or parts[-1].interval.end_frame != frame_count
+        or any(
+            parts[position + 1].interval.start_frame != parts[position].interval.end_frame
+            for position in range(len(parts) - 1)
+        )
+    ):
+        raise DomainInvariantError("Parts must be ordered, complete, and inside media frames")
+    all_chunk_indexes = tuple(
+        chunk_index for part in parts for chunk_index in part.chunk_indexes
+    )
+    if any(
+        later <= earlier
+        for earlier, later in zip(all_chunk_indexes, all_chunk_indexes[1:])
+    ):
+        raise DomainInvariantError("Part chunk indexes must be disjoint and increasing")
     return parts
 
 
