@@ -188,11 +188,13 @@ export async function completeYouTubeConnection(
   const existing = await dependencies.repository.getChannelByChannelId(profile.channelId);
   const candidateId = existing?.id ?? (dependencies.randomUuid ?? nodeRandomUUID)();
 
-  // Two writes, deliberately. The upsert keys on channel_id, so the id that ends up
-  // authoritative may not be the one offered — a concurrent connect can win the row
-  // between the lookup and the insert. The envelope's AAD binds it to a specific id,
-  // so it is encrypted only after the repository reports which id it actually kept;
-  // encrypting under a guess would leave the channel permanently undecryptable.
+  // The upsert keys on channel_id, so the id that ends up authoritative may not be
+  // the one offered — a concurrent connect can win the row between the lookup above
+  // and this insert. The envelope's AAD binds it to one specific id, so an envelope
+  // encrypted under the losing id would leave the channel permanently undecryptable.
+  // The repository reports which id it kept; when that differs, re-encrypt under it
+  // and write again. The second write is what makes the stored envelope readable, so
+  // it is not an optimisation that can be skipped.
   const savedId = await dependencies.repository.saveConnectedChannel({
     id: candidateId,
     channelId: profile.channelId,

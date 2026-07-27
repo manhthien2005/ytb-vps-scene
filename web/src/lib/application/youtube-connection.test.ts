@@ -14,8 +14,7 @@ import {
 import { issueOAuthState } from "@/lib/security/oauth-state";
 import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control-plane";
 import { FakeYouTubeControlPlaneRepository } from "@/test/fakes/fake-youtube-control-plane";
-import { FakeYouTubeOAuth } from "@/test/fakes/fake-youtube";
-import { FakeYouTubeData } from "@/test/fakes/fake-youtube";
+import { FakeYouTubeData, FakeYouTubeOAuth } from "@/test/fakes/fake-youtube";
 import {
   beginYouTubeConnection,
   completeYouTubeConnection,
