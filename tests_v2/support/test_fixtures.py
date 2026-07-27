@@ -6,7 +6,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import tests_v2.support.fixtures as fixtures_module
 from tests_v2.support.fixtures import build_fixture, ffmpeg_available
 
 
@@ -51,3 +53,16 @@ class FixtureShapeTests(unittest.TestCase):
     def test_no_audio_fixture_has_no_audio_stream(self) -> None:
         payload = probe(build_fixture("no_audio", self.root))
         self.assertFalse([s for s in payload["streams"] if s["codec_type"] == "audio"])
+
+    def test_failed_build_leaves_no_cached_or_partial_artifact(self) -> None:
+        with mock.patch.object(fixtures_module, "_run", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                build_fixture("no_text", self.root)
+
+        self.assertFalse((self.root / "no_text.mp4").exists())
+        self.assertEqual(list(self.root.glob("*.partial.mp4")), [])
+
+        # Unpatched, the same kind now builds successfully instead of being
+        # poisoned by whatever the failed attempt left behind.
+        result = build_fixture("no_text", self.root)
+        self.assertTrue(result.exists())

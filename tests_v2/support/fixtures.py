@@ -41,11 +41,29 @@ def _base(destination: Path, *, size: str, rate: str, seconds: int, audio: bool)
 
 
 def build_fixture(kind: str, root: Path) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    destination = root / f"{kind}.mp4"
-    if destination.exists():
-        return destination
+    """Build fixture `kind` into `root`, returning root/<kind>.mp4.
 
+    Caching is atomic on purpose. Presence alone is not proof of a good file: an
+    ffmpeg run killed midway leaves a readable-but-truncated container, and a
+    cache keyed on existence would hand that corpse to every later test forever."""
+    root.mkdir(parents=True, exist_ok=True)
+    final = root / f"{kind}.mp4"
+    if final.exists():
+        return final
+    staging = root / f".{kind}.partial.mp4"
+    try:
+        _build_into(kind, staging, root)
+        staging.replace(final)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    return final
+
+
+def _build_into(kind: str, destination: Path, root: Path) -> Path:
+    """Write fixture `kind` to the exact path `destination`.
+
+    `root` is still needed: several kinds are derived from a cached base fixture."""
     if kind == "cfr30":
         return _base(destination, size="640x360", rate="30", seconds=6, audio=True)
     if kind == "cfr25":
