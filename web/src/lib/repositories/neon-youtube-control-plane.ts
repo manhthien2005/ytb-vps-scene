@@ -2,6 +2,16 @@ import "server-only";
 
 import type { EncryptedCredential } from "@/lib/security/credential-cipher";
 import { createSql } from "@/lib/db/client";
+import {
+  bytes,
+  boundedText,
+  canonicalBase64url,
+  fail,
+  isOneOf,
+  isoDate,
+  nullableBoundedText,
+  safeInteger,
+} from "./row-parsing";
 import type {
   YouTubeChannelRecord,
   YouTubeControlPlaneRepository,
@@ -18,68 +28,6 @@ export type YouTubeControlPlaneSqlClient = Readonly<{
     parameters?: unknown[],
   ) => Promise<Readonly<{ rows: Record<string, unknown>[] }>>;
 }>;
-
-function fail(kind: string): never {
-  throw new Error(`Invalid ${kind} row returned by database`);
-}
-
-function isOneOf<T extends readonly string[]>(value: unknown, values: T): value is T[number] {
-  return typeof value === "string" && values.some((candidate) => candidate === value);
-}
-
-function boundedText(value: unknown, minimum: number, maximum: number, trimmed = false): string | null {
-  if (typeof value !== "string" || value.length < minimum || value.length > maximum) return null;
-  if (trimmed && value.trim() !== value) return null;
-  return value;
-}
-
-function nullableBoundedText(value: unknown, minimum: number, maximum: number): string | null | undefined {
-  if (value === null) return null;
-  return boundedText(value, minimum, maximum) ?? undefined;
-}
-
-function isoDate(value: unknown): string | null {
-  const date = value instanceof Date ? value : new Date(String(value));
-  if (!Number.isFinite(date.getTime())) return null;
-  return date.toISOString();
-}
-
-function safeInteger(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number | null {
-  let numeric: number;
-  if (typeof value === "bigint") {
-    if (value < BigInt(minimum) || value > BigInt(maximum)) return null;
-    numeric = Number(value);
-  } else if (typeof value === "number") {
-    numeric = value;
-  } else if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) {
-    numeric = Number(value);
-  } else {
-    return null;
-  }
-  return Number.isSafeInteger(numeric) && numeric >= minimum && numeric <= maximum ? numeric : null;
-}
-
-function bytes(value: unknown, expectedLength?: number): Buffer | null {
-  let parsed: Buffer;
-  if (value instanceof Uint8Array) {
-    parsed = Buffer.from(value);
-  } else if (typeof value === "string" && /^\\x(?:[0-9a-f]{2})*$/i.test(value)) {
-    parsed = Buffer.from(value.slice(2), "hex");
-  } else {
-    return null;
-  }
-  return expectedLength === undefined || parsed.length === expectedLength ? parsed : null;
-}
-
-function canonicalBase64url(value: unknown, expectedLength?: number, allowEmpty = false): Buffer | null {
-  if (
-    typeof value !== "string" || (!allowEmpty && value.length === 0) ||
-    (value.length > 0 && !/^[A-Za-z0-9_-]+$/.test(value))
-  ) return null;
-  const decoded = Buffer.from(value, "base64url");
-  if (decoded.toString("base64url") !== value) return null;
-  return expectedLength === undefined || decoded.length === expectedLength ? decoded : null;
-}
 
 function parseDefaultTags(value: unknown): readonly string[] {
   if (!Array.isArray(value) || value.some((tag) => typeof tag !== "string")) {
@@ -236,14 +184,22 @@ export function createYouTubeControlPlaneRepository(
       const ciphertext = canonicalBase64url(input.envelope.ciphertext, undefined, true);
       const nonce = canonicalBase64url(input.envelope.nonce, 12);
       const authTag = canonicalBase64url(input.envelope.authTag, 16);
+      const avatarUrl = input.avatarUrl === null
+        ? null
+        : boundedText(input.avatarUrl, 1, 1024) && input.avatarUrl.startsWith("https://")
+          ? input.avatarUrl
+          : null;
+      const publishedAt = input.publishedAt === null ? null : isoDate(input.publishedAt);
       if (
         !ciphertext || ciphertext.length > 4096 || !nonce || !authTag ||
         input.envelope.keyVersion !== 1 || typeof input.envelope.scope !== "string" ||
         input.envelope.scope.length === 0 ||
         !UUID_PATTERN.test(input.id) || !CHANNEL_ID_PATTERN.test(input.channelId) ||
-        !boundedText(input.title, 1, 160, true)
+        !boundedText(input.title, 1, 160, true) ||
+        (input.avatarUrl !== null && avatarUrl === null) ||
+        (input.publishedAt !== null && publishedAt === null)
       ) throw new Error("Invalid encrypted credential");
-      await sql.query(
+      const result = await sql.query(
         `insert into youtube_channels(
            id,channel_id,title,avatar_url,published_at,status,ciphertext,nonce,auth_tag,key_version,scope
          ) values ($1,$2,$3,$4,$5,'CONNECTED',$6,$7,$8,$9,$10)
@@ -251,21 +207,27 @@ export function createYouTubeControlPlaneRepository(
            title=excluded.title,avatar_url=excluded.avatar_url,published_at=excluded.published_at,
            status='CONNECTED',ciphertext=excluded.ciphertext,nonce=excluded.nonce,
            auth_tag=excluded.auth_tag,key_version=excluded.key_version,scope=excluded.scope,
-           updated_at=now()`,
+           updated_at=now()
+         returning id`,
         [
-          input.id, input.channelId, input.title, input.avatarUrl, input.publishedAt,
+          input.id, input.channelId, input.title, avatarUrl, publishedAt,
           ciphertext, nonce, authTag, input.envelope.keyVersion, input.envelope.scope,
         ],
       );
+      const wonId = result.rows[0]?.id;
+      if (typeof wonId !== "string" || !UUID_PATTERN.test(wonId)) fail("saved channel id");
+      return wonId;
     },
 
     async setChannelStatus(id, status) {
-      await sql.query(
+      const result = await sql.query(
         `update youtube_channels set
            status=$2,ciphertext=null,nonce=null,auth_tag=null,key_version=null,scope=null,updated_at=now()
-         where id=$1`,
+         where id=$1
+         returning id`,
         [id, status],
       );
+      if (result.rows.length === 0) throw new Error("Channel unavailable");
     },
 
     async savePrompts(id, input) {
@@ -284,6 +246,18 @@ export function createYouTubeControlPlaneRepository(
     },
 
     async saveStats(id, stats) {
+      const subscriberCount = stats.subscriberCount === null ? null : safeInteger(stats.subscriberCount);
+      const viewCount = stats.viewCount === null ? null : safeInteger(stats.viewCount);
+      const videoCount = stats.videoCount === null ? null : safeInteger(stats.videoCount);
+      const watchHours = stats.watchHours === null ? null : safeInteger(stats.watchHours);
+      const observedAt = isoDate(stats.observedAt);
+      if (
+        (stats.subscriberCount !== null && subscriberCount === null) ||
+        (stats.viewCount !== null && viewCount === null) ||
+        (stats.videoCount !== null && videoCount === null) ||
+        (stats.watchHours !== null && watchHours === null) ||
+        !observedAt
+      ) throw new Error("Invalid stats snapshot");
       await sql.query(
         `insert into youtube_channel_stats(
            channel_id,subscriber_count,view_count,video_count,watch_hours,top_videos,observed_at
@@ -293,8 +267,8 @@ export function createYouTubeControlPlaneRepository(
            video_count=excluded.video_count,watch_hours=excluded.watch_hours,
            top_videos=excluded.top_videos,observed_at=excluded.observed_at,updated_at=now()`,
         [
-          id, stats.subscriberCount, stats.viewCount, stats.videoCount, stats.watchHours,
-          JSON.stringify(stats.topVideos), stats.observedAt,
+          id, subscriberCount, viewCount, videoCount, watchHours,
+          JSON.stringify(stats.topVideos), observedAt,
         ],
       );
     },

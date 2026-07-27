@@ -33,6 +33,10 @@ export interface YouTubeControlPlaneRepository {
   listChannels(): Promise<readonly YouTubeChannelRecord[]>;
   getChannel(id: string): Promise<YouTubeChannelRecord | null>;
   getChannelByChannelId(channelId: string): Promise<YouTubeChannelRecord | null>;
+  // Returns the id of the row that now holds this channel_id: the caller's `input.id`
+  // on first connect, or the ORIGINAL id from a prior connect if this channel_id was
+  // already stored under a different id (the upsert keys on channel_id, not id, so a
+  // reconnect never changes which row's primary key is authoritative).
   saveConnectedChannel(input: Readonly<{
     id: string;
     channelId: string;
@@ -40,7 +44,7 @@ export interface YouTubeControlPlaneRepository {
     avatarUrl: string | null;
     publishedAt: string | null;
     envelope: EncryptedCredential;
-  }>): Promise<void>;
+  }>): Promise<string>;
   setChannelStatus(id: string, status: "REAUTH_REQUIRED" | "DISCONNECTED"): Promise<void>;
   savePrompts(id: string, input: Readonly<{
     titlePrompt: string | null;

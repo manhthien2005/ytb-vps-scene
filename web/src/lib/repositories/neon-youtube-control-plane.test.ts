@@ -87,6 +87,38 @@ describe("YouTube control-plane repository", () => {
     expect(channels[0]).toMatchObject({ title: "Demo Channel Renamed", status: "CONNECTED" });
   });
 
+  it("returns the id that actually won the upsert, keeping the original row's identity on reconnect", async () => {
+    const repository = repo();
+    const originalId = CHANNEL_UUID;
+    const newId = "20000000-0000-4000-8000-000000000002";
+
+    const firstResult = await repository.saveConnectedChannel({
+      id: originalId,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel",
+      avatarUrl: null,
+      publishedAt: null,
+      envelope: ENVELOPE,
+    });
+    expect(firstResult).toBe(originalId);
+
+    const secondResult = await repository.saveConnectedChannel({
+      id: newId,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel Renamed",
+      avatarUrl: null,
+      publishedAt: null,
+      envelope: ENVELOPE,
+    });
+
+    // The row keeps its original identity: the conflict fired on channel_id,
+    // so `id` was never part of the update set-list. The caller must consume
+    // the returned id rather than assume the id it passed in took effect.
+    expect(secondResult).toBe(originalId);
+    await expect(repository.getChannel(originalId)).resolves.toMatchObject({ title: "Demo Channel Renamed" });
+    await expect(repository.getChannel(newId)).resolves.toBeNull();
+  });
+
   it("clears credential columns when status moves to DISCONNECTED", async () => {
     const repository = repo();
     await repository.saveConnectedChannel({
@@ -102,6 +134,13 @@ describe("YouTube control-plane repository", () => {
 
     const channel = await repository.getChannel(CHANNEL_UUID);
     expect(channel).toMatchObject({ status: "DISCONNECTED", envelope: null });
+  });
+
+  it("setChannelStatus throws instead of silently succeeding for an unknown channel", async () => {
+    const repository = repo();
+    await expect(
+      repository.setChannelStatus("90000000-0000-4000-8000-000000000009", "DISCONNECTED"),
+    ).rejects.toThrow("Channel unavailable");
   });
 
   it("savePrompts returns false for an unknown channel", async () => {
@@ -181,5 +220,56 @@ describe("YouTube control-plane repository", () => {
       descriptionTemplate: "",
       thumbnailPromptTemplate: "",
     });
+  });
+
+  it("rejects a non-https avatar URL and a malformed publishedAt before writing", async () => {
+    const repository = repo();
+    await expect(repository.saveConnectedChannel({
+      id: CHANNEL_UUID,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel",
+      avatarUrl: "http://example.com/avatar.png",
+      publishedAt: null,
+      envelope: ENVELOPE,
+    })).rejects.toThrow("Invalid encrypted credential");
+
+    await expect(repository.saveConnectedChannel({
+      id: CHANNEL_UUID,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel",
+      avatarUrl: null,
+      publishedAt: "not-a-date",
+      envelope: ENVELOPE,
+    })).rejects.toThrow("Invalid encrypted credential");
+  });
+
+  it("rejects a negative or fractional stat count before writing", async () => {
+    const repository = repo();
+    await repository.saveConnectedChannel({
+      id: CHANNEL_UUID,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel",
+      avatarUrl: null,
+      publishedAt: null,
+      envelope: ENVELOPE,
+    });
+
+    await expect(repository.saveStats(CHANNEL_UUID, {
+      subscriberCount: -1,
+      viewCount: 0,
+      videoCount: 0,
+      watchHours: 0,
+      topVideos: [],
+      observedAt: "2026-07-20T00:00:00.000Z",
+    })).rejects.toThrow("Invalid stats");
+
+    await expect(repository.saveStats(CHANNEL_UUID, {
+      subscriberCount: 0,
+      viewCount: 0,
+      videoCount: 0,
+      watchHours: 1.5,
+      topVideos: [],
+      observedAt: "2026-07-20T00:00:00.000Z",
+    })).rejects.toThrow("Invalid stats");
   });
 });
