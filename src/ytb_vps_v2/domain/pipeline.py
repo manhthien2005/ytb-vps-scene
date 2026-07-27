@@ -22,8 +22,6 @@ from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
 
 
 SCHEMA_VERSION = 1
-OFFLINE_FRAME_COUNT = 900
-OFFLINE_DURATION_SECONDS = Fraction(30)
 MEDIA_ARTIFACT_PATH = PurePosixPath("artifacts/ingest/media.json")
 OCR_ARTIFACT_PATH = PurePosixPath("artifacts/ocr/ocr.json")
 TRACK_ARTIFACT_PATH = PurePosixPath("artifacts/track/track.json")
@@ -102,10 +100,6 @@ def _dimensions(frame_count: object, width: object, height: object) -> None:
     _require_int("Frame count", frame_count, minimum=1)
     _require_int("Media width", width, minimum=1)
     _require_int("Media height", height, minimum=1)
-    if frame_count != OFFLINE_FRAME_COUNT:
-        raise DomainInvariantError(
-            f"Offline document frame count must be {OFFLINE_FRAME_COUNT}"
-        )
 
 
 def _base(
@@ -261,12 +255,17 @@ class MediaDocument:
         _require_int("Media timeline target FPS", self.timeline.target_fps)
         _dimensions(self.frame_count, self.width, self.height)
         _require_exact("Media audio flag", self.has_audio, bool)
-        if self.duration_seconds != OFFLINE_DURATION_SECONDS:
-            raise DomainInvariantError("Offline media duration must be exactly 30 seconds")
+        # The canonical timeline is the only clock in the system: every Cue,
+        # BlurRegion and Part frame index lives on it. Pinning duration to
+        # frames/target_fps is what stops audio drifting from video over an hour.
         if self.source_fps <= 0:
             raise DomainInvariantError("Media source FPS must be positive")
-        if self.timeline.target_fps != 30:
-            raise DomainInvariantError("Offline media timeline must use 30 FPS")
+        if self.timeline.target_fps <= 0:
+            raise DomainInvariantError("Media timeline FPS must be positive")
+        if self.duration_seconds != Fraction(self.frame_count, self.timeline.target_fps):
+            raise DomainInvariantError(
+                "Media duration must equal frame count divided by the timeline FPS"
+            )
 
 
 @dataclass(frozen=True, slots=True)
