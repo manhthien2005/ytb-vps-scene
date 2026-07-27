@@ -66,6 +66,15 @@ class CanvasTests(unittest.TestCase):
         self.assertEqual(canvas.width % 2, 0)
         self.assertEqual(canvas.height % 2, 0)
 
+    def test_native_portrait_source_is_not_downscaled_like_a_landscape_one(self) -> None:
+        # A 9:16 phone upload carries no rotation metadata. It must get the same
+        # canvas as the identical content tagged rot90, not a downscaled one.
+        canvas = plan_canvas(
+            manifest(storage_width=1080, storage_height=1920),
+            max_width=1920, max_height=1080, target_fps=30,
+        )
+        self.assertEqual((canvas.width, canvas.height), (1080, 1920))
+
 
 class ArgumentTests(unittest.TestCase):
     def setUp(self) -> None:

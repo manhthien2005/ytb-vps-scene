@@ -36,11 +36,13 @@ def plan_canvas(
     manifest: InputManifest, *, max_width: int, max_height: int, target_fps: int
 ) -> CanvasSpec:
     width, height = manifest.display_size
-    # max_width/max_height describe a landscape bounding box. A 90/270-rotated
-    # source has already had its display_size axes swapped, so the bounding box
-    # must be swapped the same way or a portrait source gets clipped against the
-    # wrong axis.
-    if manifest.rotation_degrees in (90, 270):
+    # display_size has already applied rotation, so decide on the resulting shape,
+    # never on rotation_degrees again. max_width/max_height describe a landscape
+    # bounding box; a portrait canvas needs it transposed or the source is
+    # pointlessly downscaled. Keying on shape means a natively-encoded 9:16 upload
+    # and a rot90-tagged one get the identical canvas, which is the whole point of
+    # having a single canonical space.
+    if height > width and max_height < max_width:
         max_width, max_height = max_height, max_width
     scale = min(1.0, max_width / width, max_height / height)
     return CanvasSpec(_even(int(width * scale)), _even(int(height * scale)), target_fps)
