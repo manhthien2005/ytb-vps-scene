@@ -49,8 +49,12 @@ def blur_radii(region_width: int, region_height: int, glyph_height: int) -> tupl
 
     needed = MINIMUM_RADIUS_RATIO * glyph_height
     wanted = -(-needed.numerator // needed.denominator)  # ceil, exactly, no float
-    luma_max = min(region_width, region_height) // 2 - 1
-    chroma_max = min(-(-region_width // 2), -(-region_height // 2)) // 2 - 1
+    # A plane of size N admits radius < N/2 strictly. (N - 1) // 2 is that bound
+    # exactly for both parities: N//2 - 1 for even N, N//2 for odd N. Deriving it
+    # per-parity matters because an even region still yields an odd chroma plane
+    # (a 1900x90 region has a 45px chroma dimension).
+    luma_max = (min(region_width, region_height) - 1) // 2
+    chroma_max = (min(-(-region_width // 2), -(-region_height // 2)) - 1) // 2
     if luma_max < 1:
         raise RegionTooSmallError(
             f"Blur region {region_width}x{region_height} admits no legal radius"

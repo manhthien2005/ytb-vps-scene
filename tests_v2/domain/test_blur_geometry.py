@@ -109,3 +109,28 @@ class RadiusAcceptedByFfmpegTests(unittest.TestCase):
                     completed.returncode, 0,
                     f"{width}x{height} luma={luma} chroma={chroma}: {completed.stderr}",
                 )
+
+    def test_the_luma_cap_is_exactly_tight_not_merely_safe(self) -> None:
+        """A cap that is merely legal is not good enough.
+
+        `N // 2 - 1` is legal for every N but one short of the true limit whenever N
+        is odd, which silently weakens the blur or turns a workable region into a
+        false refusal. This asserts both directions: the cap is accepted AND cap+1
+        is rejected. Without the second half, an off-by-one cap passes unnoticed."""
+        for size in (96, 99, 100, 101, 45, 49, 90, 24):
+            with self.subTest(plane=size):
+                cap = (size - 1) // 2
+                for radius, expected_ok in ((cap, True), (cap + 1, False)):
+                    completed = subprocess.run(
+                        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                         "-f", "lavfi", "-i", f"color=size={size}x{size}:d=0.04",
+                         "-pix_fmt", "yuv444p",  # 444 keeps the luma plane the binding one
+                         "-vf", f"boxblur=luma_radius={radius}:luma_power=1:chroma_radius=0",
+                         "-frames:v", "1", "-f", "null", "-"],
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    self.assertEqual(
+                        completed.returncode == 0, expected_ok,
+                        f"plane {size}, radius {radius}: expected ok={expected_ok}, "
+                        f"got {completed.returncode}: {completed.stderr}",
+                    )
