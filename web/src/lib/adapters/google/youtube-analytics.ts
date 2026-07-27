@@ -3,6 +3,7 @@ import "server-only";
 import { AppError } from "@/lib/domain/errors";
 import type { YouTubeAnalyticsPort, YouTubeWatchTime } from "@/lib/ports/youtube";
 import { googleJson } from "./http";
+import { objectRecord, providerRejected, remapProviderError } from "./youtube-errors";
 
 const YOUTUBE_ANALYTICS_API = "https://youtubeanalytics.googleapis.com/v2/reports";
 const YOUTUBE_ANALYTICS_TIMEOUT_MS = 5_000;
@@ -10,36 +11,6 @@ const YOUTUBE_ANALYTICS_RESPONSE_BYTES = 64 * 1_024;
 const YOUTUBE_ANALYTICS_ATTEMPTS = 2;
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-function providerRejected(): AppError {
-  return new AppError("YOUTUBE_PROVIDER_REJECTED", 502);
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-// googleJson raises DRIVE-prefixed AppErrors (it is shared with the Drive adapter).
-// A YouTube call must never surface a "DRIVE_..." code to callers, so every
-// googleJson invocation in this module is funnelled through here.
-function remapProviderError(error: unknown): never {
-  if (error instanceof AppError) {
-    switch (error.code) {
-      case "DRIVE_RATE_LIMITED":
-        throw new AppError("YOUTUBE_RATE_LIMITED", 429);
-      case "DRIVE_REAUTH_REQUIRED":
-        throw new AppError("YOUTUBE_REAUTH_REQUIRED", 401);
-      case "DRIVE_TEMPORARILY_UNAVAILABLE":
-      case "DRIVE_PROVIDER_REJECTED":
-        throw providerRejected();
-      default:
-        throw error;
-    }
-  }
-  throw error;
-}
 
 function reportsUrl(startDate: string, endDate: string): string {
   const url = new URL(YOUTUBE_ANALYTICS_API);

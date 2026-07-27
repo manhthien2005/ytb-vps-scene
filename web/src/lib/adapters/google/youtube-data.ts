@@ -8,6 +8,7 @@ import type {
   YouTubeVideoSummary,
 } from "@/lib/ports/youtube";
 import { googleJson } from "./http";
+import { objectRecord, providerRejected, remapProviderError } from "./youtube-errors";
 
 const YOUTUBE_API = "https://www.googleapis.com/youtube/v3";
 const YOUTUBE_TIMEOUT_MS = 5_000;
@@ -22,36 +23,6 @@ const CHANNEL_FIELDS =
   "items(id,snippet(title,publishedAt,thumbnails/medium/url),statistics(viewCount,subscriberCount,hiddenSubscriberCount,videoCount),contentDetails/relatedPlaylists/uploads)";
 const PLAYLIST_ITEMS_FIELDS = "items/contentDetails/videoId,nextPageToken";
 const VIDEOS_FIELDS = "items(id,snippet(title,thumbnails/medium/url),statistics/viewCount)";
-
-function providerRejected(): AppError {
-  return new AppError("YOUTUBE_PROVIDER_REJECTED", 502);
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-// googleJson raises DRIVE-prefixed AppErrors (it is shared with the Drive adapter).
-// A YouTube call must never surface a "DRIVE_..." code to callers, so every
-// googleJson invocation in this module is funnelled through here.
-function remapProviderError(error: unknown): never {
-  if (error instanceof AppError) {
-    switch (error.code) {
-      case "DRIVE_RATE_LIMITED":
-        throw new AppError("YOUTUBE_RATE_LIMITED", 429);
-      case "DRIVE_REAUTH_REQUIRED":
-        throw new AppError("YOUTUBE_REAUTH_REQUIRED", 401);
-      case "DRIVE_TEMPORARILY_UNAVAILABLE":
-      case "DRIVE_PROVIDER_REJECTED":
-        throw providerRejected();
-      default:
-        throw error;
-    }
-  }
-  throw error;
-}
 
 async function youtubeJson<T>(
   fetcher: typeof fetch,
