@@ -114,10 +114,10 @@ function parseChannel(row: Record<string, unknown>): YouTubeChannelRecord {
   const title = boundedText(row.title, 1, 160, true);
   const avatarUrl = nullableBoundedText(row.avatar_url, 1, 1024);
   const publishedAt = row.published_at === null ? null : isoDate(row.published_at);
-  const titlePrompt = nullableBoundedText(row.title_prompt, 1, 4000);
-  const descriptionPrompt = nullableBoundedText(row.description_prompt, 1, 4000);
-  const descriptionTemplate = nullableBoundedText(row.description_template, 1, 5000);
-  const thumbnailPromptTemplate = nullableBoundedText(row.thumbnail_prompt_template, 1, 4000);
+  const titlePrompt = nullableBoundedText(row.title_prompt, 0, 4000);
+  const descriptionPrompt = nullableBoundedText(row.description_prompt, 0, 4000);
+  const descriptionTemplate = nullableBoundedText(row.description_template, 0, 5000);
+  const thumbnailPromptTemplate = nullableBoundedText(row.thumbnail_prompt_template, 0, 4000);
   const defaultTags = parseDefaultTags(row.default_tags);
   if (
     !id || !UUID_PATTERN.test(id) || !channelId || !CHANNEL_ID_PATTERN.test(channelId) || !title ||

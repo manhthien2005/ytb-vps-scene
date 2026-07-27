@@ -153,4 +153,33 @@ describe("YouTube control-plane repository", () => {
     await repository.saveStats(CHANNEL_UUID, second);
     await expect(repository.getStats(CHANNEL_UUID)).resolves.toEqual(second);
   });
+
+  it("round-trips empty-string prompts, which the schema permits but bounded-text parsing must not reject", async () => {
+    const repository = repo();
+    await repository.saveConnectedChannel({
+      id: CHANNEL_UUID,
+      channelId: CHANNEL_ID,
+      title: "Demo Channel",
+      avatarUrl: null,
+      publishedAt: null,
+      envelope: ENVELOPE,
+    });
+
+    const saved = await repository.savePrompts(CHANNEL_UUID, {
+      titlePrompt: "",
+      descriptionPrompt: "",
+      descriptionTemplate: "",
+      defaultTags: [],
+      thumbnailPromptTemplate: "",
+    });
+    expect(saved).toBe(true);
+
+    const channel = await repository.getChannel(CHANNEL_UUID);
+    expect(channel).toMatchObject({
+      titlePrompt: "",
+      descriptionPrompt: "",
+      descriptionTemplate: "",
+      thumbnailPromptTemplate: "",
+    });
+  });
 });
