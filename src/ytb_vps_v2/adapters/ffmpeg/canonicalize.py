@@ -95,6 +95,11 @@ def canonicalize_arguments(
         "-fps_mode", "cfr", "-r", str(canvas.target_fps),
         "-color_primaries", "bt709", "-color_trc", "bt709",
         "-colorspace", "bt709", "-color_range", "tv",
+        # libx264 only writes VUI colour tags into the bitstream itself when told
+        # via x264-params; the generic -color_* output options alone tag the
+        # container but leave the encoded stream's color_transfer/primaries unset,
+        # so ffprobe (and every downstream decoder) reads them back as unknown.
+        "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
         "-map_metadata", "-1", "-map_chapters", "-1",
         "-movflags", "+faststart",
         destination,
