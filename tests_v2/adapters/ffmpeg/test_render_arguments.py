@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 
@@ -15,6 +16,7 @@ from ytb_vps_v2.adapters.ffmpeg.media import (
     FfmpegMediaError,
     RenderInputs,
 )
+from ytb_vps_v2.application.render_chunks import chunk_local_request
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.models import (
     BlurRegion,
@@ -23,6 +25,7 @@ from ytb_vps_v2.domain.models import (
     JobId,
     Part,
     RegionKind,
+    RenderChunk,
 )
 from ytb_vps_v2.domain.pipeline import TTS_ARTIFACT_PATH, RenderRequest
 from ytb_vps_v2.domain.timeline import FrameInterval
@@ -101,6 +104,104 @@ class RenderInputTests(unittest.TestCase):
         with self.assertRaises(FfmpegMediaError):
             inputs(voice_starts=())
 
+    def test_seek_and_duration_must_be_exact_non_negative_fractions(self) -> None:
+        invalid = (
+            {"source_start": 0},
+            {"source_start": Fraction(-1)},
+            {"source_duration": Fraction(0)},
+            {"voice_trim_starts": (Fraction(-1),)},
+            {"voice_trim_starts": (Fraction(0), Fraction(1))},
+        )
+        for values in invalid:
+            with self.subTest(values=values):
+                with self.assertRaises(FfmpegMediaError):
+                    inputs(**values)
+
+    def test_chunk_inputs_seek_and_bound_source_and_voice_before_each_input(
+        self,
+    ) -> None:
+        local = chunk_local_request(
+            request(),
+            RenderChunk(1, FrameInterval(300, 600)),
+        )
+
+        arguments = build(
+            local,
+            inputs(
+                source_start=Fraction(10),
+                source_duration=Fraction(10),
+                voice_starts=(Fraction(0),),
+                voice_trim_starts=(Fraction(10),),
+            ),
+        )
+
+        source = arguments.index("in.mp4")
+        voice = arguments.index("g0.wav")
+        self.assertEqual(
+            arguments[source - 5 : source + 1],
+            ["-ss", "10.000", "-t", "10.000", "-i", "in.mp4"],
+        )
+        self.assertEqual(
+            arguments[voice - 5 : voice + 1],
+            ["-ss", "10.000", "-t", "10.000", "-i", "g0.wav"],
+        )
+        self.assertEqual(
+            arguments[arguments.index("-frames:v") + 1],
+            "300",
+        )
+
+    def test_no_overlapping_voice_still_builds_a_complete_audio_bus(self) -> None:
+        local = chunk_local_request(
+            request(),
+            RenderChunk(1, FrameInterval(300, 600)),
+        )
+
+        arguments = build(
+            local,
+            inputs(
+                voice_paths=(),
+                voice_starts=(),
+                source_has_audio=False,
+                source_start=Fraction(10),
+                source_duration=Fraction(10),
+            ),
+        )
+
+        self.assertNotIn("g0.wav", arguments)
+        self.assertIn("[aout]", arguments)
+        self.assertIn("anullsrc=", graph(arguments))
+
+    def test_fractional_frame_boundary_keeps_sub_millisecond_precision(
+        self,
+    ) -> None:
+        local = chunk_local_request(
+            request(),
+            RenderChunk(1, FrameInterval(301, 600)),
+        )
+
+        arguments = build(
+            local,
+            inputs(
+                source_start=Fraction(301, 30),
+                source_duration=Fraction(299, 30),
+                voice_starts=(Fraction(0),),
+                voice_trim_starts=(Fraction(301, 30),),
+            ),
+        )
+
+        source = arguments.index("in.mp4")
+        self.assertEqual(
+            arguments[source - 5 : source + 1],
+            [
+                "-ss",
+                "10.033333333",
+                "-t",
+                "9.966666667",
+                "-i",
+                "in.mp4",
+            ],
+        )
+
 
 class VideoGraphTests(unittest.TestCase):
     def test_blur_region_reaches_the_filter_graph(self) -> None:
@@ -118,6 +219,37 @@ class VideoGraphTests(unittest.TestCase):
 
     def test_video_output_is_mapped_from_the_graph(self) -> None:
         self.assertIn("[vout]", build(request(), inputs()))
+
+    def test_chunk_mask_timing_is_rebased_to_zero(self) -> None:
+        global_plan = replace(
+            request(),
+            blur_regions=(
+                BlurRegion(
+                    RegionKind.DYNAMIC,
+                    FrameInterval(300, 330),
+                    BoundingBox(1064, 14, 1264, 78),
+                ),
+            ),
+        )
+        local = chunk_local_request(
+            global_plan,
+            RenderChunk(1, FrameInterval(300, 600)),
+        )
+
+        text = graph(
+            build(
+                local,
+                inputs(
+                    source_start=Fraction(10),
+                    source_duration=Fraction(10),
+                    voice_starts=(Fraction(0),),
+                    voice_trim_starts=(Fraction(10),),
+                ),
+            )
+        )
+
+        self.assertIn("between(t,0.000,1.000)", text)
+        self.assertNotIn("between(t,10.000,11.000)", text)
 
 
 class AudioTests(unittest.TestCase):
@@ -434,3 +566,176 @@ class RenderIntegrationTests(unittest.TestCase):
                 duration_seconds=0.3,
             )
             self.assertLess(ducked, recovered * 0.75)
+
+    def test_chunks_preserve_boundary_effects_frames_and_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            source = workspace / "source.mp4"
+            voice = workspace / "voice.wav"
+            _run_ffmpeg(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:size=640x360:rate=30:duration=12",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x100:rate=30:duration=12",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:sample_rate=48000:duration=12",
+                    "-filter_complex",
+                    "[0:v][1:v]overlay=0:0:shortest=1[v]",
+                    "-map",
+                    "[v]",
+                    "-map",
+                    "2:a",
+                    "-frames:v",
+                    "360",
+                    "-r",
+                    "30",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    str(source),
+                ]
+            )
+            _run_ffmpeg(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:sample_rate=48000:duration=5",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(voice),
+                ]
+            )
+            adapter = FfmpegMediaAdapter()
+            media = adapter.probe(source)
+            plan = RenderRequest(
+                1,
+                JobId("chunk-integration"),
+                media.source_digest,
+                media.frame_count,
+                media.width,
+                media.height,
+                TTS_ARTIFACT_PATH,
+                DIGEST,
+                (
+                    Cue(
+                        1,
+                        FrameInterval(225, 255),
+                        BoundingBox(0, 260, 640, 350),
+                        "source",
+                        "Phụ đề qua đường nối",
+                    ),
+                ),
+                (
+                    BlurRegion(
+                        RegionKind.DYNAMIC,
+                        FrameInterval(105, 135),
+                        BoundingBox(0, 0, 320, 100),
+                    ),
+                ),
+                PurePosixPath("artifacts/tts/voice.wav"),
+                adapter._digest(voice),
+                (
+                    Part(
+                        1,
+                        1,
+                        FrameInterval(0, media.frame_count),
+                        (0, 1, 2),
+                    ),
+                ),
+                True,
+            )
+            chunks = (
+                RenderChunk(0, FrameInterval(0, 120)),
+                RenderChunk(1, FrameInterval(120, 240)),
+                RenderChunk(2, FrameInterval(240, 360)),
+            )
+            outputs = tuple(
+                workspace / f"chunk-{chunk.index}.mp4"
+                for chunk in chunks
+            )
+
+            rendered = tuple(
+                adapter.render_chunk(
+                    source,
+                    voice,
+                    plan,
+                    chunk,
+                    output,
+                )
+                for chunk, output in zip(chunks, outputs, strict=True)
+            )
+
+            self.assertTrue(
+                all(
+                    item.frame_count == 120
+                    and item.duration_seconds == Fraction(4)
+                    and item.has_audio
+                    for item in rendered
+                )
+            )
+            for output, chunk in zip(outputs, chunks, strict=True):
+                adapter.validate_render(
+                    output,
+                    chunk_local_request(plan, chunk),
+                )
+
+            for output, local_at, global_at in (
+                (outputs[0], 3.75, 3.75),
+                (outputs[1], 0.25, 4.25),
+            ):
+                source_mask = _gray_crop(
+                    source,
+                    at_seconds=global_at,
+                    x=0,
+                    y=0,
+                    width=320,
+                    height=100,
+                )
+                output_mask = _gray_crop(
+                    output,
+                    at_seconds=local_at,
+                    x=0,
+                    y=0,
+                    width=320,
+                    height=100,
+                )
+                self.assertLess(
+                    _edge_energy(output_mask, width=320, height=100),
+                    _edge_energy(source_mask, width=320, height=100) * 0.6,
+                )
+
+            for output, local_at, global_at in (
+                (outputs[1], 3.75, 7.75),
+                (outputs[2], 0.25, 8.25),
+            ):
+                source_subtitle = _gray_crop(
+                    source,
+                    at_seconds=global_at,
+                    x=0,
+                    y=260,
+                    width=640,
+                    height=90,
+                )
+                output_subtitle = _gray_crop(
+                    output,
+                    at_seconds=local_at,
+                    x=0,
+                    y=260,
+                    width=640,
+                    height=90,
+                )
+                self.assertGreater(
+                    sum(value > 200 for value in output_subtitle),
+                    sum(value > 200 for value in source_subtitle) + 50,
+                )

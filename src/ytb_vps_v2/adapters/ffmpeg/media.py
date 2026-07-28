@@ -25,15 +25,34 @@ from ytb_vps_v2.adapters.ffmpeg.subtitles_ass import (
     SubtitleStyle,
     build_ass_document,
 )
+from ytb_vps_v2.application.render_chunks import chunk_local_request
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.models import JobId
+from ytb_vps_v2.domain.models import JobId, RenderChunk
 from ytb_vps_v2.domain.pipeline import MediaDocument, RenderRequest
 from ytb_vps_v2.domain.timeline import Timeline
 
 
 class FfmpegMediaError(RuntimeError):
     """Raised when FFmpeg media work cannot be completed or verified."""
+
+
+def _input_timestamp(value: Fraction) -> str:
+    whole, remainder = divmod(value.numerator, value.denominator)
+    if remainder == 0:
+        return f"{whole}.000"
+    scale = 1_000_000_000
+    decimals, rounding = divmod(
+        remainder * scale,
+        value.denominator,
+    )
+    if rounding * 2 >= value.denominator:
+        decimals += 1
+    if decimals == scale:
+        whole += 1
+        decimals = 0
+    digits = f"{decimals:09d}".rstrip("0").ljust(3, "0")
+    return f"{whole}.{digits}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +62,47 @@ class RenderInputs:
     voice_paths: tuple[Path, ...]
     voice_starts: tuple[Fraction, ...]
     source_has_audio: bool = True
+    source_start: Fraction = Fraction(0)
+    source_duration: Fraction | None = None
+    voice_trim_starts: tuple[Fraction, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.voice_paths) != len(self.voice_starts):
             raise FfmpegMediaError("Each voice input needs exactly one start time")
+        if (
+            type(self.source_start) is not Fraction
+            or self.source_start < 0
+        ):
+            raise FfmpegMediaError(
+                "Source seek must be a non-negative Fraction"
+            )
+        if (
+            self.source_duration is not None
+            and (
+                type(self.source_duration) is not Fraction
+                or self.source_duration <= 0
+            )
+        ):
+            raise FfmpegMediaError(
+                "Source duration must be a positive Fraction"
+            )
+        if type(self.voice_trim_starts) is not tuple or any(
+            type(value) is not Fraction or value < 0
+            for value in self.voice_trim_starts
+        ):
+            raise FfmpegMediaError(
+                "Voice trim starts must be non-negative Fractions"
+            )
+        if (
+            self.voice_trim_starts
+            and len(self.voice_trim_starts) != len(self.voice_paths)
+        ) or (
+            self.source_duration is not None
+            and len(self.voice_trim_starts) != len(self.voice_paths)
+        ):
+            raise FfmpegMediaError(
+                "Each bounded voice input needs one trim start"
+            )
         if not isinstance(self.source_has_audio, bool):
             raise FfmpegMediaError("Source audio presence must be a bool")
 
@@ -748,6 +804,15 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Media destination parent must exist")
         return destination
 
+    @classmethod
+    def _preflight_render_destination(
+        cls,
+        destination: Path,
+    ) -> _AnonymousPosixRender | None:
+        if os.name == "nt":
+            return None
+        return _AnonymousPosixRender.create(cls._destination(destination))
+
     def create_fixture(self, destination: Path, with_audio: bool) -> None:
         if type(with_audio) is not bool:
             raise FfmpegMediaError("Fixture audio policy must be boolean")
@@ -878,6 +943,59 @@ class FfmpegMediaAdapter:
         if result <= 0:
             raise FfmpegMediaError(f"ffprobe {name} must be positive")
         return result
+
+    def _probe_audio_duration(self, source: Path) -> Fraction:
+        self.require_tools()
+        if (
+            not isinstance(source, Path)
+            or not source.is_file()
+            or source.is_symlink()
+        ):
+            raise FfmpegMediaError(
+                "Audio duration source must be a regular file"
+            )
+        raw = self._run(
+            [
+                self.ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=self.probe_timeout_seconds,
+            stdout_limit=self.probe_output_limit,
+        )
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise FfmpegMediaError(
+                "ffprobe audio duration returned invalid JSON"
+            ) from exc
+        if type(payload) is not dict or type(payload.get("format")) is not dict:
+            raise FfmpegMediaError(
+                "ffprobe audio duration JSON has an invalid shape"
+            )
+        value = payload["format"].get("duration")
+        if (
+            value is None
+            or isinstance(value, bool)
+            or isinstance(value, (dict, list))
+        ):
+            raise FfmpegMediaError("ffprobe audio duration is invalid")
+        try:
+            duration = Fraction(str(value))
+        except (ValueError, ZeroDivisionError) as exc:
+            raise FfmpegMediaError(
+                "ffprobe audio duration is invalid"
+            ) from exc
+        if duration <= 0:
+            raise FfmpegMediaError(
+                "ffprobe audio duration must be positive"
+            )
+        return duration
 
     def probe(
         self,
@@ -1075,6 +1193,13 @@ class FfmpegMediaAdapter:
         if not isinstance(target_fps, int) or isinstance(target_fps, bool) or target_fps <= 0:
             raise FfmpegMediaError("Render target FPS must be positive")
         duration = Fraction(plan.frame_count, target_fps)
+        if (
+            inputs.source_duration is not None
+            and inputs.source_duration != duration
+        ):
+            raise FfmpegMediaError(
+                "Bounded source duration must match the render plan"
+            )
 
         arguments = [
             self.ffmpeg,
@@ -1083,11 +1208,32 @@ class FfmpegMediaAdapter:
             "error",
             "-nostdin",
             "-y",
-            "-i",
-            str(inputs.source),
         ]
+        if inputs.source_start > 0 or inputs.source_duration is not None:
+            arguments += [
+                "-ss",
+                _input_timestamp(inputs.source_start),
+            ]
+        if inputs.source_duration is not None:
+            arguments += [
+                "-t",
+                _input_timestamp(inputs.source_duration),
+            ]
+        arguments += ["-i", str(inputs.source)]
         if plan.output_has_audio:
-            for path in inputs.voice_paths:
+            for index, path in enumerate(inputs.voice_paths):
+                if inputs.voice_trim_starts:
+                    arguments += [
+                        "-ss",
+                        _input_timestamp(
+                            inputs.voice_trim_starts[index]
+                        ),
+                    ]
+                if inputs.source_duration is not None:
+                    arguments += [
+                        "-t",
+                        _input_timestamp(inputs.source_duration),
+                    ]
                 arguments += ["-i", str(path)]
 
         video = build_video_graph(
@@ -1192,47 +1338,41 @@ class FfmpegMediaAdapter:
         ]
         return arguments
 
-    def render(
+    def _render_prevalidated(
         self,
-        source: Path,
-        tts_wav: Path,
         plan: RenderRequest,
+        inputs: RenderInputs,
         destination: Path,
         *,
-        subtitle_path: Path | None = None,
         target_fps: int = 30,
         encoder: str = "libx264",
+        _anonymous: _AnonymousPosixRender | None = None,
     ) -> MediaDocument:
         if type(plan) is not RenderRequest:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if type(inputs) is not RenderInputs:
+            raise FfmpegMediaError("Render inputs must be RenderInputs")
         anonymous: _AnonymousPosixRender | None = None
         named: _OwnedRenderStaging | None = None
         render_assets: tempfile.TemporaryDirectory[str] | None = None
         final_output: Path
         if os.name != "nt":
-            final_output = self._destination(destination)
-            anonymous = _AnonymousPosixRender.create(final_output)
+            if _anonymous is None:
+                final_output = self._destination(destination)
+                anonymous = _AnonymousPosixRender.create(final_output)
+            else:
+                if _anonymous.destination != destination:
+                    raise FfmpegMediaError(
+                        "Preflight render destination does not match"
+                    )
+                final_output = destination
+                anonymous = _anonymous
         try:
-            source_media = self.probe(source)
-            if not self._matches_plan(source_media, plan):
-                raise FfmpegMediaError(
-                    "Render source does not match the typed render plan"
-                )
-            if (
-                not isinstance(tts_wav, Path)
-                or not tts_wav.is_file()
-                or tts_wav.is_symlink()
-            ):
-                raise FfmpegMediaError("Render TTS input must be a regular file")
-            if self._digest(tts_wav) != plan.tts_audio_digest:
-                raise FfmpegMediaError(
-                    "Render TTS input does not match the typed render plan"
-                )
             render_assets = tempfile.TemporaryDirectory(
                 prefix="ytb-vps-render-",
             )
             asset_root = Path(render_assets.name)
-            prepared_subtitle = subtitle_path
+            prepared_subtitle = inputs.subtitle_path
             if prepared_subtitle is not None:
                 if (
                     not isinstance(prepared_subtitle, Path)
@@ -1270,6 +1410,10 @@ class FfmpegMediaAdapter:
                     raise FfmpegMediaError(
                         "Render subtitle document could not be written"
                     ) from exc
+            prepared_inputs = replace(
+                inputs,
+                subtitle_path=prepared_subtitle,
+            )
             if anonymous is None:
                 final_output = self._destination(destination)
                 named = _OwnedRenderStaging.create(final_output)
@@ -1282,13 +1426,7 @@ class FfmpegMediaAdapter:
                 overwrite_policy = "-y"
             arguments = self.render_arguments(
                 plan,
-                RenderInputs(
-                    source=source,
-                    subtitle_path=prepared_subtitle,
-                    voice_paths=(tts_wav,) if plan.output_has_audio else (),
-                    voice_starts=(Fraction(0),) if plan.output_has_audio else (),
-                    source_has_audio=source_media.has_audio,
-                ),
+                prepared_inputs,
                 canvas_width=plan.width,
                 canvas_height=plan.height,
                 target_fps=target_fps,
@@ -1310,7 +1448,9 @@ class FfmpegMediaAdapter:
             )
             if anonymous is None:
                 if named is None:
-                    raise FfmpegMediaError("Windows render staging is unavailable")
+                    raise FfmpegMediaError(
+                        "Windows render staging is unavailable"
+                    )
                 named.claim_output()
                 pinned = named.pin(final_output)
                 try:
@@ -1352,6 +1492,137 @@ class FfmpegMediaAdapter:
                 anonymous.cleanup()
             elif named is not None:
                 named.cleanup()
+
+    @staticmethod
+    def _verify_tts_input(
+        tts_wav: Path,
+    ) -> None:
+        if (
+            not isinstance(tts_wav, Path)
+            or not tts_wav.is_file()
+            or tts_wav.is_symlink()
+        ):
+            raise FfmpegMediaError("Render TTS input must be a regular file")
+
+    def render(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        destination: Path,
+        *,
+        subtitle_path: Path | None = None,
+        target_fps: int = 30,
+        encoder: str = "libx264",
+    ) -> MediaDocument:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        anonymous = self._preflight_render_destination(destination)
+        try:
+            source_media = self.probe(source)
+            if not self._matches_plan(source_media, plan):
+                raise FfmpegMediaError(
+                    "Render source does not match the typed render plan"
+                )
+            self._verify_tts_input(tts_wav)
+            if self._digest(tts_wav) != plan.tts_audio_digest:
+                raise FfmpegMediaError(
+                    "Render TTS input does not match the typed render plan"
+                )
+            return self._render_prevalidated(
+                plan,
+                RenderInputs(
+                    source=source,
+                    subtitle_path=subtitle_path,
+                    voice_paths=(
+                        (tts_wav,) if plan.output_has_audio else ()
+                    ),
+                    voice_starts=(
+                        (Fraction(0),) if plan.output_has_audio else ()
+                    ),
+                    source_has_audio=source_media.has_audio,
+                ),
+                destination,
+                target_fps=target_fps,
+                encoder=encoder,
+                _anonymous=anonymous,
+            )
+        finally:
+            if anonymous is not None:
+                anonymous.cleanup()
+
+    def render_chunk(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        chunk: RenderChunk,
+        destination: Path,
+        *,
+        subtitle_path: Path | None = None,
+        target_fps: int = 30,
+        encoder: str = "libx264",
+    ) -> MediaDocument:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if type(chunk) is not RenderChunk:
+            raise FfmpegMediaError("Render chunk must be a RenderChunk")
+        if (
+            type(target_fps) is not int
+            or target_fps <= 0
+        ):
+            raise FfmpegMediaError("Render target FPS must be positive")
+        anonymous = self._preflight_render_destination(destination)
+        try:
+            source_media = self.probe(source)
+            if not self._matches_plan(source_media, plan):
+                raise FfmpegMediaError(
+                    "Render source does not match the typed render plan"
+                )
+            self._verify_tts_input(tts_wav)
+            if self._digest(tts_wav) != plan.tts_audio_digest:
+                raise FfmpegMediaError(
+                    "Render TTS input does not match the typed render plan"
+                )
+            try:
+                local = chunk_local_request(plan, chunk)
+            except DomainInvariantError as exc:
+                raise FfmpegMediaError("Render chunk is invalid") from exc
+            start = Fraction(chunk.interval.start_frame, target_fps)
+            duration = Fraction(
+                chunk.interval.frame_count,
+                target_fps,
+            )
+            voice_paths: tuple[Path, ...] = ()
+            voice_starts: tuple[Fraction, ...] = ()
+            voice_trim_starts: tuple[Fraction, ...] = ()
+            if (
+                plan.output_has_audio
+                and self._probe_audio_duration(tts_wav) > start
+            ):
+                voice_paths = (tts_wav,)
+                voice_starts = (Fraction(0),)
+                voice_trim_starts = (start,)
+            return self._render_prevalidated(
+                local,
+                RenderInputs(
+                    source=source,
+                    subtitle_path=subtitle_path,
+                    voice_paths=voice_paths,
+                    voice_starts=voice_starts,
+                    source_has_audio=source_media.has_audio,
+                    source_start=start,
+                    source_duration=duration,
+                    voice_trim_starts=voice_trim_starts,
+                ),
+                destination,
+                target_fps=target_fps,
+                encoder=encoder,
+                _anonymous=anonymous,
+            )
+        finally:
+            if anonymous is not None:
+                anonymous.cleanup()
 
     def validate_render(
         self,
