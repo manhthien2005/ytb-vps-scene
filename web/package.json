@@ -16,6 +16,7 @@
     "db:migrate": "tsx src/lib/db/migrate-cli.ts"
   },
   "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
     "@zeus/publisher-contracts": "file:../packages/publisher-contracts",
     "@neondatabase/serverless": "1.0.2",
     "ipaddr.js": "2.2.0",

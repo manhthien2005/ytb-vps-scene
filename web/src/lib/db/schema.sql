@@ -740,3 +740,245 @@ create table if not exists youtube_channel_stats (
 );
 
 insert into schema_migrations(version) values (11) on conflict (version) do nothing;
+
+-- migration v12: publisher control-plane profiles, devices, leases, schedules, and receipts
+create table if not exists publishing_channels (
+  id text primary key check (
+    id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ),
+  youtube_channel_id text not null unique check (
+    youtube_channel_id ~ '^UC[A-Za-z0-9_-]{22}$'
+  ),
+  title text not null check (
+    title = btrim(title)
+    and length(title) between 1 and 160
+    and position(E'\n' in title) = 0
+  ),
+  avatar_url text check (
+    avatar_url is null
+    or (length(avatar_url) between 1 and 1024 and avatar_url like 'https://%')
+  ),
+  status text not null check (status in ('ACTIVE','DISABLED')),
+  current_profile_version integer not null check (current_profile_version > 0),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists publishing_profile_versions (
+  channel_id text not null references publishing_channels(id),
+  version integer not null check (version > 0),
+  title_prompt text not null check (length(title_prompt) between 1 and 32768),
+  description_prompt text not null check (
+    length(description_prompt) between 1 and 32768
+  ),
+  description_template text not null check (
+    length(description_template) between 1 and 32768
+  ),
+  thumbnail_prompt_template text not null check (
+    length(thumbnail_prompt_template) between 1 and 32768
+  ),
+  default_tags jsonb not null check (
+    jsonb_typeof(default_tags) = 'array'
+    and pg_column_size(default_tags) <= 32768
+    and not jsonb_path_exists(default_tags, '$[*] ? (@.type() != "string")')
+  ),
+  upload_defaults jsonb not null check (
+    jsonb_typeof(upload_defaults) = 'object'
+    and pg_column_size(upload_defaults) <= 32768
+  ),
+  schedule_rules jsonb not null check (
+    jsonb_typeof(schedule_rules) = 'object'
+    and pg_column_size(schedule_rules) <= 32768
+  ),
+  created_at timestamptz not null default now(),
+  primary key(channel_id, version)
+);
+
+create or replace function prevent_publishing_profile_version_change()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'publishing profile versions are immutable';
+end
+$$;
+drop trigger if exists publishing_profile_versions_immutable
+  on publishing_profile_versions;
+create trigger publishing_profile_versions_immutable
+before update or delete on publishing_profile_versions
+for each row execute function prevent_publishing_profile_version_change();
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conrelid = 'publishing_channels'::regclass
+      and conname = 'publishing_channels_current_profile_fk'
+  ) then
+    alter table publishing_channels
+      add constraint publishing_channels_current_profile_fk
+      foreign key(id, current_profile_version)
+      references publishing_profile_versions(channel_id, version)
+      deferrable initially deferred;
+  end if;
+end
+$$;
+
+create table if not exists publisher_activation_tokens (
+  token_digest text primary key check (token_digest ~ '^[0-9a-f]{64}$'),
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now(),
+  check (expires_at > created_at),
+  check (consumed_at is null or consumed_at >= created_at)
+);
+create index if not exists publisher_activation_tokens_expiry_idx
+  on publisher_activation_tokens(expires_at)
+  where consumed_at is null;
+
+create table if not exists publisher_devices (
+  id text primary key check (
+    id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ),
+  label text not null check (
+    label = btrim(label)
+    and length(label) between 1 and 100
+    and position(E'\n' in label) = 0
+  ),
+  token_digest text not null unique check (token_digest ~ '^[0-9a-f]{64}$'),
+  status text not null check (status in ('ACTIVE','REVOKED')),
+  app_version text not null check (
+    app_version ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+  ),
+  heartbeat_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  revoked_at timestamptz,
+  check ((status = 'REVOKED') = (revoked_at is not null))
+);
+create index if not exists publisher_devices_heartbeat_idx
+  on publisher_devices(status, heartbeat_at desc);
+
+create table if not exists publication_tasks (
+  id text primary key check (
+    id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ),
+  artifact_id text not null unique references artifacts(id),
+  project_id text not null references projects(id),
+  render_job_id text not null references jobs(id),
+  state text not null check (state in (
+    'READY','RESERVED','DOWNLOADING','GENERATING','REVIEW','BROWSER_PREP',
+    'UPLOADING','WAITING_CONFIRMATION','MANUAL_ASSIST','RECONCILE_REQUIRED',
+    'SCHEDULED','PUBLISHED','FAILED_RETRYABLE','RELEASED'
+  )),
+  fencing_token bigint not null default 0 check (fencing_token >= 0),
+  channel_id text,
+  profile_version integer,
+  content_kind text not null check (content_kind in ('AUTO','LONG','SHORT')),
+  scheduled_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  completed_at timestamptz,
+  foreign key(channel_id, profile_version)
+    references publishing_profile_versions(channel_id, version),
+  check (
+    (channel_id is null and profile_version is null)
+    or
+    (channel_id is not null and profile_version is not null)
+  ),
+  check (
+    (state in ('SCHEDULED','PUBLISHED') and completed_at is not null)
+    or
+    (state not in ('SCHEDULED','PUBLISHED') and completed_at is null)
+  )
+);
+create index if not exists publication_tasks_catalog_idx
+  on publication_tasks(updated_at desc, id desc);
+create index if not exists publication_tasks_state_idx
+  on publication_tasks(state, updated_at desc);
+
+create table if not exists publication_leases (
+  task_id text primary key references publication_tasks(id),
+  device_id text not null references publisher_devices(id),
+  fencing_token bigint not null check (fencing_token > 0),
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (expires_at > created_at)
+);
+create unique index if not exists publication_one_active_lease_per_device_idx
+  on publication_leases(device_id);
+create index if not exists publication_leases_expiry_idx
+  on publication_leases(expires_at);
+
+create table if not exists publication_events (
+  id bigint generated always as identity primary key,
+  task_id text not null references publication_tasks(id),
+  device_id text references publisher_devices(id),
+  from_state text check (
+    from_state is null or from_state in (
+      'READY','RESERVED','DOWNLOADING','GENERATING','REVIEW','BROWSER_PREP',
+      'UPLOADING','WAITING_CONFIRMATION','MANUAL_ASSIST','RECONCILE_REQUIRED',
+      'SCHEDULED','PUBLISHED','FAILED_RETRYABLE','RELEASED'
+    )
+  ),
+  to_state text not null check (to_state in (
+    'READY','RESERVED','DOWNLOADING','GENERATING','REVIEW','BROWSER_PREP',
+    'UPLOADING','WAITING_CONFIRMATION','MANUAL_ASSIST','RECONCILE_REQUIRED',
+    'SCHEDULED','PUBLISHED','FAILED_RETRYABLE','RELEASED'
+  )),
+  payload jsonb not null default '{}'::jsonb check (
+    jsonb_typeof(payload) = 'object'
+    and pg_column_size(payload) <= 8192
+  ),
+  created_at timestamptz not null default now()
+);
+create index if not exists publication_events_task_created_idx
+  on publication_events(task_id, created_at, id);
+
+create table if not exists publication_schedule_reservations (
+  task_id text primary key references publication_tasks(id),
+  channel_id text not null references publishing_channels(id),
+  scheduled_at timestamptz not null,
+  status text not null check (status in ('HELD','COMMITTED','RELEASED')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index if not exists publication_schedule_slot_unique_idx
+  on publication_schedule_reservations(channel_id, scheduled_at)
+  where status in ('HELD','COMMITTED');
+create index if not exists publication_schedule_channel_time_idx
+  on publication_schedule_reservations(channel_id, scheduled_at)
+  where status in ('HELD','COMMITTED');
+
+create table if not exists publication_receipts (
+  task_id text primary key references publication_tasks(id),
+  request_id text not null unique check (
+    request_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ),
+  youtube_video_id text not null unique check (
+    youtube_video_id ~ '^[A-Za-z0-9_-]{11}$'
+  ),
+  youtube_url text not null check (
+    youtube_url = 'https://www.youtube.com/watch?v=' || youtube_video_id
+    or youtube_url = 'https://youtu.be/' || youtube_video_id
+  ),
+  final_metadata jsonb not null check (
+    jsonb_typeof(final_metadata) = 'object'
+    and pg_column_size(final_metadata) <= 16384
+  ),
+  outcome text not null check (outcome in ('SCHEDULED','PUBLISHED')),
+  effective_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  check (
+    (outcome = 'SCHEDULED' and final_metadata ->> 'visibility' = 'SCHEDULED')
+    or
+    (
+      outcome = 'PUBLISHED'
+      and final_metadata ->> 'visibility' in ('PRIVATE','UNLISTED')
+    )
+  )
+);
+
+insert into schema_migrations(version) values (12)
+on conflict (version) do nothing;
