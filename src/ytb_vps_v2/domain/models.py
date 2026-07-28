@@ -134,6 +134,7 @@ class WorkUnit:
     stage: StageName
     status: WorkStatus = WorkStatus.PENDING
     attempts: int = 0
+    dependencies: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_type("Work unit key", self.key, str)
@@ -144,6 +145,24 @@ class WorkUnit:
             raise DomainInvariantError("Work unit key must be non-empty and trimmed")
         if len(self.key) > 512:
             raise DomainInvariantError("Work unit key must be at most 512 characters")
+        if type(self.dependencies) is not tuple:
+            raise DomainInvariantError("Work unit dependencies must be a tuple")
+        if any(
+            type(item) is not str
+            or not item
+            or item != item.strip()
+            or len(item) > 512
+            for item in self.dependencies
+        ):
+            raise DomainInvariantError(
+                "Work unit dependencies must be non-empty trimmed keys"
+            )
+        if tuple(sorted(set(self.dependencies))) != self.dependencies:
+            raise DomainInvariantError(
+                "Work unit dependencies must be ordered and unique"
+            )
+        if self.key in self.dependencies:
+            raise DomainInvariantError("Work unit cannot depend on itself")
 
 
 @dataclass(frozen=True, slots=True)

@@ -60,6 +60,63 @@ class DomainModelTests(unittest.TestCase):
         with self.assertRaises(DomainInvariantError):
             Artifact("bad", PurePosixPath("bad"), 1, "not-a-sha", StageName.OCR)
 
+    def test_work_unit_dependencies_are_typed_ordered_and_do_not_self_reference(
+        self,
+    ) -> None:
+        unit = WorkUnit(
+            "render:000001",
+            StageName.RENDER,
+            dependencies=("render:plan",),
+        )
+        self.assertEqual(unit.dependencies, ("render:plan",))
+
+        invalid = (
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=["tts"],  # type: ignore[arg-type]
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=("tts", "tts"),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=("z", "a"),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=("render:1",),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=("",),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=(" tts",),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=("x" * 513,),
+            ),
+            lambda: WorkUnit(
+                "render:1",
+                StageName.RENDER,
+                dependencies=(1,),  # type: ignore[arg-type]
+            ),
+        )
+        for factory in invalid:
+            with self.subTest(factory=factory):
+                with self.assertRaises(DomainInvariantError):
+                    factory()
+
     def test_part_requires_valid_index_and_ordered_unique_chunks(self) -> None:
         part = Part(1, 2, self.interval, (0, 1, 2))
 
