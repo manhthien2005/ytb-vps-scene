@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from dataclasses import replace
 from pathlib import PurePosixPath
 
-from ytb_vps_v2.application.render_chunks import chunk_local_request
+from ytb_vps_v2.application.render_chunks import (
+    chunk_local_request,
+    part_local_request,
+)
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import (
@@ -115,6 +119,44 @@ class ChunkLocalRequestTests(unittest.TestCase):
                 global_request(),
                 RenderChunk(3, FrameInterval(600, 901)),
             )
+
+
+class PartLocalRequestTests(unittest.TestCase):
+    def test_clips_rebases_and_preserves_the_parts_chunk_count(self) -> None:
+        plan = global_request()
+        first = Part(1, 2, FrameInterval(0, 300), (0,))
+        second = Part(2, 2, FrameInterval(300, 900), (1, 2))
+        plan = replace(plan, parts=(first, second))
+
+        local = part_local_request(plan, second)
+
+        self.assertEqual(local.frame_count, 600)
+        self.assertEqual(
+            tuple(item.interval for item in local.cues),
+            (
+                FrameInterval(0, 30),
+                FrameInterval(150, 350),
+                FrameInterval(400, 500),
+            ),
+        )
+        self.assertEqual(
+            tuple(item.interval for item in local.blur_regions),
+            (
+                FrameInterval(0, 50),
+                FrameInterval(0, 600),
+                FrameInterval(400, 500),
+            ),
+        )
+        self.assertEqual(
+            local.parts,
+            (Part(1, 1, FrameInterval(0, 600), (1, 2)),),
+        )
+
+    def test_rejects_a_part_not_owned_by_the_global_request(self) -> None:
+        foreign = Part(1, 1, FrameInterval(0, 450), (0,))
+
+        with self.assertRaisesRegex(DomainInvariantError, "global request"):
+            part_local_request(global_request(), foreign)
 
 
 if __name__ == "__main__":
