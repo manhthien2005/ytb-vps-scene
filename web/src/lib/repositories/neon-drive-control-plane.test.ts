@@ -24,6 +24,7 @@ const SOURCE_CHECKSUM = "a".repeat(64);
 const SOURCE_ID = "20000000-0000-4000-8000-000000000002";
 const OUTPUT_ID = "20000000-0000-4000-8000-000000000003";
 const DELETED_ID = "20000000-0000-4000-8000-000000000004";
+const OUTPUT_PART_TWO_ID = "20000000-0000-4000-8000-000000000005";
 
 describe("Drive control-plane repository", () => {
   let db: PGlite;
@@ -110,11 +111,13 @@ describe("Drive control-plane repository", () => {
       await db.query(
         `insert into artifacts(
            id,project_id,kind,status,drive_file_id,drive_parent_id,display_name,mime_type,
-           expected_size_bytes,actual_size_bytes,verified_at
-         ) values ($1,$2,$3,$4,$5,$6,$7,'video/mp4',100,100,$8)`,
+           expected_size_bytes,actual_size_bytes,verified_at,part_index,part_count
+         ) values ($1,$2,$3,$4,$5,$6,$7,'video/mp4',100,100,$8,$9,$10)`,
         [
           id, project.id, kind, status, `drive-file-${id.slice(-3)}`,
           project.driveInputFolderId!, `${kind.toLowerCase()}.mp4`, NOW,
+          kind === "OUTPUT" ? 1 : null,
+          kind === "OUTPUT" ? 1 : null,
         ],
       );
     }
@@ -134,6 +137,43 @@ describe("Drive control-plane repository", () => {
     }))).toEqual([
       { id: SOURCE_ID, kind: "SOURCE", projectName: "Phim A", verifiedAt: NOW.toISOString() },
       { id: OUTPUT_ID, kind: "OUTPUT", projectName: "Phim A", verifiedAt: NOW.toISOString() },
+    ]);
+  });
+
+  it("orders every managed OUTPUT for a job by Part index", async () => {
+    const { project, repository } = await seedManagedArtifacts();
+    await db.query(
+      "update artifacts set part_count=2,created_at=$2 where id=$1",
+      [OUTPUT_ID, "2026-07-19T12:02:00.000Z"],
+    );
+    await db.query(
+      `insert into artifacts(
+         id,project_id,kind,status,drive_file_id,drive_parent_id,display_name,mime_type,
+         expected_size_bytes,actual_size_bytes,verified_at,part_index,part_count,created_at
+       ) values ($1,$2,'OUTPUT','READY',$3,$4,'part-02-of-02.mp4','video/mp4',
+         100,100,$5,2,2,$6)`,
+      [
+        OUTPUT_PART_TWO_ID,
+        project.id,
+        "drive-output-part-002",
+        project.driveProjectFolderId,
+        NOW,
+        "2026-07-19T12:01:00.000Z",
+      ],
+    );
+
+    const records = await repository.listManagedArtifacts();
+    expect(
+      records
+        .filter((record) => record.artifact.kind === "OUTPUT")
+        .map((record) => ({
+          id: record.artifact.id,
+          partIndex: record.partIndex,
+          partCount: record.partCount,
+        })),
+    ).toEqual([
+      { id: OUTPUT_ID, partIndex: 1, partCount: 2 },
+      { id: OUTPUT_PART_TWO_ID, partIndex: 2, partCount: 2 },
     ]);
   });
 

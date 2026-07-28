@@ -86,6 +86,8 @@ export type OutputReservation = Readonly<{
   fencingToken: number;
   driveFileId: string;
   driveParentId: string;
+  partIndex: number;
+  partCount: number;
   sizeBytes: number;
   checksumSha256: string;
   now: Date;
@@ -97,6 +99,8 @@ export type OutputCompletion = Readonly<{
   workerId: string;
   fencingToken: number;
   driveFileId: string;
+  partIndex: number;
+  partCount: number;
   sizeBytes: number;
   now: Date;
 }>;
@@ -112,7 +116,11 @@ export interface WorkerControlPlaneRepository extends WorkerSessionRepository {
   renewLease(input: RenewLease): Promise<WorkerLease | null>;
   updateJobProgress(input: JobProgress): Promise<"UPDATED" | "LEASE_LOST">;
   getFencedExecution(workerId: string, jobId: string, fencingToken: number, now: Date): Promise<MediaExecutionDescriptor | null>;
-  reserveOutput(input: OutputReservation): Promise<"RESERVED" | "REPLAY" | "LEASE_LOST">;
-  completeOutput(input: OutputCompletion): Promise<"COMPLETED" | "REPLAY" | "LEASE_LOST">;
+  reserveOutput(input: OutputReservation): Promise<
+    "RESERVED" | "PENDING_REPLAY" | "READY_REPLAY" | "LEASE_LOST"
+  >;
+  completeOutput(input: OutputCompletion): Promise<
+    "PART_COMPLETED" | "COMPLETED" | "REPLAY" | "LEASE_LOST"
+  >;
   expireWorkersAndLeases(now: Date): Promise<void>;
 }

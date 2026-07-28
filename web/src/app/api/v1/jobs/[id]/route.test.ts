@@ -71,6 +71,15 @@ const JOB: JobDetailReadModel = {
     sizeBytes: 512,
     checksumSha256: "b".repeat(64),
   },
+  outputParts: [{
+    artifactId: OUTPUT_ID,
+    displayName: "output.mp4",
+    mimeType: "video/mp4",
+    sizeBytes: 512,
+    checksumSha256: "b".repeat(64),
+    partIndex: 1,
+    partCount: 1,
+  }],
   workerSummary: {
     id: WORKER_ID,
     state: "BUSY",

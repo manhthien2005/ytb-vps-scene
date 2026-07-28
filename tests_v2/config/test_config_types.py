@@ -29,6 +29,7 @@ class ConfigTypeTests(unittest.TestCase):
         self.assertEqual(config.translation.mode, PipelineMode.CUE_TRANSLATION)
         self.assertEqual(config.render.subtitle_height_ratio, Fraction(5, 100))
         self.assertEqual(config.render.subtitle_font_name, "Arial")
+        self.assertEqual(config.render.max_part_seconds, 1_800)
         self.assertFalse(config.safety.cleanup_after_upload)
         with self.assertRaises(FrozenInstanceError):
             config.media.target_fps = 25  # type: ignore[misc]
@@ -43,6 +44,8 @@ class ConfigTypeTests(unittest.TestCase):
             lambda: TranslationConfig(prompt_revision=-1),
             lambda: RenderConfig(font_size=0),
             lambda: RenderConfig(outline=-1),
+            lambda: RenderConfig(max_part_seconds=True),
+            lambda: RenderConfig(max_part_seconds=0),
             lambda: RenderConfig(subtitle_height_ratio=Fraction(0)),
             lambda: RenderConfig(subtitle_height_ratio=Fraction(101, 100)),
             lambda: RuntimeConfig(ocr_parallelism=0),
@@ -91,6 +94,11 @@ class ConfigTypeTests(unittest.TestCase):
             EffectiveConfig(
                 media=MediaConfig(target_fps=1),
                 ocr=OcrConfig(sample_fps=Fraction(2)),
+            )
+        with self.assertRaisesRegex(ConfigError, "Part target"):
+            EffectiveConfig(
+                media=MediaConfig(chunk_seconds=300),
+                render=RenderConfig(max_part_seconds=299),
             )
 
     def test_max_fit_speed_accepts_every_positive_fraction(self) -> None:

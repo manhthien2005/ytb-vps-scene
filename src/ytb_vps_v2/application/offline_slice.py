@@ -13,6 +13,10 @@ from ytb_vps_v2.application.chunked_render import (
     PreparedRender,
 )
 from ytb_vps_v2.application.invalidation import plan_invalidation
+from ytb_vps_v2.application.multipart_publish import (
+    MultipartPublishCoordinator,
+)
+from ytb_vps_v2.application.render_chunks import part_local_request
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
     CheckpointRecord,
@@ -34,6 +38,8 @@ from ytb_vps_v2.domain.models import (
     WorkStatus,
     WorkUnit,
 )
+from ytb_vps_v2.domain.parts import MAX_PART_SECONDS
+from ytb_vps_v2.domain.render_chunks import part_file_name
 from ytb_vps_v2.domain.pipeline import (
     OCR_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
@@ -116,13 +122,15 @@ _PATHS = tuple(PIPELINE_ARTIFACT_PATHS[item] for item in _DOCUMENT_TYPES)
 _NAMES = tuple(f"{stage.value.lower()}-document" for stage in STAGE_ORDER)
 _UNIT_KEYS = tuple(stage.value.lower() for stage in STAGE_ORDER)
 _TTS_AUDIO_PATH = PurePosixPath("artifacts/tts/voice.wav")
-_RENDERED_PATH = PurePosixPath("artifacts/render/rendered.mp4")
-_PUBLISHED_PATH = PurePosixPath("published/part-001.mp4")
+_LEGACY_RENDERED_PATH = PurePosixPath(
+    "artifacts/render/rendered.mp4"
+)
+_LEGACY_PUBLISHED_PATH = PurePosixPath("published/part-001.mp4")
 _SIDE_NAMES = {
     StageName.TTS: "tts-audio",
-    StageName.RENDER: "rendered-video",
-    StageName.PUBLISH: "published-part-001",
 }
+_LEGACY_RENDERED_NAME = "rendered-video"
+_LEGACY_PUBLISHED_NAME = "published-part-001"
 _VERIFY_METHOD = "sha256-readback"
 _MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 
@@ -144,7 +152,10 @@ class OfflineSliceRequest:
     # User-authored static masks from the scene editor.  These are intentionally
     # immutable for one run and are combined with OCR-derived dynamic masks.
     blur_regions: tuple[BlurRegion, ...] = ()
+    target_fps: int = 30
     chunk_seconds: int = 300
+    max_part_seconds: int = MAX_PART_SECONDS
+    legacy_s2_render_fingerprint: Fingerprint | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,12 +172,6 @@ class OfflineSliceResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedPublish:
-    plan: RenderPlanDocument
-    source: Path
-
-
-@dataclass(frozen=True, slots=True)
 class PreparedBackup:
     publication: PublicationDocument
     proof: CheckpointManifest | None
@@ -174,7 +179,7 @@ class PreparedBackup:
 
 
 PreparedStage: TypeAlias = (
-    PipelineDocument | TtsSynthesis | PreparedRender | PreparedPublish | PreparedBackup
+    PipelineDocument | TtsSynthesis | PreparedRender | PreparedBackup
 )
 
 
@@ -242,13 +247,81 @@ class OfflineSliceRunner:
                     request.config_fingerprints,
                 )
                 if invalidation.affected_stages:
+                    preserved_render_units: tuple[str, ...] = ()
+                    legacy_retirements: tuple[
+                        tuple[str, str, PurePosixPath],
+                        ...,
+                    ] = ()
+                    if (
+                        request.max_part_seconds == MAX_PART_SECONDS
+                        and request.legacy_s2_render_fingerprint is not None
+                        and invalidation.direct_stages
+                        == (StageName.RENDER,)
+                        and next(
+                            item.fingerprint
+                            for item in stored
+                            if item.stage is StageName.RENDER
+                        )
+                        == request.legacy_s2_render_fingerprint
+                    ):
+                        preserved_render_units = tuple(
+                            sorted(
+                                unit.key
+                                for unit in self.state.work_units(
+                                    request.job_id
+                                )
+                                if (
+                                    unit.key == "render:plan"
+                                    or re.fullmatch(
+                                        r"render:\d{6}",
+                                        unit.key,
+                                    )
+                                    is not None
+                                )
+                            )
+                        )
+                        legacy_retirements = tuple(
+                            (
+                                key,
+                                name,
+                                path,
+                            )
+                            for key, name, path in (
+                                (
+                                    "render",
+                                    _LEGACY_RENDERED_NAME,
+                                    _LEGACY_RENDERED_PATH,
+                                ),
+                                (
+                                    "publish",
+                                    _LEGACY_PUBLISHED_NAME,
+                                    _LEGACY_PUBLISHED_PATH,
+                                ),
+                            )
+                            if any(
+                                artifact.name == name
+                                and artifact.relative_path == path
+                                for artifact
+                                in self.state.artifacts_for_unit(
+                                    request.job_id,
+                                    key,
+                                )
+                            )
+                        )
                     self.state.reconfigure_job(
                         request.job_id,
                         stored,
                         request.config_fingerprints,
                         invalidation,
                         request.at,
+                        preserve_render_units=preserved_render_units,
                     )
+                    for key, name, path in legacy_retirements:
+                        self.state.retire_invalid_artifacts(
+                            request.job_id,
+                            key,
+                            ((name, path),),
+                        )
             self.state.record_verified_input(request.job_id, request.verified_input)
             self._ensure_units(request)
             resumed = self._resume_workspace(request)
@@ -265,7 +338,10 @@ class OfflineSliceRunner:
                             f"Succeeded stage lacks verified canonical output: {stage.value}"
                         )
                     continue
-                delayed_start = stage is StageName.RENDER
+                delayed_start = stage in {
+                    StageName.RENDER,
+                    StageName.PUBLISH,
+                }
                 if not delayed_start:
                     self.state.start_work_unit(
                         request.job_id,
@@ -281,6 +357,7 @@ class OfflineSliceRunner:
                         workspace,
                         documents,
                         writer,
+                        publisher,
                         resumed.proof_repair_token,
                     )
                     if delayed_start:
@@ -441,12 +518,30 @@ class OfflineSliceRunner:
                 )
         if type(request.output_has_audio) is not bool:
             raise OfflineSliceError("Output audio policy must be boolean")
+        if type(request.target_fps) is not int or request.target_fps < 1:
+            raise OfflineSliceError(
+                "Media target FPS must be a positive integer"
+            )
         if (
             type(request.chunk_seconds) is not int
             or request.chunk_seconds < 1
         ):
             raise OfflineSliceError(
                 "Render chunk seconds must be a positive integer"
+            )
+        if (
+            type(request.max_part_seconds) is not int
+            or request.max_part_seconds < request.chunk_seconds
+        ):
+            raise OfflineSliceError(
+                "Maximum Part seconds must cover at least one render chunk"
+            )
+        if (
+            request.legacy_s2_render_fingerprint is not None
+            and type(request.legacy_s2_render_fingerprint) is not Fingerprint
+        ):
+            raise OfflineSliceError(
+                "Legacy S2 render fingerprint must be Fingerprint"
             )
         if (
             type(request.verification_observed_at) is not int
@@ -487,19 +582,42 @@ class OfflineSliceRunner:
                     request.at,
                 )
             else:
-                dynamic_render = (
-                    stage is StageName.RENDER
-                    and unit.dependencies
-                    and all(
-                        re.fullmatch(r"render:\d{6}", item)
-                        for item in unit.dependencies
+                dynamic_parts = (
+                    (
+                        stage is StageName.RENDER
+                        and unit.dependencies
+                        and all(
+                            re.fullmatch(r"render:part:\d{6}", item)
+                            is not None
+                            for item in unit.dependencies
+                        )
+                    )
+                    or (
+                        stage is StageName.RENDER
+                        and unit.dependencies
+                        and all(
+                            re.fullmatch(r"render:\d{6}", item)
+                            is not None
+                            for item in unit.dependencies
+                        )
+                    )
+                    or (
+                        stage is StageName.PUBLISH
+                        and unit.dependencies
+                        and all(
+                            re.fullmatch(
+                                r"publish:part:\d{6}",
+                                item,
+                            )
+                            for item in unit.dependencies
+                        )
                     )
                 )
                 if (
                     unit.stage is not stage
                     or (
                         unit.dependencies != dependencies
-                        and not dynamic_render
+                        and not dynamic_parts
                     )
                 ):
                     raise OfflineSliceError("Stored work-unit graph is inconsistent")
@@ -618,8 +736,7 @@ class OfflineSliceRunner:
 
     @staticmethod
     def _discard_prepared(prepared: PreparedStage | None) -> None:
-        if type(prepared) is PreparedRender:
-            prepared.temporary_path.unlink(missing_ok=True)
+        return None
 
     @staticmethod
     def _digest(raw: bytes) -> FileDigest:
@@ -671,22 +788,6 @@ class OfflineSliceRunner:
             if document.audio_path != _TTS_AUDIO_PATH:
                 raise OfflineSliceError("TTS side path is not canonical")
             side = (_SIDE_NAMES[stage], document.audio_path, document.audio_digest)
-        elif type(document) is RenderPlanDocument:
-            if document.rendered_path != _RENDERED_PATH:
-                raise OfflineSliceError("Rendered side path is not canonical")
-            side = (
-                _SIDE_NAMES[stage],
-                document.rendered_path,
-                document.rendered_digest,
-            )
-        elif type(document) is PublicationDocument:
-            if document.part_paths != (_PUBLISHED_PATH,) or len(document.part_digests) != 1:
-                raise OfflineSliceError("Published side path is not canonical")
-            side = (
-                _SIDE_NAMES[stage],
-                document.part_paths[0],
-                document.part_digests[0],
-            )
         if side is not None:
             name, path, digest = side
             artifacts.append(
@@ -708,36 +809,60 @@ class OfflineSliceRunner:
         artifacts: tuple[Artifact, ...],
     ) -> tuple[Artifact, Artifact | None] | None:
         dependencies = self._dependencies(index)
-        expected = {(_NAMES[index], _PATHS[index])}
-        side_name = _SIDE_NAMES.get(stage)
-        side_path = {
-            StageName.TTS: _TTS_AUDIO_PATH,
-            StageName.RENDER: _RENDERED_PATH,
-            StageName.PUBLISH: _PUBLISHED_PATH,
-        }.get(stage)
-        if side_name is not None and side_path is not None:
-            expected.add((side_name, side_path))
+        primary_identity = (_NAMES[index], _PATHS[index])
+        layouts = [{primary_identity}]
+        if stage is StageName.TTS:
+            layouts = [
+                {
+                    primary_identity,
+                    (_SIDE_NAMES[stage], _TTS_AUDIO_PATH),
+                }
+            ]
+        elif stage is StageName.RENDER:
+            layouts.append(
+                {
+                    primary_identity,
+                    (
+                        _LEGACY_RENDERED_NAME,
+                        _LEGACY_RENDERED_PATH,
+                    ),
+                }
+            )
+        elif stage is StageName.PUBLISH:
+            layouts.append(
+                {
+                    primary_identity,
+                    (
+                        _LEGACY_PUBLISHED_NAME,
+                        _LEGACY_PUBLISHED_PATH,
+                    ),
+                }
+            )
         actual = {(item.name, item.relative_path) for item in artifacts}
         if len(actual) != len(artifacts) or any(
             item.owner is not stage or item.dependencies != dependencies
             for item in artifacts
         ):
             raise OfflineSliceError("Canonical artifact ownership is ambiguous")
-        if not actual.issubset(expected):
+        allowed = set().union(*layouts)
+        if not actual.issubset(allowed):
             raise OfflineSliceError(
                 "Canonical artifact graph is ambiguous: unknown extras"
             )
-        if actual != expected:
+        if actual not in layouts:
             return None
         by_identity = {
             (item.name, item.relative_path): item
             for item in artifacts
         }
-        primary = by_identity[(_NAMES[index], _PATHS[index])]
-        side = (
-            None
-            if side_name is None or side_path is None
-            else by_identity[(side_name, side_path)]
+        primary = by_identity[primary_identity]
+        side = next(
+            (
+                item
+                for identity, item in by_identity.items()
+                if identity != primary_identity
+            ),
+            None,
         )
         return primary, side
 
@@ -764,6 +889,180 @@ class OfflineSliceRunner:
         if stage is StageName.BACKUP and type(upstream) is PublicationDocument:
             return parse_checkpoint_document_bytes(raw, upstream)
         raise OfflineSliceError("Canonical document dependency type is invalid")
+
+    def _verify_auxiliary_unit(
+        self,
+        request: OfflineSliceRequest,
+        unit: WorkUnit,
+        documents: dict[StageName, PipelineDocument],
+        writer: ArtifactWriter,
+    ) -> bool:
+        artifacts = self.state.artifacts_for_unit(
+            request.job_id,
+            unit.key,
+        )
+        if len(artifacts) != 1:
+            return False
+        artifact = artifacts[0]
+        local_request: RenderRequest | None = None
+        render_plan = documents.get(StageName.RENDER)
+        publication = documents.get(StageName.PUBLISH)
+        render_plan_match = re.fullmatch(r"render:plan", unit.key)
+        chunk_match = re.fullmatch(r"render:([0-9]{6})", unit.key)
+        render_part_match = re.fullmatch(
+            r"render:part:([0-9]{6})",
+            unit.key,
+        )
+        publish_part_match = re.fullmatch(
+            r"publish:part:([0-9]{6})",
+            unit.key,
+        )
+        canonical = False
+        if render_plan_match is not None:
+            canonical = (
+                artifact.name == "render-chunk-plan"
+                and artifact.relative_path
+                == RENDER_CHUNK_PLAN_ARTIFACT_PATH
+                and artifact.owner is StageName.RENDER
+                and artifact.dependencies == ("tts-document",)
+            )
+        elif chunk_match is not None:
+            index = int(chunk_match.group(1))
+            canonical = (
+                artifact.name == f"render-chunk-{index:06d}"
+                and artifact.relative_path
+                == PurePosixPath(
+                    "artifacts/render/chunks/"
+                    f"chunk-{index:06d}.mp4"
+                )
+                and artifact.owner is StageName.RENDER
+                and artifact.dependencies
+                == ("render-chunk-plan",)
+            )
+        elif render_part_match is not None:
+            index = int(render_part_match.group(1))
+            if type(render_plan) is RenderPlanDocument:
+                matches = tuple(
+                    item
+                    for item in render_plan.rendered_parts
+                    if item.part.part_index == index
+                )
+                if len(matches) == 1:
+                    rendered = matches[0]
+                    canonical = (
+                        artifact.name
+                        == f"render-part-{index:06d}"
+                        and artifact.relative_path == rendered.path
+                        and FileDigest(
+                            artifact.size_bytes,
+                            artifact.sha256,
+                        )
+                        == rendered.digest
+                        and artifact.owner is StageName.RENDER
+                        and artifact.dependencies
+                        == tuple(
+                            f"render-chunk-{chunk_index:06d}"
+                            for chunk_index
+                            in rendered.part.chunk_indexes
+                        )
+                    )
+                    local_request = part_local_request(
+                        self._render_request(render_plan),
+                        rendered.part,
+                    )
+            else:
+                name_match = re.fullmatch(
+                    r"part-([0-9]{2,3})-of-([0-9]{2,3})\.mp4",
+                    artifact.relative_path.name,
+                )
+                canonical = (
+                    artifact.name == f"render-part-{index:06d}"
+                    and artifact.relative_path.parent
+                    == PurePosixPath("artifacts/render/parts")
+                    and name_match is not None
+                    and int(name_match.group(1)) == index
+                    and index <= int(name_match.group(2)) <= 999
+                    and artifact.owner is StageName.RENDER
+                    and bool(artifact.dependencies)
+                    and all(
+                        re.fullmatch(
+                            r"render-chunk-[0-9]{6}",
+                            dependency,
+                        )
+                        for dependency in artifact.dependencies
+                    )
+                )
+        elif publish_part_match is not None:
+            index = int(publish_part_match.group(1))
+            if type(render_plan) is RenderPlanDocument:
+                matches = tuple(
+                    item
+                    for item in render_plan.rendered_parts
+                    if item.part.part_index == index
+                )
+                if len(matches) == 1:
+                    rendered = matches[0]
+                    expected_path = (
+                        PurePosixPath("published")
+                        / part_file_name(
+                            index,
+                            rendered.part.part_count,
+                        )
+                    )
+                    canonical = (
+                        artifact.name
+                        == f"published-part-{index:06d}"
+                        and artifact.relative_path == expected_path
+                        and FileDigest(
+                            artifact.size_bytes,
+                            artifact.sha256,
+                        )
+                        == rendered.digest
+                        and artifact.owner is StageName.PUBLISH
+                        and artifact.dependencies
+                        == (f"render-part-{index:06d}",)
+                    )
+                    if (
+                        canonical
+                        and type(publication) is PublicationDocument
+                    ):
+                        position = index - 1
+                        canonical = (
+                            publication.parts[position]
+                            == rendered.part
+                            and publication.part_paths[position]
+                            == expected_path
+                            and publication.part_digests[position]
+                            == rendered.digest
+                        )
+                    local_request = part_local_request(
+                        self._render_request(render_plan),
+                        rendered.part,
+                    )
+        if not canonical:
+            return False
+        media = documents.get(StageName.INGEST)
+        if local_request is not None and type(media) is not MediaDocument:
+            return False
+        try:
+            writer.verify(
+                artifact.relative_path,
+                FileDigest(
+                    artifact.size_bytes,
+                    artifact.sha256,
+                ),
+            )
+            if local_request is not None:
+                self.media.validate_render(
+                    request.workspace_root.joinpath(
+                        *artifact.relative_path.parts
+                    ),
+                    local_request,
+                    target_fps=media.timeline.target_fps,
+                )
+        except (OSError, RuntimeError):
+            return False
+        return True
 
     def _resume_workspace(self, request: OfflineSliceRequest) -> ResumeState:
         artifacts = self.state.valid_artifacts(request.job_id)
@@ -819,62 +1118,32 @@ class OfflineSliceRunner:
 
         if damaged is None:
             for unit in self.state.work_units(request.job_id):
-                match = re.fullmatch(
-                    r"render:(plan|[0-9]{6})",
-                    unit.key,
+                auxiliary = (
+                    re.fullmatch(
+                        r"render:(?:plan|[0-9]{6}|part:[0-9]{6})",
+                        unit.key,
+                    )
+                    is not None
+                    or re.fullmatch(
+                        r"publish:part:[0-9]{6}",
+                        unit.key,
+                    )
+                    is not None
                 )
-                if (
-                    match is None
-                    or unit.status is not WorkStatus.SUCCEEDED
-                ):
+                if not auxiliary or unit.status is not WorkStatus.SUCCEEDED:
                     continue
-                auxiliary = self.state.artifacts_for_unit(
-                    request.job_id,
-                    unit.key,
-                )
-                canonical = len(auxiliary) == 1
-                if canonical:
-                    artifact = auxiliary[0]
-                    if match.group(1) == "plan":
-                        canonical = (
-                            artifact.name == "render-chunk-plan"
-                            and artifact.relative_path
-                            == RENDER_CHUNK_PLAN_ARTIFACT_PATH
-                            and artifact.owner is StageName.RENDER
-                            and artifact.dependencies == ("tts-document",)
-                        )
-                    else:
-                        index = int(match.group(1))
-                        canonical = (
-                            artifact.name
-                            == f"render-chunk-{index:06d}"
-                            and artifact.relative_path
-                            == PurePosixPath(
-                                "artifacts/render/chunks/"
-                                f"chunk-{index:06d}.mp4"
-                            )
-                            and artifact.owner is StageName.RENDER
-                            and artifact.dependencies
-                            == ("render-chunk-plan",)
-                        )
-                if canonical:
-                    try:
-                        writer.verify(
-                            auxiliary[0].relative_path,
-                            FileDigest(
-                                auxiliary[0].size_bytes,
-                                auxiliary[0].sha256,
-                            ),
-                        )
-                    except (OSError, RuntimeError):
-                        canonical = False
-                if not canonical:
+                if not self._verify_auxiliary_unit(
+                    request,
+                    unit,
+                    documents,
+                    writer,
+                ):
                     self.state.invalidate_work_units(
                         request.job_id,
                         (unit.key,),
                         request.at,
                     )
-                    damaged = StageName.RENDER
+                    damaged = unit.stage
                     exact_damaged_unit = unit.key
                     break
 
@@ -887,11 +1156,47 @@ class OfflineSliceRunner:
             return ResumeState(request.workspace_root, documents, None)
 
         if exact_damaged_unit is None:
+            invalidated = (damaged.value.lower(),)
+            if damaged is StageName.RENDER:
+                invalidated = (
+                    "backup",
+                    "publish",
+                    "render",
+                )
             self.state.invalidate_work_units(
                 request.job_id,
-                (damaged.value.lower(),),
+                invalidated,
                 request.at,
             )
+        for key, name, path in (
+            (
+                "render",
+                _LEGACY_RENDERED_NAME,
+                _LEGACY_RENDERED_PATH,
+            ),
+            (
+                "publish",
+                _LEGACY_PUBLISHED_NAME,
+                _LEGACY_PUBLISHED_PATH,
+            ),
+        ):
+            if (
+                self.state.get_work_unit(
+                    request.job_id,
+                    key,
+                ).status
+                is WorkStatus.INVALID
+                and any(
+                    artifact.name == name
+                    and artifact.relative_path == path
+                    for artifact in by_unit[key]
+                )
+            ):
+                self.state.retire_invalid_artifacts(
+                    request.job_id,
+                    key,
+                    ((name, path),),
+                )
         proof_repair_token = None
         if damaged is StageName.BACKUP:
             primary = primary_by_stage.get(StageName.BACKUP)
@@ -955,11 +1260,21 @@ class OfflineSliceRunner:
         expected: tuple[PurePosixPath, FileDigest] | None = None
         if type(document) is TtsDocument:
             expected = (document.audio_path, document.audio_digest)
-        elif type(document) is RenderPlanDocument:
-            expected = (document.rendered_path, document.rendered_digest)
-        elif type(document) is PublicationDocument:
-            if len(document.part_paths) != 1 or len(document.part_digests) != 1:
-                raise OfflineSliceError("Offline publication side evidence is invalid")
+        elif (
+            type(document) is RenderPlanDocument
+            and len(document.rendered_parts) == 1
+            and document.rendered_parts[0].path
+            == _LEGACY_RENDERED_PATH
+        ):
+            expected = (
+                document.rendered_parts[0].path,
+                document.rendered_parts[0].digest,
+            )
+        elif (
+            type(document) is PublicationDocument
+            and document.part_paths == (_LEGACY_PUBLISHED_PATH,)
+            and len(document.part_digests) == 1
+        ):
             expected = (document.part_paths[0], document.part_digests[0])
         if expected is not None:
             path, digest = expected
@@ -972,16 +1287,33 @@ class OfflineSliceRunner:
         elif side is not None:
             raise OfflineSliceError("Unexpected side artifact row")
 
-        if type(document) is RenderPlanDocument:
-            self.media.validate_render(
-                workspace.joinpath(*document.rendered_path.parts),
-                self._render_request(document),
+        if (
+            type(document) is RenderPlanDocument
+            and expected is not None
+        ):
+            raise OfflineSliceError(
+                "Legacy rendered output requires multipart migration"
             )
-        elif type(document) is PublicationDocument:
-            plan = self._document(documents, StageName.RENDER, RenderPlanDocument)
+        if (
+            type(document) is PublicationDocument
+            and expected is not None
+        ):
+            plan = self._document(
+                documents,
+                StageName.RENDER,
+                RenderPlanDocument,
+            )
             self.media.validate_render(
                 workspace.joinpath(*document.part_paths[0].parts),
-                self._render_request(plan),
+                part_local_request(
+                    self._render_request(plan),
+                    plan.parts[0],
+                ),
+                target_fps=self._document(
+                    documents,
+                    StageName.INGEST,
+                    MediaDocument,
+                ).timeline.target_fps,
             )
         elif type(document) is CheckpointDocument:
             records = tuple(
@@ -1005,11 +1337,15 @@ class OfflineSliceRunner:
         workspace: Path,
         documents: dict[StageName, PipelineDocument],
         writer: ArtifactWriter,
+        publisher: PartPublisher,
         proof_repair_token: str | None,
     ) -> PreparedStage:
         if stage is StageName.INGEST:
             return replace(
-                self.media.probe(request.source),
+                self.media.probe(
+                    request.source,
+                    target_fps=request.target_fps,
+                ),
                 job_id=request.job_id,
                 source_path=request.verified_input.archive.key,
                 source_digest=request.verified_input.archive.digest,
@@ -1045,6 +1381,11 @@ class OfflineSliceRunner:
                 self._document(documents, StageName.TRANSLATE, TranslationDocument)
             )
         if stage is StageName.RENDER:
+            media = self._document(
+                documents,
+                StageName.INGEST,
+                MediaDocument,
+            )
             tts = self._document(documents, StageName.TTS, TtsDocument)
             track = self._document(documents, StageName.TRACK, TrackDocument)
             render_request = RenderRequest(
@@ -1087,6 +1428,17 @@ class OfflineSliceRunner:
                 request=render_request,
                 render_fingerprint=render_fingerprint,
                 chunk_seconds=request.chunk_seconds,
+                max_part_seconds=request.max_part_seconds,
+                compatible_plan_fingerprints=(
+                    (request.legacy_s2_render_fingerprint,)
+                    if (
+                        request.max_part_seconds == MAX_PART_SECONDS
+                        and request.legacy_s2_render_fingerprint
+                        is not None
+                    )
+                    else ()
+                ),
+                target_fps=media.timeline.target_fps,
                 workspace=workspace,
                 snapshot_dir=request.snapshot_dir,
                 writer=writer,
@@ -1097,11 +1449,16 @@ class OfflineSliceRunner:
             )
         if stage is StageName.PUBLISH:
             plan = self._document(documents, StageName.RENDER, RenderPlanDocument)
-            source = workspace.joinpath(*plan.rendered_path.parts)
-            if self.files.digest(source) != plan.rendered_digest:
-                raise OfflineSliceError("Rendered side asset changed before publication")
-            self.media.validate_render(source, self._render_request(plan))
-            return PreparedPublish(plan, source)
+            return MultipartPublishCoordinator(
+                self.state,
+                self.files,
+            ).prepare(
+                job_id=request.job_id,
+                plan=plan,
+                workspace=workspace,
+                publisher=publisher,
+                at=request.at,
+            )
         if stage is StageName.BACKUP:
             publication = self._document(
                 documents,
@@ -1189,14 +1546,6 @@ class OfflineSliceRunner:
             writer.verify(prepared.document.audio_path, entry.digest)
             return prepared.document
         if stage is StageName.RENDER and type(prepared) is PreparedRender:
-            try:
-                rendered_entry = writer.write_file(
-                    _RENDERED_PATH,
-                    prepared.temporary_path,
-                )
-            finally:
-                prepared.temporary_path.unlink(missing_ok=True)
-            writer.verify(_RENDERED_PATH, rendered_entry.digest)
             request = prepared.request
             return RenderPlanDocument(
                 request.schema_version,
@@ -1213,32 +1562,13 @@ class OfflineSliceRunner:
                 request.tts_audio_digest,
                 request.parts,
                 request.output_has_audio,
-                _RENDERED_PATH,
-                rendered_entry.digest,
+                prepared.rendered_parts,
             )
-        if stage is StageName.PUBLISH and type(prepared) is PreparedPublish:
-            plan = prepared.plan
-            if len(plan.parts) != 1:
-                raise OfflineSliceError(
-                    "Offline publication requires exactly one Part"
-                )
-            part_entry = publisher.publish(
-                prepared.source,
-                plan.parts[0],
-            )
-            return PublicationDocument(
-                plan.schema_version,
-                plan.job_id,
-                plan.media_digest,
-                plan.frame_count,
-                plan.width,
-                plan.height,
-                RENDER_PLAN_ARTIFACT_PATH,
-                self._digest(canonical_document_bytes(plan)),
-                plan.parts,
-                (part_entry.key,),
-                (part_entry.digest,),
-            )
+        if (
+            stage is StageName.PUBLISH
+            and type(prepared) is PublicationDocument
+        ):
+            return prepared
         if stage is StageName.BACKUP and type(prepared) is PreparedBackup:
             publication = prepared.publication
             record = prepared.record

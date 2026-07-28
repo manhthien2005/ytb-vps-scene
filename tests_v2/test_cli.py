@@ -6,6 +6,8 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 
 class CliTests(unittest.TestCase):
@@ -66,6 +68,69 @@ class CliTests(unittest.TestCase):
                 "media-run", "--source", "source.mp4", "--workspace", "workspace",
                 "--tts-provider", "edge",
             ])
+
+    def test_media_result_payload_emits_multipart_arrays_and_single_aliases(
+        self,
+    ) -> None:
+        from ytb_vps_v2.domain.models import JobId
+        from ytb_vps_v2.interfaces import cli
+
+        workspace = Path("workspace").resolve()
+        multipart = SimpleNamespace(
+            workspace_root=workspace,
+            artifacts=(
+                SimpleNamespace(
+                    name="render-part-000001",
+                    relative_path=PurePosixPath(
+                        "artifacts/render/parts/part-01-of-02.mp4"
+                    ),
+                ),
+                SimpleNamespace(
+                    name="render-part-000002",
+                    relative_path=PurePosixPath(
+                        "artifacts/render/parts/part-02-of-02.mp4"
+                    ),
+                ),
+            ),
+            publication=SimpleNamespace(
+                part_paths=(
+                    PurePosixPath("published/part-01-of-02.mp4"),
+                    PurePosixPath("published/part-02-of-02.mp4"),
+                )
+            ),
+        )
+
+        payload = cli._media_output_payload(
+            JobId("job-1"),
+            multipart,
+        )
+
+        self.assertEqual(len(payload["renderedParts"]), 2)
+        self.assertEqual(len(payload["publishedParts"]), 2)
+        self.assertNotIn("rendered", payload)
+        self.assertNotIn("published", payload)
+
+        single = SimpleNamespace(
+            workspace_root=workspace,
+            artifacts=(multipart.artifacts[0],),
+            publication=SimpleNamespace(
+                part_paths=(
+                    PurePosixPath("published/part-01-of-01.mp4"),
+                )
+            ),
+        )
+        single_payload = cli._media_output_payload(
+            JobId("job-1"),
+            single,
+        )
+        self.assertEqual(
+            single_payload["rendered"],
+            single_payload["renderedParts"][0],
+        )
+        self.assertEqual(
+            single_payload["published"],
+            single_payload["publishedParts"][0],
+        )
 
     def test_doctor_fails_without_a_capcut_device_credential(self) -> None:
         # A worker that cannot synthesise the fixed BV074 voice cannot finish any

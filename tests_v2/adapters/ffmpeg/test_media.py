@@ -453,6 +453,9 @@ class FfmpegFailureTests(unittest.TestCase):
         self.assertEqual(prepared.voice_starts, ())
         self.assertEqual(prepared.voice_trim_starts, ())
         self.assertFalse(prepared.source_has_audio)
+        self.assertTrue(
+            prevalidated.call_args.kwargs["disable_b_frames"]
+        )
 
     def test_require_tools_reports_all_missing_executables(self) -> None:
         adapter = FfmpegMediaAdapter(

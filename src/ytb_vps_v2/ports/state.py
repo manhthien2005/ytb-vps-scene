@@ -36,6 +36,8 @@ class StateRepository(Protocol):
         current: tuple[StageConfigFingerprint, ...],
         plan: InvalidationPlan,
         at: str,
+        *,
+        preserve_render_units: tuple[str, ...] = (),
     ) -> tuple[str, ...]: ...
 
     def record_verified_input(
@@ -114,6 +116,13 @@ class StateRepository(Protocol):
         job_id: JobId,
         unit_key: str,
     ) -> tuple[Artifact, ...]: ...
+
+    def retire_invalid_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        identities: tuple[tuple[str, PurePosixPath], ...],
+    ) -> None: ...
 
     def invalidate_work_units(
         self,

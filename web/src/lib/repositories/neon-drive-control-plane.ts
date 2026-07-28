@@ -107,14 +107,26 @@ function parseArtifact(row: Record<string, unknown>): Artifact {
 }
 
 function parseManagedArtifact(row: Record<string, unknown>): ManagedArtifactRecord {
+  const artifact = parseArtifact(row);
   const projectName = boundedText(row.project_name, 1, 160, true);
   const jobId = nullableBoundedText(row.job_id, 36, 36);
   const verifiedAt = row.verified_at === null ? null : isoDate(row.verified_at);
+  const partIndex = row.part_index === null || row.part_index === undefined
+    ? null
+    : safeInteger(row.part_index, 1, 999);
+  const partCount = row.part_count === null || row.part_count === undefined
+    ? null
+    : safeInteger(row.part_count, 1, 999);
   if (
     !projectName || jobId === undefined || (jobId !== null && !UUID_PATTERN.test(jobId)) ||
-    (row.verified_at !== null && !verifiedAt)
+    (row.verified_at !== null && !verifiedAt) ||
+    (
+      artifact.kind === "OUTPUT"
+        ? partIndex === null || partCount === null || partIndex > partCount
+        : partIndex !== null || partCount !== null
+    )
   ) fail("managed artifact");
-  return { artifact: parseArtifact(row), projectName, jobId, verifiedAt };
+  return { artifact, projectName, jobId, verifiedAt, partIndex, partCount };
 }
 
 function parseCredential(row: Record<string, unknown>): StoredDriveCredential {
@@ -404,17 +416,19 @@ export function createDriveControlPlaneRepository(sql: DriveControlPlaneSqlClien
 
     async listManagedArtifacts() {
       const result = await sql.query(
-        `select ${artifactColumns("a")},a.job_id,p.name as project_name
+        `select ${artifactColumns("a")},a.job_id,a.part_index,a.part_count,p.name as project_name
          from artifacts a join projects p on p.id=a.project_id
          where a.kind in ('SOURCE','OUTPUT') and a.status <> 'DELETED'
-         order by p.created_at,p.name,a.created_at,a.id`,
+         order by p.created_at,p.name,
+           case when a.kind='SOURCE' then 0 else 1 end,
+           a.job_id nulls first,a.part_index nulls first,a.id`,
       );
       return result.rows.map(parseManagedArtifact);
     },
 
     async getManagedArtifact(artifactId) {
       const result = await sql.query(
-        `select ${artifactColumns("a")},a.job_id,p.name as project_name
+        `select ${artifactColumns("a")},a.job_id,a.part_index,a.part_count,p.name as project_name
          from artifacts a join projects p on p.id=a.project_id
          where a.id=$1 and a.kind in ('SOURCE','OUTPUT') and a.status <> 'DELETED'`,
         [artifactId],

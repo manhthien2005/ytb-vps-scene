@@ -170,6 +170,26 @@ def _audio_rms(path: Path, *, start: float, duration: float) -> float:
     ) / 32768
 
 
+def _format_duration(path: Path) -> float:
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return float(completed.stdout.strip())
+
+
 @unittest.skipUnless(
     shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
     "ffmpeg and ffprobe required",
@@ -244,6 +264,7 @@ class ChunkConcatIntegrationTests(unittest.TestCase):
             self.assertEqual(rendered.frame_count, 180)
             self.assertEqual(rendered.duration_seconds, Fraction(6))
             self.assertTrue(rendered.has_audio)
+            self.assertEqual(_format_duration(output), 6.0)
             self.assertGreater(
                 _audio_rms(output, start=5.5, duration=0.5),
                 0.001,

@@ -336,6 +336,65 @@ class SqliteWorkUnitTests(unittest.TestCase):
             WorkStatus.PENDING,
         )
 
+    def test_render_only_reconfiguration_can_preserve_s2_plan_and_chunks(
+        self,
+    ) -> None:
+        for key, stage in (
+            ("render:plan", StageName.RENDER),
+            ("render:000000", StageName.RENDER),
+            ("render:part:000001", StageName.RENDER),
+            ("render", StageName.RENDER),
+            ("publish", StageName.PUBLISH),
+            ("backup", StageName.BACKUP),
+        ):
+            self.store.put_work_unit(
+                self.job_id,
+                WorkUnit(key, stage),
+                "planned",
+            )
+        changed = stage_config_fingerprints(
+            replace(
+                EffectiveConfig(),
+                render=replace(
+                    EffectiveConfig().render,
+                    max_part_seconds=600,
+                ),
+            )
+        )
+        invalidation = plan_invalidation(self.config, changed)
+
+        affected = self.store.reconfigure_job(
+            self.job_id,
+            self.config,
+            changed,
+            invalidation,
+            "migrated",
+            preserve_render_units=(
+                "render:000000",
+                "render:plan",
+            ),
+        )
+
+        self.assertEqual(
+            affected,
+            (
+                "backup",
+                "publish",
+                "render",
+                "render:part:000001",
+            ),
+        )
+        for key in ("render:000000", "render:plan"):
+            self.assertIs(
+                self.store.get_work_unit(self.job_id, key).status,
+                WorkStatus.PENDING,
+            )
+        for key in affected:
+            self.assertIs(
+                self.store.get_work_unit(self.job_id, key).status,
+                WorkStatus.INVALID,
+            )
+
     def test_reconfiguration_database_failure_rolls_back_hashes_and_units(
         self,
     ) -> None:

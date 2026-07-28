@@ -457,8 +457,13 @@ insert into schema_migrations(version) values (8) on conflict (version) do nothi
 
 -- migration v9: one fenced output artifact per media job
 alter table artifacts add column if not exists job_id text references jobs(id);
-create unique index if not exists artifacts_one_live_output_per_job_idx
-  on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 12) then
+    create unique index if not exists artifacts_one_live_output_per_job_idx
+      on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
+  end if;
+end $$;
 insert into schema_migrations(version) values (9) on conflict (version) do nothing;
 
 -- migration v10: durable job settings snapshots, telemetry, progress history,
@@ -740,3 +745,139 @@ create table if not exists youtube_channel_stats (
 );
 
 insert into schema_migrations(version) values (11) on conflict (version) do nothing;
+
+-- migration v12: one independently resumable OUTPUT artifact per media Part
+alter table artifacts add column if not exists part_index integer;
+alter table artifacts add column if not exists part_count integer;
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 12) then
+    update artifacts
+    set part_index=1,part_count=1
+    where kind='OUTPUT'
+      and (part_index is distinct from 1 or part_count is distinct from 1);
+
+    update artifacts
+    set part_index=null,part_count=null
+    where kind<>'OUTPUT'
+      and (part_index is not null or part_count is not null);
+
+    alter table artifacts
+      drop constraint if exists artifacts_part_identity_check;
+    alter table artifacts
+      add constraint artifacts_part_identity_check check (
+        (
+          kind='OUTPUT'
+          and part_index between 1 and part_count
+          and part_count between 1 and 999
+        )
+        or
+        (
+          kind<>'OUTPUT'
+          and part_index is null
+          and part_count is null
+        )
+      );
+  end if;
+end $$;
+
+drop index if exists artifacts_one_live_output_per_job_idx;
+create unique index if not exists artifacts_one_live_output_per_job_part_idx
+  on artifacts(job_id,part_index)
+  where kind='OUTPUT' and status <> 'DELETED';
+
+insert into schema_migrations(version) values (12) on conflict (version) do nothing;
+
+-- migration v13: serialize and freeze the multipart OUTPUT plan per job
+alter table jobs add column if not exists output_part_count integer;
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 13) then
+    update jobs j
+    set output_part_count=plans.part_count
+    from (
+      select job_id,min(part_count) as part_count
+      from artifacts
+      where kind='OUTPUT' and status<>'DELETED'
+      group by job_id
+      having count(distinct part_count)=1
+    ) plans
+    where j.id=plans.job_id and j.output_part_count is null;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_part_count_check'
+  ) then
+    alter table jobs add constraint jobs_output_part_count_check
+      check (
+        output_part_count is null
+        or output_part_count between 1 and 999
+      );
+  end if;
+end $$;
+
+insert into schema_migrations(version) values (13) on conflict (version) do nothing;
+
+-- migration v14: make Part reservation/completion job-row atomic
+alter table jobs add column if not exists output_ready_part_count integer
+  not null default 0;
+alter table jobs add column if not exists output_part_artifact_ids jsonb
+  not null default '{}'::jsonb;
+alter table jobs add column if not exists output_ready_part_indexes integer[]
+  not null default '{}'::integer[];
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 14) then
+    update jobs j
+    set output_part_count=coalesce(
+          j.output_part_count,
+          plans.part_count
+        ),
+        output_ready_part_count=plans.ready_part_count,
+        output_part_artifact_ids=plans.artifact_ids,
+        output_ready_part_indexes=plans.ready_part_indexes
+    from (
+      select job_id,
+             min(part_count) as part_count,
+             count(*) filter(where status='READY') as ready_part_count,
+             jsonb_object_agg(part_index::text,id) as artifact_ids,
+             coalesce(
+               array_agg(part_index order by part_index)
+                 filter(where status='READY'),
+               '{}'::integer[]
+             ) as ready_part_indexes
+      from artifacts
+      where kind='OUTPUT' and status<>'DELETED'
+      group by job_id
+      having count(distinct part_count)=1
+    ) plans
+    where j.id=plans.job_id;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_ready_part_count_check'
+  ) then
+    alter table jobs add constraint jobs_output_ready_part_count_check
+      check (
+        output_ready_part_count between 0
+          and coalesce(output_part_count,0)
+        and output_ready_part_count
+          = cardinality(output_ready_part_indexes)
+      );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_part_artifact_ids_check'
+  ) then
+    alter table jobs add constraint jobs_output_part_artifact_ids_check
+      check (jsonb_typeof(output_part_artifact_ids)='object');
+  end if;
+end $$;
+
+insert into schema_migrations(version) values (14) on conflict (version) do nothing;

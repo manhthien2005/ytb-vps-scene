@@ -21,6 +21,48 @@ class _LeaseLostError(MediaJobError):
     """The control plane rejected the fenced write (lease lost or state raced)."""
 
 
+@dataclass(frozen=True, slots=True)
+class MediaOutput:
+    part_index: int
+    part_count: int
+    path: Path
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.part_index) is not int
+            or type(self.part_count) is not int
+            or not 1 <= self.part_index <= self.part_count <= 999
+        ):
+            raise MediaJobError("media output Part metadata is invalid")
+        if not isinstance(self.path, Path):
+            raise MediaJobError("media output path is invalid")
+
+
+def _media_outputs(value: object) -> tuple[MediaOutput, ...]:
+    if (
+        type(value) is not tuple
+        or not value
+        or any(type(item) is not MediaOutput for item in value)
+    ):
+        raise MediaJobError(
+            "pipeline outputs must be a non-empty MediaOutput tuple"
+        )
+    outputs = value
+    count = len(outputs)
+    if (
+        count > 999
+        or tuple(item.part_index for item in outputs)
+        != tuple(range(1, count + 1))
+        or any(item.part_count != count for item in outputs)
+        or len({item.path for item in outputs}) != count
+        or any(not item.path.is_file() for item in outputs)
+    ):
+        raise MediaJobError(
+            "pipeline output descriptors are incomplete or malformed"
+        )
+    return outputs
+
+
 class _LeaseHeartbeat:
     """Renews the lease on a timer while a long phase (download, pipeline, upload)
     runs — the web's 90s TTL is far shorter than a real render, so fixed
@@ -290,7 +332,10 @@ class MediaJobExecutor:
         self,
         client: ControlPlaneMediaClient,
         transfer_factory: Callable[[str], Any],
-        pipeline: Callable[[Path, Path, Mapping[str, Any], str], Path],
+        pipeline: Callable[
+            [Path, Path, Mapping[str, Any], str],
+            tuple[MediaOutput, ...],
+        ],
     ) -> None:
         self.client = client
         self.transfer_factory = transfer_factory
@@ -343,11 +388,24 @@ class MediaJobExecutor:
             return False
         except _LeaseLostError:
             if self._renew(job_id, fencing_token):
-                self._cancel(job_id, fencing_token, int(update["progressPercent"]))
+                self._cancel(
+                    job_id,
+                    fencing_token,
+                    int(update["progressPercent"]),
+                    int(update.get("currentPart", 1)),
+                    int(update.get("totalParts", 1)),
+                )
                 return True
             raise
 
-    def _cancel(self, job_id: str, fencing_token: int, progress_percent: int) -> str:
+    def _cancel(
+        self,
+        job_id: str,
+        fencing_token: int,
+        progress_percent: int,
+        current_part: int = 1,
+        total_parts: int = 1,
+    ) -> str:
         self._progress(
             job_id,
             {
@@ -358,11 +416,49 @@ class MediaJobExecutor:
                 "phase": "cancel",
                 "phaseProgressPercent": 100,
                 "message": "Cancellation acknowledged",
-                "currentPart": 1,
-                "totalParts": 1,
+                "currentPart": current_part,
+                "totalParts": total_parts,
             },
         )
         return "CANCELLED"
+
+    def _output_session(
+        self,
+        job_id: str,
+        request: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            response = self.client.output_session(job_id, request)
+        except RuntimeError as error:
+            if self._is_lease_lost(error):
+                raise _LeaseLostError(
+                    "control plane output session failed: lease lost"
+                ) from error
+            raise MediaJobError(
+                "control plane output session failed"
+            ) from error
+        if not isinstance(response, Mapping):
+            raise MediaJobError("control plane output session failed")
+        return response
+
+    def _complete_output(
+        self,
+        job_id: str,
+        request: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            response = self.client.complete(job_id, request)
+        except RuntimeError as error:
+            if self._is_lease_lost(error):
+                raise _LeaseLostError(
+                    "control plane completion failed: lease lost"
+                ) from error
+            raise MediaJobError(
+                "control plane completion failed"
+            ) from error
+        if not isinstance(response, Mapping):
+            raise MediaJobError("control plane completion failed")
+        return response
 
     def _report_failure(self, job_id: str, fencing_token: int, from_state: str, percent: int) -> None:
         # Best-effort: without this, a failed job sits in DOWNLOADING/OCR/UPLOADING
@@ -465,38 +561,151 @@ class MediaJobExecutor:
                 self._cleanup_workspace(run_root)
                 return result
             with self._heartbeat(job_id, fencing_token) as heartbeat:
-                output = self.pipeline(source_path, run_root, settings, job_id)
+                pipeline_outputs = self.pipeline(
+                    source_path,
+                    run_root,
+                    settings,
+                    job_id,
+                )
             heartbeat.check()
             if heartbeat.cancel_requested:
                 result = self._cancel(job_id, fencing_token, 20)
                 self._cleanup_workspace(run_root)
                 return result
-            size, checksum = _digest_file(output)
+            outputs = _media_outputs(pipeline_outputs)
+            total_parts = len(outputs)
             if self._renew(job_id, fencing_token):
-                result = self._cancel(job_id, fencing_token, 90)
+                result = self._cancel(
+                    job_id,
+                    fencing_token,
+                    90,
+                    1,
+                    total_parts,
+                )
                 self._cleanup_workspace(run_root)
                 return result
-            if self._transition_or_cancel(job_id, fencing_token, {
-                "fencingToken": fencing_token,
-                "fromState": "OCR",
-                "state": "UPLOADING",
-                "progressPercent": 90,
-                "phase": "upload",
-                "phaseProgressPercent": 0,
-                "message": "Uploading processed media",
-                "currentPart": 1,
-                "totalParts": 1,
-            }):
-                self._cleanup_workspace(run_root)
-                return "CANCELLED"
-            reported_state, reported_percent = "UPLOADING", 90
-            session = self.client.output_session(job_id, {"fencingToken": fencing_token, "sizeBytes": size, "checksumSha256": checksum})
-            # A cancel observed after the upload starts deliberately finishes the
-            # safest already-started operation (documented product decision).
-            with self._heartbeat(job_id, fencing_token) as heartbeat:
-                transfer.upload_resumable(str(session["sessionUri"]), output, size, checksum)
-            heartbeat.check()
-            self.client.complete(job_id, {"artifactId": str(session["artifactId"]), "driveFileId": str(session["driveFileId"]), "fencingToken": fencing_token, "sizeBytes": size})
+            for position, output in enumerate(outputs, start=1):
+                if position > 1 and self._renew(
+                    job_id,
+                    fencing_token,
+                ):
+                    progress = 90 + (
+                        (position - 1) * 9
+                    ) // total_parts
+                    result = self._cancel(
+                        job_id,
+                        fencing_token,
+                        progress,
+                        position,
+                        total_parts,
+                    )
+                    self._cleanup_workspace(run_root)
+                    return result
+                progress = 90 + (
+                    (position - 1) * 9
+                ) // total_parts
+                if self._transition_or_cancel(
+                    job_id,
+                    fencing_token,
+                    {
+                        "fencingToken": fencing_token,
+                        "fromState": (
+                            "OCR"
+                            if position == 1
+                            else "UPLOADING"
+                        ),
+                        "state": "UPLOADING",
+                        "progressPercent": progress,
+                        "phase": "upload",
+                        "phaseProgressPercent": (
+                            (position - 1) * 100
+                        )
+                        // total_parts,
+                        "message": (
+                            f"Uploading output Part "
+                            f"{position}/{total_parts}"
+                        ),
+                        "currentPart": position,
+                        "totalParts": total_parts,
+                    },
+                ):
+                    self._cleanup_workspace(run_root)
+                    return "CANCELLED"
+                reported_state = "UPLOADING"
+                reported_percent = progress
+                size, checksum = _digest_file(output.path)
+                session = self._output_session(
+                    job_id,
+                    {
+                        "fencingToken": fencing_token,
+                        "partIndex": output.part_index,
+                        "partCount": output.part_count,
+                        "sizeBytes": size,
+                        "checksumSha256": checksum,
+                    },
+                )
+                status = session.get("status")
+                artifact_id = session.get("artifactId")
+                drive_file_id = session.get("driveFileId")
+                if (
+                    status not in {"READY", "UPLOAD"}
+                    or type(artifact_id) is not str
+                    or not artifact_id
+                    or type(drive_file_id) is not str
+                    or not drive_file_id
+                ):
+                    raise MediaJobError(
+                        "control plane output session is invalid"
+                    )
+                if status == "READY":
+                    if position == total_parts:
+                        self._cleanup_workspace(run_root)
+                        return "COMPLETED"
+                    continue
+                session_uri = session.get("sessionUri")
+                expires_at = session.get("expiresAt")
+                if (
+                    type(session_uri) is not str
+                    or not session_uri
+                    or type(expires_at) is not str
+                    or not expires_at
+                ):
+                    raise MediaJobError(
+                        "control plane upload session is invalid"
+                    )
+                # A cancel observed after the upload starts deliberately
+                # finishes the safest already-started operation.
+                with self._heartbeat(
+                    job_id,
+                    fencing_token,
+                ) as heartbeat:
+                    transfer.upload_resumable(
+                        session_uri,
+                        output.path,
+                        size,
+                        checksum,
+                    )
+                heartbeat.check()
+                completed = self._complete_output(
+                    job_id,
+                    {
+                        "artifactId": artifact_id,
+                        "driveFileId": drive_file_id,
+                        "fencingToken": fencing_token,
+                        "partIndex": output.part_index,
+                        "partCount": output.part_count,
+                        "sizeBytes": size,
+                    },
+                )
+                expected_outcome = (
+                    "COMPLETED"
+                    if position == total_parts
+                    else "PART_COMPLETED"
+                )
+                if completed.get("outcome") != expected_outcome:
+                    raise MediaJobError(
+                        "control plane completion outcome is invalid"
+                    )
             self._cleanup_workspace(run_root)
             return "COMPLETED"
         except _LeaseLostError:

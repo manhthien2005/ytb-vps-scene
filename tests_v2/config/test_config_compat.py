@@ -30,6 +30,31 @@ class ConfigCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(result.config.render.subtitle_font_name, "Arial")
 
+    def test_render_part_limit_is_parsed_strictly_and_defaults(self) -> None:
+        configured = parse_config(
+            {"render": {"max_part_seconds": 900}}
+        )
+        omitted = parse_config({})
+
+        self.assertEqual(
+            configured.config.render.max_part_seconds,
+            900,
+        )
+        self.assertEqual(
+            omitted.config.render.max_part_seconds,
+            1_800,
+        )
+        for invalid in (True, 0, "900"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ConfigError):
+                    parse_config(
+                        {
+                            "render": {
+                                "max_part_seconds": invalid,
+                            }
+                        }
+                    )
+
     def test_disabled_legacy_mirroring_is_accepted_with_a_warning(self) -> None:
         result = parse_config({"render": {"mirror_video": False}})
 

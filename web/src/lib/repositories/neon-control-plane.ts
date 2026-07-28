@@ -5,6 +5,7 @@ import {
   isCancelableJobState,
   isTerminalJobState,
   type JobDetail,
+  type JobOutputPartMetadata,
   type JobPhaseTelemetry,
   type JobProgressEvent,
   type JobSourceMetadata,
@@ -151,6 +152,43 @@ function sourceMetadataFromValue(value: unknown): JobSourceMetadata | null {
   return Object.freeze({ artifactId, displayName, mimeType, sizeBytes, checksumSha256 });
 }
 
+function outputPartsFromValue(value: unknown): readonly JobOutputPartMetadata[] {
+  const parsed = parseJson(value, "job output Parts");
+  if (parsed === null) return Object.freeze([]);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid job output Parts returned by database");
+  }
+  let previousIndex = 0;
+  let commonCount: number | null = null;
+  return Object.freeze(parsed.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error("Invalid job output Parts returned by database");
+    }
+    const object = entry as Record<string, unknown>;
+    const metadata = sourceMetadataFromValue(object);
+    if (
+      metadata === null ||
+      metadata.artifactId === null ||
+      metadata.displayName === null ||
+      metadata.mimeType === null
+    ) {
+      throw new Error("Invalid job output Parts returned by database");
+    }
+    const partIndex = safeInteger(object.partIndex ?? object.part_index, "output Part index", 1, 999);
+    const partCount = safeInteger(object.partCount ?? object.part_count, "output Part count", 1, 999);
+    if (
+      partIndex > partCount ||
+      partIndex <= previousIndex ||
+      (commonCount !== null && partCount !== commonCount)
+    ) {
+      throw new Error("Invalid job output Parts returned by database");
+    }
+    previousIndex = partIndex;
+    commonCount = partCount;
+    return Object.freeze({ ...metadata, partIndex, partCount });
+  }));
+}
+
 function sourceMetadataFromColumns(
   row: Record<string, unknown>,
   prefix: "source" | "output",
@@ -185,6 +223,9 @@ function sourceMetadataFromColumns(
 function parseJobSummaryRow(row: Record<string, unknown>): JobSummary {
   const progressPercent = safeInteger(row.progress_percent, "job progress", 0, 100);
   const projectName = boundedText(row.project_name, "project name", 1, 160);
+  const outputParts = "output_parts" in row
+    ? outputPartsFromValue(row.output_parts)
+    : undefined;
   const summary: JobSummary = Object.freeze({
     id: boundedText(row.id, "job id", 1, 256),
     projectName,
@@ -214,6 +255,17 @@ function parseJobSummaryRow(row: Record<string, unknown>): JobSummary {
           }),
       }
       : {}),
+    ...(outputParts === undefined
+      ? {}
+      : {
+        outputParts,
+        outputMetadata: outputParts[0] === undefined
+          ? null
+          : Object.freeze({
+            artifactId: outputParts[0].artifactId,
+            sizeBytes: outputParts[0].sizeBytes,
+          }),
+      }),
     state: parseJobState(row.state),
     progressPercent,
     updatedAt: asIso(row.updated_at, "job update timestamp"),
@@ -276,7 +328,17 @@ function parseJobDetailRow(row: Record<string, unknown>): JobDetailReadModel {
     ? summary.updatedAt
     : asIso(row.created_at, "job creation timestamp");
   const sourceMetadata = summary.sourceMetadata ?? sourceMetadataFromColumns(row, "source");
-  const outputMetadata = sourceMetadataFromColumns(row, "output");
+  const legacyOutputMetadata = sourceMetadataFromColumns(row, "output");
+  const outputParts = summary.outputParts ?? (
+    legacyOutputMetadata === null
+      ? Object.freeze([])
+      : Object.freeze([Object.freeze({
+        ...legacyOutputMetadata,
+        partIndex: 1,
+        partCount: 1,
+      })])
+  );
+  const outputMetadata = outputParts[0] ?? legacyOutputMetadata;
   const telemetry: JobPhaseTelemetry = Object.freeze({
     activePhase: summary.activePhase ?? null,
     phaseProgressPercent: summary.phaseProgressPercent ?? null,
@@ -316,6 +378,7 @@ function parseJobDetailRow(row: Record<string, unknown>): JobDetailReadModel {
     ...detail,
     createdAt,
     outputMetadata,
+    outputParts,
     workerSummary,
     attemptSummary,
     canCancel: isCancelableJobState(detail.state),
@@ -338,18 +401,26 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
                 j.settings_snapshot,j.source_metadata,j.active_phase,j.phase_progress_percent,
                 j.latest_message,j.eta_seconds,j.started_at,j.completed_at,j.cancel_requested_at,
                 j.error_code,j.error_message,
-                out.id as output_artifact_id,
-                out.actual_size_bytes as output_size_bytes,
+                coalesce(out.output_parts,'[]'::jsonb) as output_parts,
                 lease.worker_id,
                 worker.state as worker_state,
                 worker.account_label as worker_account_label
          from jobs j
          left join lateral (
-           select a.id,a.actual_size_bytes
+           select jsonb_agg(
+                    jsonb_build_object(
+                      'artifactId',a.id,
+                      'displayName',a.display_name,
+                      'mimeType',a.mime_type,
+                      'sizeBytes',a.actual_size_bytes,
+                      'checksumSha256',a.checksum_sha256,
+                      'partIndex',a.part_index,
+                      'partCount',a.part_count
+                    )
+                    order by a.part_index,a.id
+                  ) as output_parts
            from artifacts a
            where a.job_id=j.id and a.kind='OUTPUT' and a.status='READY'
-           order by a.created_at desc,a.id desc
-           limit 1
          ) out on true
          left join job_leases lease on lease.job_id=j.id
          left join workers worker on worker.id=lease.worker_id
@@ -372,11 +443,7 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
                 src.mime_type as source_mime_type,
                 src.actual_size_bytes as source_size_bytes,
                 src.checksum_sha256 as source_checksum_sha256,
-                out.id as output_artifact_id,
-                out.display_name as output_display_name,
-                out.mime_type as output_mime_type,
-                out.actual_size_bytes as output_size_bytes,
-                out.checksum_sha256 as output_checksum_sha256,
+                coalesce(out.output_parts,'[]'::jsonb) as output_parts,
                 lease.worker_id,
                 worker.state as worker_state,
                 worker.account_label as worker_account_label,
@@ -395,11 +462,20 @@ export function createControlPlaneRepository(sql: ControlPlaneSqlClient): Contro
            limit 1
          ) src on true
          left join lateral (
-           select a.id,a.display_name,a.mime_type,a.actual_size_bytes,a.checksum_sha256
+           select jsonb_agg(
+                    jsonb_build_object(
+                      'artifactId',a.id,
+                      'displayName',a.display_name,
+                      'mimeType',a.mime_type,
+                      'sizeBytes',a.actual_size_bytes,
+                      'checksumSha256',a.checksum_sha256,
+                      'partIndex',a.part_index,
+                      'partCount',a.part_count
+                    )
+                    order by a.part_index,a.id
+                  ) as output_parts
            from artifacts a
            where a.job_id=j.id and a.kind='OUTPUT' and a.status <> 'DELETED'
-           order by a.created_at desc,a.id desc
-           limit 1
          ) out on true
          left join job_leases lease on lease.job_id=j.id
          left join workers worker on worker.id=lease.worker_id

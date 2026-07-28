@@ -72,6 +72,16 @@ function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+function hasCompleteOutputSet(job: JobSummary): boolean {
+  if (job.outputParts === undefined) return job.outputMetadata != null;
+  const count = job.outputParts[0]?.partCount;
+  return count !== undefined &&
+    job.outputParts.length === count &&
+    job.outputParts.every(
+      (part, index) => part.partCount === count && part.partIndex === index + 1,
+    );
+}
+
 export function JobList({ jobs, projects, fetcher = fetch }: Props) {
   const [displayJobs, setDisplayJobs] = useState<readonly JobSummary[]>(jobs);
   const [pollError, setPollError] = useState(false);
@@ -238,13 +248,14 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
             ? `Pha: ${cap(j.activePhase)}${j.phaseProgressPercent != null ? ` (${j.phaseProgressPercent}%)` : ""}`
             : null;
           const workerLabel = j.workerSummary?.accountLabel ?? null;
-          const outputReady = j.outputMetadata != null;
+          const outputReady = hasCompleteOutputSet(j);
           return (
             <li key={j.id} aria-label={`Job ${j.projectName}`}>
               <div>
                 <strong>{j.projectName}</strong>
                 <span>{sl(j.state)}</span>
                 {ph !== null && <span>{ph}</span>}
+                {j.latestMessage != null && <span>{j.latestMessage}</span>}
                 <div
                   role="progressbar"
                   aria-label={`Tiến độ ${j.projectName}`}
@@ -332,10 +343,17 @@ export function JobList({ jobs, projects, fetcher = fetch }: Props) {
                     <dd>{detailData.sourceMetadata.displayName} · {detailData.sourceMetadata.mimeType} · {detailData.sourceMetadata.sizeBytes != null ? formatBytes(detailData.sourceMetadata.sizeBytes) : "không rõ dung lượng"}</dd>
                   </>
                 )}
-                {detailData.outputMetadata && (
+                {((detailData.outputParts?.length ?? 0) > 0 || detailData.outputMetadata) && (
                   <>
                     <dt>Output</dt>
-                    <dd>{detailData.outputMetadata.displayName} · {detailData.outputMetadata.mimeType} · {detailData.outputMetadata.sizeBytes != null ? formatBytes(detailData.outputMetadata.sizeBytes) : "không rõ dung lượng"}</dd>
+                    {(detailData.outputParts?.length > 0
+                      ? detailData.outputParts
+                      : [detailData.outputMetadata!]
+                    ).map((output) => (
+                      <dd key={output.artifactId}>
+                        {output.displayName} · {output.mimeType} · {output.sizeBytes != null ? formatBytes(output.sizeBytes) : "không rõ dung lượng"}
+                      </dd>
+                    ))}
                   </>
                 )}
                 {detailData.workerSummary && (

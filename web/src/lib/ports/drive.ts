@@ -31,6 +31,8 @@ export interface DriveFilesPort {
     jobId: string;
     artifactId: string;
     parentId: string;
+    partIndex: number;
+    partCount: number;
   }>): Promise<string>;
   createResumableUpdateSession(accessToken: string, input: Readonly<{
     fileId: string; mimeType: string; sizeBytes: number; origin?: string;

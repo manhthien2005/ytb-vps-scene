@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ytb_vps_v2.application.invalidation import plan_invalidation
 from ytb_vps_v2.application.media_job import (
+    MediaOutput,
     MediaJobError,
     MediaJobExecutor,
     scene_blur_regions,
@@ -21,6 +22,7 @@ from ytb_vps_v2.domain.fingerprints import (
     stage_config_fingerprints,
 )
 from ytb_vps_v2.domain.models import StageName
+from ytb_vps_v2.domain.render_chunks import part_file_name
 from ytb_vps_v2.domain.timeline import FrameInterval
 
 
@@ -56,11 +58,66 @@ class FakeClient:
 
     def output_session(self, job_id: str, request: dict[str, object]) -> dict[str, object]:
         self.events.append(("output-session", request))
-        return {"artifactId": "artifact-1", "driveFileId": "drive-output-1", "sessionUri": "https://www.googleapis.com/upload/drive/v3/files/file-001?uploadType=resumable&upload_id=abc"}
+        return {
+            "status": "UPLOAD",
+            "artifactId": "artifact-1",
+            "driveFileId": "drive-output-1",
+            "sessionUri": "https://www.googleapis.com/upload/drive/v3/files/file-001?uploadType=resumable&upload_id=abc",
+            "expiresAt": "2099-01-01T00:00:00Z",
+        }
 
     def complete(self, job_id: str, request: dict[str, object]) -> dict[str, object]:
         self.events.append(("complete", request))
         return {"outcome": "COMPLETED"}
+
+
+class MultipartClient(FakeClient):
+    def __init__(
+        self,
+        *,
+        ready_parts: tuple[int, ...] = (),
+        early_completed: bool = False,
+    ) -> None:
+        super().__init__()
+        self.ready_parts = ready_parts
+        self.early_completed = early_completed
+
+    def output_session(
+        self,
+        job_id: str,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        self.events.append(("output-session", request))
+        index = int(request["partIndex"])
+        if index in self.ready_parts:
+            return {
+                "status": "READY",
+                "artifactId": f"artifact-{index}",
+                "driveFileId": f"drive-output-{index}",
+            }
+        return {
+            "status": "UPLOAD",
+            "artifactId": f"artifact-{index}",
+            "driveFileId": f"drive-output-{index}",
+            "sessionUri": f"https://upload.example/part-{index}",
+            "expiresAt": "2099-01-01T00:00:00Z",
+        }
+
+    def complete(
+        self,
+        job_id: str,
+        request: dict[str, object],
+    ) -> dict[str, object]:
+        self.events.append(("complete", request))
+        index = int(request["partIndex"])
+        count = int(request["partCount"])
+        return {
+            "outcome": (
+                "COMPLETED"
+                if self.early_completed or index == count
+                else "PART_COMPLETED"
+            )
+        }
 
 
 class CancelOnRenewClient(FakeClient):
@@ -249,13 +306,18 @@ class MediaJobTests(unittest.TestCase):
         client = FakeClient()
         output_bytes = b"rendered-output"
 
-        def pipeline(source: Path, workspace: Path, settings: object, job_id: str) -> Path:
+        def pipeline(
+            source: Path,
+            workspace: Path,
+            settings: object,
+            job_id: str,
+        ) -> tuple[MediaOutput, ...]:
             self.assertEqual(job_id, "job-1")
             self.assertEqual(source.read_bytes(), b"input")
-            result = workspace / "published" / "part-001.mp4"
+            result = workspace / "published" / "part-01-of-01.mp4"
             result.parent.mkdir(parents=True, exist_ok=True)
             result.write_bytes(output_bytes)
-            return result
+            return (MediaOutput(1, 1, result),)
 
         FakeTransfer.instances.clear()
         executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
@@ -297,7 +359,7 @@ class MediaJobTests(unittest.TestCase):
                     "progressPercent": 90,
                     "phase": "upload",
                     "phaseProgressPercent": 0,
-                    "message": "Uploading processed media",
+                    "message": "Uploading output Part 1/1",
                     "currentPart": 1,
                     "totalParts": 1,
                 },
@@ -348,11 +410,16 @@ class MediaJobTests(unittest.TestCase):
     def test_cancel_requested_on_second_renew_stops_before_upload(self) -> None:
         client = CancelOnRenewClient(cancel_on_renew=2)
 
-        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
-            result = workspace / "published" / "part-001.mp4"
+        def pipeline(
+            _source: Path,
+            workspace: Path,
+            _settings: object,
+            _job_id: str,
+        ) -> tuple[MediaOutput, ...]:
+            result = workspace / "published" / "part-01-of-01.mp4"
             result.parent.mkdir(parents=True, exist_ok=True)
             result.write_bytes(b"rendered-output")
-            return result
+            return (MediaOutput(1, 1, result),)
 
         FakeTransfer.instances.clear()
         executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
@@ -399,11 +466,16 @@ class MediaJobTests(unittest.TestCase):
     def test_progress_messages_do_not_expose_tokens_secrets_or_paths(self) -> None:
         client = FakeClient()
 
-        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
-            result = workspace / "published" / "part-001.mp4"
+        def pipeline(
+            _source: Path,
+            workspace: Path,
+            _settings: object,
+            _job_id: str,
+        ) -> tuple[MediaOutput, ...]:
+            result = workspace / "published" / "part-01-of-01.mp4"
             result.parent.mkdir(parents=True, exist_ok=True)
             result.write_bytes(b"rendered-output")
-            return result
+            return (MediaOutput(1, 1, result),)
 
         executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
         with tempfile.TemporaryDirectory() as root:
@@ -488,11 +560,16 @@ class MediaJobTests(unittest.TestCase):
     def test_completed_job_cleans_its_workspace(self) -> None:
         client = FakeClient()
 
-        def pipeline(_source: Path, workspace: Path, _settings: object, _job_id: str) -> Path:
-            result = workspace / "published" / "part-001.mp4"
+        def pipeline(
+            _source: Path,
+            workspace: Path,
+            _settings: object,
+            _job_id: str,
+        ) -> tuple[MediaOutput, ...]:
+            result = workspace / "published" / "part-01-of-01.mp4"
             result.parent.mkdir(parents=True, exist_ok=True)
             result.write_bytes(b"rendered-output")
-            return result
+            return (MediaOutput(1, 1, result),)
 
         FakeTransfer.instances.clear()
         executor = MediaJobExecutor(client, transfer_factory=FakeTransfer, pipeline=pipeline)
@@ -500,6 +577,236 @@ class MediaJobTests(unittest.TestCase):
             result = executor.execute(assignment(hashlib.sha256(b"input").hexdigest()), Path(root))
             self.assertEqual(result, "COMPLETED")
             self.assertFalse((Path(root) / "job-1").exists())
+
+    @staticmethod
+    def _multipart_pipeline(
+        _source: Path,
+        workspace: Path,
+        _settings: object,
+        _job_id: str,
+    ) -> tuple[MediaOutput, ...]:
+        outputs = []
+        for index in (1, 2):
+            path = (
+                workspace
+                / "published"
+                / f"part-{index:02d}-of-02.mp4"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"Part {index}".encode())
+            outputs.append(MediaOutput(index, 2, path))
+        return tuple(outputs)
+
+    def test_execute_uploads_ordered_multipart_outputs(self) -> None:
+        client = MultipartClient()
+        FakeTransfer.instances.clear()
+        executor = MediaJobExecutor(
+            client,
+            transfer_factory=FakeTransfer,
+            pipeline=self._multipart_pipeline,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            result = executor.execute(
+                assignment(hashlib.sha256(b"input").hexdigest()),
+                Path(root),
+            )
+            self.assertFalse((Path(root) / "job-1").exists())
+
+        self.assertEqual(result, "COMPLETED")
+        self.assertEqual(
+            tuple(
+                upload[1].name
+                for upload in FakeTransfer.instances[0].uploads
+            ),
+            ("part-01-of-02.mp4", "part-02-of-02.mp4"),
+        )
+        sessions = tuple(
+            payload
+            for event, payload in client.events
+            if event == "output-session"
+        )
+        self.assertEqual(
+            tuple(
+                (
+                    payload["partIndex"],
+                    payload["partCount"],
+                    part_file_name(
+                        payload["partIndex"],
+                        payload["partCount"],
+                    ),
+                )
+                for payload in sessions
+            ),
+            (
+                (1, 2, "part-01-of-02.mp4"),
+                (2, 2, "part-02-of-02.mp4"),
+            ),
+        )
+        completions = tuple(
+            payload
+            for event, payload in client.events
+            if event == "complete"
+        )
+        self.assertEqual(
+            tuple(
+                (
+                    payload["partIndex"],
+                    payload["partCount"],
+                )
+                for payload in completions
+            ),
+            ((1, 2), (2, 2)),
+        )
+        uploading = tuple(
+            payload
+            for event, payload in client.events
+            if event == "progress"
+            and payload["state"] == "UPLOADING"
+        )
+        self.assertEqual(
+            tuple(
+                (
+                    payload["currentPart"],
+                    payload["totalParts"],
+                )
+                for payload in uploading
+            ),
+            ((1, 2), (2, 2)),
+        )
+
+    def test_ready_replay_skips_first_upload_and_finishes_second(self) -> None:
+        client = MultipartClient(ready_parts=(1,))
+        FakeTransfer.instances.clear()
+
+        with tempfile.TemporaryDirectory() as root:
+            result = MediaJobExecutor(
+                client,
+                transfer_factory=FakeTransfer,
+                pipeline=self._multipart_pipeline,
+            ).execute(
+                assignment(hashlib.sha256(b"input").hexdigest()),
+                Path(root),
+            )
+
+        self.assertEqual(result, "COMPLETED")
+        self.assertEqual(
+            tuple(
+                upload[1].name
+                for upload in FakeTransfer.instances[0].uploads
+            ),
+            ("part-02-of-02.mp4",),
+        )
+        self.assertEqual(
+            len(
+                tuple(
+                    event
+                    for event, _ in client.events
+                    if event == "complete"
+                )
+            ),
+            1,
+        )
+
+    def test_completed_before_final_part_fails_closed(self) -> None:
+        client = MultipartClient(early_completed=True)
+        FakeTransfer.instances.clear()
+
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(
+                MediaJobError,
+                "completion outcome",
+            ):
+                MediaJobExecutor(
+                    client,
+                    transfer_factory=FakeTransfer,
+                    pipeline=self._multipart_pipeline,
+                ).execute(
+                    assignment(
+                        hashlib.sha256(b"input").hexdigest()
+                    ),
+                    Path(root),
+                )
+            self.assertTrue((Path(root) / "job-1").exists())
+
+        self.assertEqual(len(FakeTransfer.instances[0].uploads), 1)
+
+    def test_cancellation_between_parts_does_not_start_second(self) -> None:
+        class CancelBetweenPartsClient(
+            CancelOnRenewClient,
+            MultipartClient,
+        ):
+            def __init__(self) -> None:
+                CancelOnRenewClient.__init__(
+                    self,
+                    cancel_on_renew=3,
+                )
+                self.ready_parts = ()
+                self.early_completed = False
+
+            output_session = MultipartClient.output_session
+            complete = MultipartClient.complete
+
+        client = CancelBetweenPartsClient()
+        FakeTransfer.instances.clear()
+
+        with tempfile.TemporaryDirectory() as root:
+            result = MediaJobExecutor(
+                client,
+                transfer_factory=FakeTransfer,
+                pipeline=self._multipart_pipeline,
+            ).execute(
+                assignment(hashlib.sha256(b"input").hexdigest()),
+                Path(root),
+            )
+
+        self.assertEqual(result, "CANCELLED")
+        self.assertEqual(len(FakeTransfer.instances[0].uploads), 1)
+        self.assertEqual(
+            len(
+                tuple(
+                    event
+                    for event, _ in client.events
+                    if event == "output-session"
+                )
+            ),
+            1,
+        )
+
+    def test_malformed_output_descriptors_fail_before_upload(self) -> None:
+        variants: tuple[object, ...] = (
+            (),
+            Path("single.mp4"),
+            (
+                MediaOutput(1, 2, Path("missing-1.mp4")),
+                MediaOutput(1, 2, Path("missing-2.mp4")),
+            ),
+            (MediaOutput(1, 2, Path("missing-1.mp4")),),
+        )
+        for outputs in variants:
+            with self.subTest(outputs=outputs):
+                client = MultipartClient()
+                FakeTransfer.instances.clear()
+                with tempfile.TemporaryDirectory() as root:
+                    with self.assertRaises(MediaJobError):
+                        MediaJobExecutor(
+                            client,
+                            transfer_factory=FakeTransfer,
+                            pipeline=lambda *_args, value=outputs: value,
+                        ).execute(
+                            assignment(
+                                hashlib.sha256(b"input").hexdigest()
+                            ),
+                            Path(root),
+                        )
+                self.assertEqual(
+                    tuple(
+                        event
+                        for event, _ in client.events
+                        if event == "output-session"
+                    ),
+                    (),
+                )
 
 
 if __name__ == "__main__":

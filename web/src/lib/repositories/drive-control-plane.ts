@@ -74,6 +74,8 @@ export type ManagedArtifactRecord = Readonly<{
   projectName: string;
   jobId: string | null;
   verifiedAt: string | null;
+  partIndex?: number | null;
+  partCount?: number | null;
 }>;
 
 export type ManagedDeletionClaim = "CLAIMED" | "RECONCILE" | "DELETED" | "CONFLICT";

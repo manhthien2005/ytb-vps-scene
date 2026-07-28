@@ -38,7 +38,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     } finally {
       await db.close();
     }
@@ -88,6 +88,84 @@ describe("control-plane schema", () => {
     }
   });
 
+  it("backfills atomic Part progress when upgrading an applied v13", async () => {
+    const db = new PGlite();
+    try {
+      const current = await readFile(
+        new URL("./schema.sql", import.meta.url),
+        "utf8",
+      );
+      const legacyV13 = current.split("-- migration v14")[0]!;
+      await db.exec(legacyV13);
+      const projectId = "10000000-0000-4000-8000-000000000001";
+      const jobId = "20000000-0000-4000-8000-000000000001";
+      await db.query(
+        `insert into projects(
+           id,status,name,source_status,
+           creation_idempotency_key_hash,creation_request_hash,
+           drive_project_folder_id,drive_input_folder_id
+         ) values (
+           $1,'READY','Demo','SOURCE_READY',$2,$3,
+           'drive-project-001','drive-input-0001'
+         )`,
+        [projectId, "a".repeat(64), "b".repeat(64)],
+      );
+      await db.query(
+        `insert into jobs(id,project_id,project_name,state,output_part_count)
+         values ($1,$2,'Demo','UPLOADING',2)`,
+        [jobId, projectId],
+      );
+      for (const [index, status] of [[1, "READY"], [2, "PENDING"]] as const) {
+        await db.query(
+          `insert into artifacts(
+             id,project_id,job_id,kind,status,drive_file_id,drive_parent_id,
+             display_name,mime_type,expected_size_bytes,actual_size_bytes,
+             checksum_sha256,part_index,part_count
+           ) values (
+             $1,$2,$3,'OUTPUT',$4,$5,'drive-parent-01',$6,'video/mp4',
+             100,$7,$8,$9,2
+           )`,
+          [
+            `30000000-0000-4000-8000-00000000000${index}`,
+            projectId,
+            jobId,
+            status,
+            `drive-output-00${index}`,
+            `part-0${index}-of-02.mp4`,
+            status === "READY" ? 100 : null,
+            String(index).repeat(64),
+            index,
+          ],
+        );
+      }
+
+      await db.exec(current);
+
+      const job = await db.query<{
+        output_part_count: number;
+        output_ready_part_count: number;
+        output_part_artifact_ids: Record<string, string>;
+        output_ready_part_indexes: number[];
+      }>(
+        `select output_part_count,output_ready_part_count,
+                output_part_artifact_ids,output_ready_part_indexes
+         from jobs where id=$1`,
+        [jobId],
+      );
+      expect(job.rows[0]).toEqual({
+        output_part_count: 2,
+        output_ready_part_count: 1,
+        output_part_artifact_ids: {
+          "1": "30000000-0000-4000-8000-000000000001",
+          "2": "30000000-0000-4000-8000-000000000002",
+        },
+        output_ready_part_indexes: [1],
+      });
+    } finally {
+      await db.close();
+    }
+  });
+
   it("migrates twice and installs all schema versions", async () => {
     const db = new PGlite();
     try {
@@ -118,7 +196,7 @@ describe("control-plane schema", () => {
       const migrations = await db.query<{ version: number }>(
         "select version from schema_migrations order by version",
       );
-      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(migrations.rows.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
       await expect(db.exec("insert into jobs(id, project_name, state) values ('j1','Demo','WRONG')"))
         .rejects.toThrow();
     } finally {

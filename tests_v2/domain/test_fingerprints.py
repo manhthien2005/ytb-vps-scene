@@ -12,6 +12,9 @@ from ytb_vps_v2.domain import (
     fingerprint_value,
     stage_config_fingerprints,
 )
+from ytb_vps_v2.domain.fingerprints import (
+    legacy_s2_render_fingerprint,
+)
 from ytb_vps_v2.application.invalidation import plan_invalidation
 from ytb_vps_v2.domain.models import (
     BlurRegion,
@@ -167,6 +170,35 @@ class FingerprintTests(unittest.TestCase):
                 if before[stage] != after[stage]
             ),
             (StageName.OCR, StageName.RENDER),
+        )
+
+    def test_legacy_s2_render_fingerprint_excludes_only_part_sizing(
+        self,
+    ) -> None:
+        baseline = EffectiveConfig()
+        legacy = legacy_s2_render_fingerprint(baseline)
+        current = {
+            item.stage: item.fingerprint
+            for item in stage_config_fingerprints(baseline)
+        }[StageName.RENDER]
+
+        self.assertEqual(
+            legacy.sha256,
+            "43f691a971eaa57617be0d983af6a987"
+            "4ed4fec6017d42f035c67163a50ca803",
+        )
+        self.assertNotEqual(legacy, current)
+        self.assertEqual(
+            legacy_s2_render_fingerprint(
+                replace(
+                    baseline,
+                    render=replace(
+                        baseline.render,
+                        max_part_seconds=600,
+                    ),
+                )
+            ),
+            legacy,
         )
 
     def test_unsupported_values_fail_instead_of_using_repr(self) -> None:

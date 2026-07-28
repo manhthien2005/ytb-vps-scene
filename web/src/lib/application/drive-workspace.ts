@@ -64,6 +64,13 @@ function matchesManagedRecord(
   metadata: DriveVideoMetadata,
 ): boolean {
   const artifact = record.artifact;
+  const partIdentityMatches = artifact.kind !== "OUTPUT" ||
+    record.partIndex === undefined ||
+    record.partIndex === null ||
+    (
+      metadata.appProperties.ytbVpsPartIndex === String(record.partIndex) &&
+      metadata.appProperties.ytbVpsPartCount === String(record.partCount)
+    );
   return VIDEO_MIME_TYPES.has(metadata.mimeType) &&
     metadata.id === artifact.driveFileId &&
     metadata.name === artifact.displayName &&
@@ -71,7 +78,8 @@ function matchesManagedRecord(
     metadata.sizeBytes === expectedSize(record) &&
     metadata.appProperties.ytbVpsArtifactId === artifact.id &&
     metadata.appProperties.ytbVpsProjectId === artifact.projectId &&
-    metadata.appProperties.ytbVpsRole === artifact.kind.toLowerCase();
+    metadata.appProperties.ytbVpsRole === artifact.kind.toLowerCase() &&
+    partIdentityMatches;
 }
 
 function readiness(metadata: DriveVideoMetadata): DriveWorkspaceFile["readiness"] {
@@ -175,7 +183,12 @@ export function createDriveWorkspaceService(
       const outputByProject = new Map<string, {
         projectId: string;
         name: string;
-        files: DriveWorkspaceFile[];
+        files: Array<Readonly<{
+          file: DriveWorkspaceFile;
+          jobId: string | null;
+          partIndex: number | null;
+          artifactId: string;
+        }>>;
       }>();
       let processingCount = 0;
       for (const item of inspected) {
@@ -191,13 +204,28 @@ export function createDriveWorkspaceService(
           name: item.record.projectName,
           files: [],
         };
-        group.files.push(item.file);
+        group.files.push({
+          file: item.file,
+          jobId: item.record.jobId,
+          partIndex: item.record.partIndex ?? null,
+          artifactId: item.record.artifact.id,
+        });
         outputByProject.set(projectId, group);
       }
 
       return {
         input,
-        output: [...outputByProject.values()],
+        output: [...outputByProject.values()].map((group) => ({
+          projectId: group.projectId,
+          name: group.name,
+          files: group.files
+            .sort((left, right) =>
+              (left.jobId ?? "").localeCompare(right.jobId ?? "") ||
+              (left.partIndex ?? Number.MAX_SAFE_INTEGER) -
+                (right.partIndex ?? Number.MAX_SAFE_INTEGER) ||
+              left.artifactId.localeCompare(right.artifactId))
+            .map((item) => item.file),
+        })),
         processingCount,
       };
     },

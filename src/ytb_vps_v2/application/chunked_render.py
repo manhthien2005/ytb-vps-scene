@@ -8,7 +8,10 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from ytb_vps_v2.application.disk_guard import ensure_free_space
-from ytb_vps_v2.application.render_chunks import chunk_local_request
+from ytb_vps_v2.application.render_chunks import (
+    chunk_local_request,
+    part_local_request,
+)
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
     FileDigest,
@@ -17,18 +20,24 @@ from ytb_vps_v2.domain.fingerprints import Fingerprint
 from ytb_vps_v2.domain.models import (
     Artifact,
     JobId,
+    Part,
     RenderChunk,
     StageName,
     WorkStatus,
     WorkUnit,
 )
+from ytb_vps_v2.domain.parts import MAX_PART_SECONDS
 from ytb_vps_v2.domain.pipeline import (
     RENDER_CHUNK_PLAN_ARTIFACT_PATH,
     RenderChunkPlanDocument,
     RenderRequest,
+    RenderedPart,
     canonical_document_bytes,
+    parse_render_chunk_plan_document_bytes,
 )
 from ytb_vps_v2.domain.render_chunks import (
+    part_file_name,
+    plan_parts_for_chunks,
     plan_render_chunks,
     single_part_for_chunks,
 )
@@ -95,7 +104,7 @@ class ChunkCheckpointPublisher(Protocol):
 @dataclass(frozen=True, slots=True)
 class PreparedRender:
     request: RenderRequest
-    temporary_path: Path
+    rendered_parts: tuple[RenderedPart, ...]
 
 
 def _chunk_unit_key(chunk: RenderChunk) -> str:
@@ -110,6 +119,21 @@ def _chunk_artifact_path(chunk: RenderChunk) -> PurePosixPath:
 
 def _chunk_artifact_name(chunk: RenderChunk) -> str:
     return f"render-chunk-{chunk.index:06d}"
+
+
+def _part_unit_key(part: Part) -> str:
+    return f"render:part:{part.part_index:06d}"
+
+
+def _part_artifact_path(part: Part) -> PurePosixPath:
+    return PurePosixPath("artifacts/render/parts") / part_file_name(
+        part.part_index,
+        part.part_count,
+    )
+
+
+def _part_artifact_name(part: Part) -> str:
+    return f"render-part-{part.part_index:06d}"
 
 
 class ChunkedRenderCoordinator:
@@ -178,15 +202,22 @@ class ChunkedRenderCoordinator:
         request: RenderRequest,
         render_fingerprint: Fingerprint,
         chunk_seconds: int,
+        max_part_seconds: int,
+        target_fps: int = 30,
     ) -> tuple[RenderRequest, RenderChunkPlanDocument]:
         chunks = plan_render_chunks(
             frame_count=request.frame_count,
-            target_fps=30,
+            target_fps=target_fps,
             chunk_seconds=chunk_seconds,
             cues=request.cues,
         )
-        part = single_part_for_chunks(request.frame_count, chunks)
-        global_request = replace(request, parts=(part,))
+        parts = plan_parts_for_chunks(
+            frame_count=request.frame_count,
+            target_fps=target_fps,
+            max_part_seconds=max_part_seconds,
+            chunks=chunks,
+        )
+        global_request = replace(request, parts=parts)
         document = RenderChunkPlanDocument(
             global_request.schema_version,
             global_request.job_id,
@@ -209,6 +240,7 @@ class ChunkedRenderCoordinator:
         document: RenderChunkPlanDocument,
         writer: ArtifactWriter,
         at: str,
+        compatible_plan_fingerprints: tuple[Fingerprint, ...] = (),
     ) -> None:
         raw = canonical_document_bytes(document)
         unit = self.state.get_work_unit(job_id, _PLAN_UNIT)
@@ -238,9 +270,33 @@ class ChunkedRenderCoordinator:
                 4 * 1024 * 1024,
             )
             if stored != raw:
-                raise ChunkedRenderError(
-                    "Succeeded render plan differs from the requested plan"
+                try:
+                    stored_document = (
+                        parse_render_chunk_plan_document_bytes(stored)
+                    )
+                    legacy_part = single_part_for_chunks(
+                        document.frame_count,
+                        document.chunks,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    raise ChunkedRenderError(
+                        "Stored render plan is invalid"
+                    ) from exc
+                compatible_documents = tuple(
+                    replace(
+                        document,
+                        render_fingerprint=fingerprint,
+                        parts=(legacy_part,),
+                    )
+                    for fingerprint in (
+                        document.render_fingerprint,
+                        *compatible_plan_fingerprints,
+                    )
                 )
+                if stored_document not in compatible_documents:
+                    raise ChunkedRenderError(
+                        "Succeeded render plan differs from the requested plan"
+                    )
             return
         self.state.start_work_unit(job_id, _PLAN_UNIT, at)
         try:
@@ -306,6 +362,7 @@ class ChunkedRenderCoordinator:
         workspace: Path,
         writer: ArtifactWriter,
         at: str,
+        target_fps: int,
     ) -> Artifact | None:
         artifact = self._canonical_chunk_artifact(job_id, chunk)
         if artifact is None:
@@ -328,6 +385,7 @@ class ChunkedRenderCoordinator:
             self.media.validate_render(
                 workspace.joinpath(*artifact.relative_path.parts),
                 chunk_local_request(request, chunk),
+                target_fps=target_fps,
             )
         except (OSError, RuntimeError):
             self.state.invalidate_work_units(
@@ -351,6 +409,7 @@ class ChunkedRenderCoordinator:
         writer: ArtifactWriter,
         source_size: int,
         at: str,
+        target_fps: int,
     ) -> Artifact:
         estimated = max(
             _MINIMUM_CHUNK_ESTIMATE,
@@ -377,6 +436,7 @@ class ChunkedRenderCoordinator:
                 request,
                 chunk,
                 temporary,
+                target_fps=target_fps,
             )
             self._hit(chunk, ChunkInterruptionPoint.AFTER_RENDER)
             entry = writer.write_file(
@@ -389,6 +449,7 @@ class ChunkedRenderCoordinator:
                     *_chunk_artifact_path(chunk).parts
                 ),
                 chunk_local_request(request, chunk),
+                target_fps=target_fps,
             )
             self._hit(
                 chunk,
@@ -429,6 +490,154 @@ class ChunkedRenderCoordinator:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _canonical_part_artifact(
+        self,
+        job_id: JobId,
+        part: Part,
+        chunks: tuple[RenderChunk, ...],
+    ) -> Artifact | None:
+        key = _part_unit_key(part)
+        unit = self.state.get_work_unit(job_id, key)
+        if unit.status is not WorkStatus.SUCCEEDED:
+            return None
+        artifacts = self.state.artifacts_for_unit(job_id, key)
+        expected_dependencies = tuple(
+            _chunk_artifact_name(chunks[index])
+            for index in part.chunk_indexes
+        )
+        if len(artifacts) != 1:
+            return None
+        artifact = artifacts[0]
+        if (
+            artifact.name != _part_artifact_name(part)
+            or artifact.relative_path != _part_artifact_path(part)
+            or artifact.owner is not StageName.RENDER
+            or artifact.dependencies != expected_dependencies
+        ):
+            return None
+        return artifact
+
+    def _verify_part(
+        self,
+        job_id: JobId,
+        request: RenderRequest,
+        part: Part,
+        chunks: tuple[RenderChunk, ...],
+        workspace: Path,
+        writer: ArtifactWriter,
+        at: str,
+        target_fps: int,
+    ) -> Artifact | None:
+        artifact = self._canonical_part_artifact(
+            job_id,
+            part,
+            chunks,
+        )
+        key = _part_unit_key(part)
+        if artifact is None:
+            if (
+                self.state.get_work_unit(job_id, key).status
+                is WorkStatus.SUCCEEDED
+            ):
+                self.state.invalidate_work_units(job_id, (key,), at)
+            return None
+        expected = FileDigest(artifact.size_bytes, artifact.sha256)
+        path = workspace.joinpath(*artifact.relative_path.parts)
+        try:
+            writer.verify(artifact.relative_path, expected)
+            self.media.validate_render(
+                path,
+                part_local_request(request, part),
+                target_fps=target_fps,
+            )
+        except (OSError, RuntimeError):
+            self.state.invalidate_work_units(job_id, (key,), at)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ChunkedRenderError(
+                    f"Invalid render Part could not be removed: "
+                    f"{part.part_index}"
+                ) from exc
+            return None
+        return artifact
+
+    def _assemble_part(
+        self,
+        *,
+        job_id: JobId,
+        request: RenderRequest,
+        part: Part,
+        chunks: tuple[RenderChunk, ...],
+        chunk_artifacts: tuple[Artifact, ...],
+        workspace: Path,
+        snapshot_dir: Path,
+        writer: ArtifactWriter,
+        at: str,
+        target_fps: int,
+    ) -> Artifact:
+        selected = tuple(
+            chunk_artifacts[index]
+            for index in part.chunk_indexes
+        )
+        concat_need = (
+            sum(item.size_bytes for item in selected) * 5 + 1
+        ) // 2
+        self.free_space(workspace, concat_need)
+        key = _part_unit_key(part)
+        self.state.start_work_unit(job_id, key, at)
+        temporary = self._temporary_path(
+            snapshot_dir,
+            f"render-part-{part.part_index:06d}-",
+        )
+        local_request = part_local_request(request, part)
+        try:
+            self.media.concatenate_render_chunks(
+                tuple(
+                    workspace.joinpath(*artifact.relative_path.parts)
+                    for artifact in selected
+                ),
+                local_request,
+                temporary,
+                target_fps=target_fps,
+            )
+            path = _part_artifact_path(part)
+            entry = writer.write_file(path, temporary)
+            writer.verify(path, entry.digest)
+            self.media.validate_render(
+                workspace.joinpath(*path.parts),
+                local_request,
+                target_fps=target_fps,
+            )
+            artifact = Artifact(
+                _part_artifact_name(part),
+                path,
+                entry.digest.size_bytes,
+                entry.digest.sha256,
+                StageName.RENDER,
+                tuple(
+                    _chunk_artifact_name(chunks[index])
+                    for index in part.chunk_indexes
+                ),
+            )
+            self.state.commit_artifact(job_id, key, artifact, at)
+            return artifact
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            current = self.state.get_work_unit(job_id, key)
+            if current.status is WorkStatus.RUNNING:
+                self.state.fail_work_unit(
+                    job_id,
+                    key,
+                    type(exc).__name__[:128],
+                    str(exc)[:4096] or "render Part assembly failed",
+                    at,
+                )
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def prepare(
         self,
         *,
@@ -438,6 +647,9 @@ class ChunkedRenderCoordinator:
         request: RenderRequest,
         render_fingerprint: Fingerprint,
         chunk_seconds: int,
+        max_part_seconds: int = MAX_PART_SECONDS,
+        compatible_plan_fingerprints: tuple[Fingerprint, ...] = (),
+        target_fps: int = 30,
         workspace: Path,
         snapshot_dir: Path,
         writer: ArtifactWriter,
@@ -453,6 +665,22 @@ class ChunkedRenderCoordinator:
         if type(render_fingerprint) is not Fingerprint:
             raise ChunkedRenderError(
                 "Chunk rendering requires a render fingerprint"
+            )
+        if (
+            type(compatible_plan_fingerprints) is not tuple
+            or any(
+                type(item) is not Fingerprint
+                for item in compatible_plan_fingerprints
+            )
+            or len(set(compatible_plan_fingerprints))
+            != len(compatible_plan_fingerprints)
+        ):
+            raise ChunkedRenderError(
+                "Compatible render-plan fingerprints are invalid"
+            )
+        if type(target_fps) is not int or target_fps < 1:
+            raise ChunkedRenderError(
+                "Chunk rendering target FPS must be positive"
             )
         if self.files.digest(source) != request.media_digest:
             raise ChunkedRenderError(
@@ -471,6 +699,8 @@ class ChunkedRenderCoordinator:
             request,
             render_fingerprint,
             chunk_seconds,
+            max_part_seconds,
+            target_fps,
         )
         self._ensure_unit(
             job_id,
@@ -481,7 +711,13 @@ class ChunkedRenderCoordinator:
             ),
             at,
         )
-        self._commit_or_verify_plan(job_id, plan, writer, at)
+        self._commit_or_verify_plan(
+            job_id,
+            plan,
+            writer,
+            at,
+            compatible_plan_fingerprints,
+        )
         chunk_keys = tuple(
             _chunk_unit_key(chunk)
             for chunk in plan.chunks
@@ -496,6 +732,23 @@ class ChunkedRenderCoordinator:
                 ),
                 at,
             )
+        part_keys = tuple(
+            _part_unit_key(part)
+            for part in plan.parts
+        )
+        for part in plan.parts:
+            self._ensure_unit(
+                job_id,
+                WorkUnit(
+                    _part_unit_key(part),
+                    StageName.RENDER,
+                    dependencies=tuple(
+                        _chunk_unit_key(plan.chunks[index])
+                        for index in part.chunk_indexes
+                    ),
+                ),
+                at,
+            )
         final = self.state.get_work_unit(job_id, _FINAL_UNIT)
         if final.stage is not StageName.RENDER:
             raise ChunkedRenderError(
@@ -505,7 +758,7 @@ class ChunkedRenderCoordinator:
             job_id,
             _FINAL_UNIT,
             final.dependencies,
-            chunk_keys,
+            part_keys,
             at,
         )
 
@@ -523,6 +776,7 @@ class ChunkedRenderCoordinator:
                 workspace,
                 writer,
                 at,
+                target_fps,
             )
             if artifact is None:
                 artifact = self._render_chunk(
@@ -536,6 +790,7 @@ class ChunkedRenderCoordinator:
                     writer=writer,
                     source_size=archive.source.digest.size_bytes,
                     at=at,
+                    target_fps=target_fps,
                 )
             artifacts.append(artifact)
             checkpoint_id = (
@@ -577,24 +832,37 @@ class ChunkedRenderCoordinator:
                 )
             reuse = verified
 
-        concat_need = (
-            sum(item.size_bytes for item in artifacts) * 5 + 1
-        ) // 2
-        self.free_space(workspace, concat_need)
-        assembled = self._temporary_path(
-            snapshot_dir,
-            "render-assembled-",
-        )
-        try:
-            self.media.concatenate_render_chunks(
-                tuple(
-                    workspace.joinpath(*artifact.relative_path.parts)
-                    for artifact in artifacts
-                ),
+        chunk_artifacts = tuple(artifacts)
+        rendered_parts: list[RenderedPart] = []
+        for part in plan.parts:
+            artifact = self._verify_part(
+                job_id,
                 global_request,
-                assembled,
+                part,
+                plan.chunks,
+                workspace,
+                writer,
+                at,
+                target_fps,
             )
-            return PreparedRender(global_request, assembled)
-        except BaseException:
-            assembled.unlink(missing_ok=True)
-            raise
+            if artifact is None:
+                artifact = self._assemble_part(
+                    job_id=job_id,
+                    request=global_request,
+                    part=part,
+                    chunks=plan.chunks,
+                    chunk_artifacts=chunk_artifacts,
+                    workspace=workspace,
+                    snapshot_dir=snapshot_dir,
+                    writer=writer,
+                    at=at,
+                    target_fps=target_fps,
+                )
+            rendered_parts.append(
+                RenderedPart(
+                    part,
+                    artifact.relative_path,
+                    FileDigest(artifact.size_bytes, artifact.sha256),
+                )
+            )
+        return PreparedRender(global_request, tuple(rendered_parts))

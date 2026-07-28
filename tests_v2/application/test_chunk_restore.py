@@ -57,10 +57,17 @@ class _RecordingFourChunkMedia(_LightweightMedia):
         self.rendered_chunks: list[int] = []
 
     @staticmethod
-    def probe(source: Path) -> MediaDocument:
+    def probe(
+        source: Path,
+        *,
+        target_fps: int = 30,
+    ) -> MediaDocument:
         return replace(
-            _LightweightMedia.probe(source),
-            duration_seconds=Fraction(901, 30),
+            _LightweightMedia.probe(
+                source,
+                target_fps=target_fps,
+            ),
+            duration_seconds=Fraction(901, target_fps),
             frame_count=901,
         )
 
@@ -71,6 +78,8 @@ class _RecordingFourChunkMedia(_LightweightMedia):
         plan,
         chunk,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument:
         self.rendered_chunks.append(chunk.index)
         return super().render_chunk(
@@ -79,10 +88,16 @@ class _RecordingFourChunkMedia(_LightweightMedia):
             plan,
             chunk,
             destination,
+            target_fps=target_fps,
         )
 
     @staticmethod
-    def validate_render(path: Path, expected) -> MediaDocument:
+    def validate_render(
+        path: Path,
+        expected,
+        *,
+        target_fps: int = 30,
+    ) -> MediaDocument:
         raw = path.read_bytes()
         if not raw.startswith(b"lightweight-render-v1\0"):
             raise RuntimeError("lightweight rendered bytes are invalid")
@@ -91,9 +106,9 @@ class _RecordingFourChunkMedia(_LightweightMedia):
             expected.job_id,
             PurePosixPath("inputs") / path.name,
             digest_file(path),
-            Fraction(expected.frame_count, 30),
-            Fraction(30),
-            Timeline(30),
+            Fraction(expected.frame_count, target_fps),
+            Fraction(target_fps),
+            Timeline(target_fps),
             expected.frame_count,
             expected.width,
             expected.height,

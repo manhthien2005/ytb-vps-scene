@@ -1014,8 +1014,11 @@ class FfmpegMediaAdapter:
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument:
         self.require_tools()
+        if type(target_fps) is not int or target_fps < 1:
+            raise FfmpegMediaError("Media target FPS must be positive")
         inherited_fd: int | None = None
         if pass_fds:
             if (
@@ -1121,7 +1124,7 @@ class FfmpegMediaAdapter:
                 source_digest,
                 duration,
                 fps,
-                Timeline(30),
+                Timeline(target_fps),
                 frame_count,
                 width,
                 height,
@@ -1196,6 +1199,7 @@ class FfmpegMediaAdapter:
         target_fps: int,
         destination: Path,
         encoder: str = "libx264",
+        disable_b_frames: bool = False,
     ) -> list[str]:
         if type(plan) is not RenderRequest:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
@@ -1203,6 +1207,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render inputs must be RenderInputs")
         if not isinstance(target_fps, int) or isinstance(target_fps, bool) or target_fps <= 0:
             raise FfmpegMediaError("Render target FPS must be positive")
+        if type(disable_b_frames) is not bool:
+            raise FfmpegMediaError(
+                "Render B-frame policy must be boolean"
+            )
         duration = Fraction(plan.frame_count, target_fps)
         if (
             inputs.source_duration is not None
@@ -1324,6 +1332,10 @@ class FfmpegMediaAdapter:
                 "-x264-params",
                 "colorprim=bt709:transfer=bt709:colormatrix=bt709",
             ]
+        if disable_b_frames:
+            # A zero-reorder chunk timeline survives stream-copy concat
+            # without MP4 edit-list offsets at each output Part boundary.
+            arguments += ["-bf", "0"]
         arguments += [
             "-pix_fmt",
             "yuv420p",
@@ -1357,6 +1369,7 @@ class FfmpegMediaAdapter:
         *,
         target_fps: int = 30,
         encoder: str = "libx264",
+        disable_b_frames: bool = False,
         _anonymous: _AnonymousPosixRender | None = None,
     ) -> MediaDocument:
         if type(plan) is not RenderRequest:
@@ -1443,6 +1456,7 @@ class FfmpegMediaAdapter:
                 target_fps=target_fps,
                 destination=Path(str(output)),
                 encoder=encoder,
+                disable_b_frames=disable_b_frames,
             )
             arguments[arguments.index("-y")] = overwrite_policy
             if anonymous is not None:
@@ -1530,7 +1544,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
         anonymous = self._preflight_render_destination(destination)
         try:
-            source_media = self.probe(source)
+            source_media = self.probe(
+                source,
+                target_fps=target_fps,
+            )
             if not self._matches_plan(source_media, plan):
                 raise FfmpegMediaError(
                     "Render source does not match the typed render plan"
@@ -1585,7 +1602,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render target FPS must be positive")
         anonymous = self._preflight_render_destination(destination)
         try:
-            source_media = self.probe(source)
+            source_media = self.probe(
+                source,
+                target_fps=target_fps,
+            )
             if not self._matches_plan(source_media, plan):
                 raise FfmpegMediaError(
                     "Render source does not match the typed render plan"
@@ -1629,6 +1649,7 @@ class FfmpegMediaAdapter:
                 destination,
                 target_fps=target_fps,
                 encoder=encoder,
+                disable_b_frames=True,
                 _anonymous=anonymous,
             )
         finally:
@@ -1714,7 +1735,11 @@ class FfmpegMediaAdapter:
         chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument:
+        if type(target_fps) is not int or target_fps < 1:
+            raise FfmpegMediaError("Render target FPS must be positive")
         sources = self._concat_sources(chunks, plan)
         anonymous = self._preflight_render_destination(destination)
         named: _OwnedRenderStaging | None = None
@@ -1730,8 +1755,14 @@ class FfmpegMediaAdapter:
                     encoding="utf-8",
                     newline="",
                 ) as handle:
+                    handle.write("ffconcat version 1.0\n")
                     for source in sources:
                         handle.write(_concat_line(source))
+                        # Each encoded AAC chunk carries a negative priming
+                        # packet. Seeking each input to zero preserves the
+                        # intended media timeline instead of accumulating that
+                        # priming packet at every concat seam.
+                        handle.write("inpoint 0\n")
                     handle.flush()
                     os.fsync(handle.fileno())
             except OSError as exc:
@@ -1771,7 +1802,11 @@ class FfmpegMediaAdapter:
                 named.claim_output()
                 pinned = named.pin(final_output)
                 try:
-                    validated = self.validate_render(output, plan)
+                    validated = self.validate_render(
+                        output,
+                        plan,
+                        target_fps=target_fps,
+                    )
                     pinned.verify(validated.source_digest)
                     pinned.publish()
                 finally:
@@ -1782,6 +1817,7 @@ class FfmpegMediaAdapter:
                     plan,
                     pass_fds=pass_fds,
                     logical_name=final_output.name,
+                    target_fps=target_fps,
                 )
                 anonymous.verify(validated.source_digest)
                 anonymous.publish()
@@ -1845,6 +1881,7 @@ class FfmpegMediaAdapter:
             path,
             pass_fds=pass_fds,
             logical_name=logical_name,
+            target_fps=target_fps,
         )
         expected_duration = Fraction(expected.frame_count, target_fps)
         if actual.width != expected.width or actual.height != expected.height:

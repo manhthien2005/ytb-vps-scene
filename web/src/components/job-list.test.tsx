@@ -121,11 +121,31 @@ const DETAIL = {
   }],
   outputMetadata: {
     artifactId: "30000000-0000-4000-8000-000000000002",
-    displayName: "output.mp4",
+    displayName: "part-01-of-02.mp4",
     mimeType: "video/mp4",
     sizeBytes: 512,
     checksumSha256: "b".repeat(64),
   },
+  outputParts: [
+    {
+      artifactId: "30000000-0000-4000-8000-000000000002",
+      displayName: "part-01-of-02.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 512,
+      checksumSha256: "b".repeat(64),
+      partIndex: 1,
+      partCount: 2,
+    },
+    {
+      artifactId: "30000000-0000-4000-8000-000000000003",
+      displayName: "part-02-of-02.mp4",
+      mimeType: "video/mp4",
+      sizeBytes: 256,
+      checksumSha256: "c".repeat(64),
+      partIndex: 2,
+      partCount: 2,
+    },
+  ],
   workerSummary: ACTIVE_JOB.workerSummary,
   attemptSummary: {
     count: 2,
@@ -235,6 +255,39 @@ describe("JobList", () => {
     expect(within(failedRow).getByRole("alert")).not.toHaveTextContent("private stack");
   });
 
+  it("renders the existing multipart progress message without adding controls", () => {
+    const multipartJob = {
+      ...ACTIVE_JOB,
+      state: "UPLOADING",
+      activePhase: "upload",
+      latestMessage: "Uploading output Part 2/4",
+      outputMetadata: {
+        artifactId: "30000000-0000-4000-8000-000000000002",
+        sizeBytes: 512,
+      },
+      outputParts: [{
+        artifactId: "30000000-0000-4000-8000-000000000002",
+        displayName: "part-01-of-04.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 512,
+        checksumSha256: "b".repeat(64),
+        partIndex: 1,
+        partCount: 4,
+      }],
+    } satisfies JobSummary;
+    render(
+      <JobList
+        jobs={[multipartJob]}
+        projects={[]}
+        fetcher={routedFetcher([multipartJob], () => jsonResponse({}, 404))}
+      />,
+    );
+
+    const row = screen.getByRole("listitem", { name: `Job ${multipartJob.projectName}` });
+    expect(within(row).getByText("Uploading output Part 2/4")).toBeVisible();
+    expect(within(row).getByText("Output: Chưa sẵn sàng")).toBeVisible();
+  });
+
   it("fetches detail on demand and renders only allowed settings, metadata, telemetry, and actions", async () => {
     const fetcher = routedFetcher([ACTIVE_JOB], () => jsonResponse({ job: DETAIL }));
     render(<JobList jobs={[ACTIVE_JOB]} projects={[]} fetcher={fetcher} />);
@@ -250,7 +303,8 @@ describe("JobList", () => {
     expect(within(panel).getByText("BV074_streaming · 1x")).toBeVisible();
     expect(within(panel).getByText("Chia mỗi 120 giây")).toBeVisible();
     expect(within(panel).getByText("source.mp4 · video/mp4 · 1 KB")).toBeVisible();
-    expect(within(panel).getByText("output.mp4 · video/mp4 · 512 B")).toBeVisible();
+    expect(within(panel).getByText("part-01-of-02.mp4 · video/mp4 · 512 B")).toBeVisible();
+    expect(within(panel).getByText("part-02-of-02.mp4 · video/mp4 · 256 B")).toBeVisible();
     expect(within(panel).getByText("render-node-1 · BUSY")).toBeVisible();
     expect(within(panel).getByText("Đang dựng khung hình")).toBeVisible();
     expect(within(panel).getByText("2 lượt · 1 đang chạy")).toBeVisible();

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { env, repository, drive, requireWorkerSession } = vi.hoisted(() => ({
   env: { databaseUrl: "postgresql://example.invalid/app", workerAuthKeyV1: "A".repeat(43) },
@@ -26,63 +26,110 @@ vi.mock("@/lib/application/configured-drive", () => ({ createConfiguredDrive: ()
 import { POST } from "./route";
 
 describe("POST /api/v1/worker/jobs/[id]/output-session", () => {
-  it("derives one valid artifact UUID from the job and output identity across replays", async () => {
-    repository.getFencedExecution.mockResolvedValue({ projectId: "20000000-0000-4000-8000-000000000001", outputParentId: "drive-project-001" });
+  const jobId = "40000000-0000-4000-8000-000000000001";
+  const workerId = "10000000-0000-4000-8000-000000000001";
+  const execution = {
+    projectId: "20000000-0000-4000-8000-000000000001",
+    outputParentId: "drive-project-001",
+  };
+  const output = {
+    fencingToken: 1,
+    partIndex: 1,
+    partCount: 2,
+    sizeBytes: 1234,
+    checksumSha256: "a".repeat(64),
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    requireWorkerSession.mockResolvedValue({ id: workerId });
+    repository.getFencedExecution.mockResolvedValue(execution);
     repository.reserveOutput.mockResolvedValue("RESERVED");
-    const jobId = "40000000-0000-4000-8000-000000000001";
-    const request = { fencingToken: 1, sizeBytes: 1234, checksumSha256: "a".repeat(64) };
-    const createSession = async (
-      requestedJobId: string,
-      requestedOutput: typeof request,
-    ) => {
-      const response = await POST(new Request(`https://app.example/api/v1/worker/jobs/${requestedJobId}/output-session`, {
-        method: "POST",
-        body: JSON.stringify(requestedOutput),
-      }) as never, { params: Promise.resolve({ id: requestedJobId }) });
-      expect(response.status).toBe(200);
-      return response.json();
-    };
-
-    const first = await createSession(jobId, request);
-    repository.reserveOutput.mockResolvedValueOnce("REPLAY");
-    const replay = await createSession(jobId, request);
-    expect(first.artifactId).toBe(replay.artifactId);
-    expect(first.artifactId).toBe("0399d9cb-c22a-523b-a611-86749f6688b5");
-    expect(first.artifactId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(drive.files.ensureOutputFile.mock.calls.slice(0, 2).map(([, input]) => input.artifactId))
-      .toEqual([first.artifactId, first.artifactId]);
-    expect(drive.files.createResumableUpdateSession.mock.calls.slice(0, 2).map(([, input]) => input.fileId))
-      .toEqual(["drive-output-001", "drive-output-001"]);
-    expect(repository.reserveOutput.mock.calls.slice(0, 2).map(([input]) => input.artifactId))
-      .toEqual([first.artifactId, first.artifactId]);
-
-    const differentFence = await createSession(jobId, { ...request, fencingToken: 2 });
-    requireWorkerSession.mockResolvedValueOnce({ id: "10000000-0000-4000-8000-000000000002" });
-    const differentWorker = await createSession(jobId, request);
-    expect([differentFence.artifactId, differentWorker.artifactId])
-      .toEqual([first.artifactId, first.artifactId]);
-
-    const differentJob = await createSession("40000000-0000-4000-8000-000000000002", request);
-    const differentSize = await createSession(jobId, { ...request, sizeBytes: 1235 });
-    const differentChecksum = await createSession(jobId, { ...request, checksumSha256: "b".repeat(64) });
-    expect(new Set([first.artifactId, differentJob.artifactId, differentSize.artifactId, differentChecksum.artifactId]).size).toBe(4);
-  });
-
-  it("creates a fenced resumable output session without returning any refresh credential", async () => {
-    repository.getFencedExecution.mockResolvedValue({ projectId: "20000000-0000-4000-8000-000000000001", outputParentId: "drive-project-001" });
-    repository.reserveOutput.mockResolvedValue("RESERVED");
-    const response = await POST(new Request("https://app.example/api/v1/worker/jobs/job-001/output-session", {
-      method: "POST",
-      body: JSON.stringify({ fencingToken: 1, sizeBytes: 1234, checksumSha256: "a".repeat(64) }),
-    }) as never, { params: Promise.resolve({ id: "40000000-0000-4000-8000-000000000001" }) });
-    const body = await response.json();
-    expect(response.status).toBe(200);
-    expect(body).toEqual({
-      artifactId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
-      driveFileId: "drive-output-001",
+    drive.access.getAccessToken.mockResolvedValue("access-token");
+    drive.files.ensureOutputFile.mockResolvedValue("drive-output-001");
+    drive.files.createResumableUpdateSession.mockResolvedValue({
       sessionUri: "https://www.googleapis.com/upload/drive/v3/files/drive-output-001?upload_id=x",
       expiresAt: "2026-07-26T00:00:00.000Z",
     });
-    expect(JSON.stringify(body)).not.toContain("refreshToken");
+  });
+
+  async function createSession(
+    requestedJobId = jobId,
+    requestedOutput: typeof output = output,
+  ) {
+    return POST(new Request(
+      `https://app.example/api/v1/worker/jobs/${requestedJobId}/output-session`,
+      {
+        method: "POST",
+        body: JSON.stringify(requestedOutput),
+      },
+    ) as never, { params: Promise.resolve({ id: requestedJobId }) });
+  }
+
+  it("derives a deterministic v2 artifact UUID from the exact Part identity", async () => {
+    repository.getFencedExecution.mockResolvedValue({ projectId: "20000000-0000-4000-8000-000000000001", outputParentId: "drive-project-001" });
+    repository.reserveOutput.mockResolvedValue("RESERVED");
+    const first = await (await createSession()).json();
+    const replay = await (await createSession()).json();
+    const secondPart = await (await createSession(jobId, {
+      ...output,
+      partIndex: 2,
+    })).json();
+
+    expect(first.artifactId).toBe(replay.artifactId);
+    expect(first.artifactId).toBe("81c8cdf8-dc42-548b-9054-a3a30f68bc9d");
+    expect(secondPart.artifactId).not.toBe(first.artifactId);
+    expect(first.artifactId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(drive.files.ensureOutputFile).toHaveBeenLastCalledWith(
+      "access-token",
+      expect.objectContaining({ partIndex: 2, partCount: 2 }),
+    );
+    expect(repository.reserveOutput).toHaveBeenLastCalledWith(
+      expect.objectContaining({ partIndex: 2, partCount: 2 }),
+    );
+  });
+
+  it.each(["RESERVED", "PENDING_REPLAY"] as const)(
+    "returns a fresh resumable session for %s",
+    async (outcome) => {
+      repository.reserveOutput.mockResolvedValue(outcome);
+      const response = await createSession();
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(body).toEqual({
+        status: "UPLOAD",
+        artifactId: expect.any(String),
+        driveFileId: "drive-output-001",
+        sessionUri: "https://www.googleapis.com/upload/drive/v3/files/drive-output-001?upload_id=x",
+        expiresAt: "2026-07-26T00:00:00.000Z",
+      });
+      expect(JSON.stringify(body)).not.toContain("refreshToken");
+    },
+  );
+
+  it("returns READY without creating a resumable session for an exact READY replay", async () => {
+    repository.reserveOutput.mockResolvedValue("READY_REPLAY");
+    const response = await createSession();
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body).toEqual({
+      status: "READY",
+      artifactId: expect.any(String),
+      driveFileId: "drive-output-001",
+    });
+    expect(drive.files.createResumableUpdateSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { partIndex: 0, partCount: 2 },
+    { partIndex: 1, partCount: 0 },
+    { partIndex: 3, partCount: 2 },
+    { partIndex: 1, partCount: 1_000 },
+  ])("rejects invalid Part metadata %#", async (invalid) => {
+    const response = await createSession(jobId, { ...output, ...invalid });
+    expect(response.status).toBe(400);
+    expect(drive.files.ensureOutputFile).not.toHaveBeenCalled();
   });
 });

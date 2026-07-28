@@ -49,6 +49,7 @@ export class FakeControlPlaneRepository implements ControlPlaneRepository {
       }),
       progressHistory: Object.freeze([]),
       outputMetadata: null,
+      outputParts: Object.freeze([]),
       workerSummary: null,
       attemptSummary: Object.freeze({
         count: 0,

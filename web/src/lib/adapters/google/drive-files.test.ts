@@ -686,12 +686,14 @@ describe("createGoogleDriveFilesAdapter", () => {
       ytbVpsProjectId: PROJECT_ID,
       ytbVpsArtifactId: ARTIFACT_ID,
       ytbVpsJobId: jobId,
+      ytbVpsPartIndex: "2",
+      ytbVpsPartCount: "4",
       ytbVpsRole: "output",
       schema: "1",
     };
     const output = {
       id: "drive-output-file-001",
-      name: "part-01-of-01.mp4",
+      name: "part-02-of-04.mp4",
       mimeType: "video/mp4",
       size: "0",
       parents: ["drive-project-folder-001"],
@@ -707,17 +709,44 @@ describe("createGoogleDriveFilesAdapter", () => {
       jobId,
       artifactId: ARTIFACT_ID,
       parentId: "drive-project-folder-001",
+      partIndex: 2,
+      partCount: 4,
     })).resolves.toBe("drive-output-file-001");
 
     const create = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
     expect(create).toEqual({
-      name: "part-01-of-01.mp4",
+      name: "part-02-of-04.mp4",
       mimeType: "video/mp4",
       parents: ["drive-project-folder-001"],
       appProperties: properties,
     });
     expect(JSON.stringify(create)).not.toContain("permission");
   });
+
+  it.each([
+    [0, 1],
+    [2, 1],
+    [1, 0],
+    [1, 1_000],
+  ])(
+    "rejects invalid output Part metadata before HTTP %#",
+    async (partIndex, partCount) => {
+      const fetcher = vi.fn<typeof fetch>();
+
+      await expect(
+        adapter(fetcher).ensureOutputFile(ACCESS_TOKEN, {
+          projectId: PROJECT_ID,
+          jobId: "40000000-0000-4000-8000-000000000001",
+          artifactId: ARTIFACT_ID,
+          parentId: "drive-project-folder-001",
+          partIndex,
+          partCount,
+        }),
+      ).rejects.toThrow();
+
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ["http://www.googleapis.com/upload/drive/v3/files/file?upload_id=x"],

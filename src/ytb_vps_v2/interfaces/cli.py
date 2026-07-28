@@ -31,10 +31,17 @@ from ytb_vps_v2.adapters.offline.providers import (
 )
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
-from ytb_vps_v2.application.offline_slice import OfflineSliceRequest, OfflineSliceRunner
+from ytb_vps_v2.application.offline_slice import (
+    OfflineSliceRequest,
+    OfflineSliceResult,
+    OfflineSliceRunner,
+)
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
+from ytb_vps_v2.domain.fingerprints import (
+    legacy_s2_render_fingerprint,
+    stage_config_fingerprints,
+)
 from ytb_vps_v2.domain.models import BlurRegion, BoundingBox, JobId, RegionKind
 from ytb_vps_v2.domain.timeline import FrameInterval
 from ytb_vps_v2.interfaces.worker import WorkerCredentialStore, WorkerLoop
@@ -161,6 +168,57 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _media_output_payload(
+    job_id: JobId,
+    result: OfflineSliceResult,
+) -> dict[str, object]:
+    rendered_artifacts = tuple(
+        sorted(
+            (
+                artifact
+                for artifact in result.artifacts
+                if artifact.name.startswith("render-part-")
+                and artifact.name[12:].isdigit()
+            ),
+            key=lambda artifact: artifact.name,
+        )
+    )
+    if (
+        not rendered_artifacts
+        or len(rendered_artifacts)
+        != len(result.publication.part_paths)
+    ):
+        raise RuntimeError("media result Part artifacts are incomplete")
+    rendered = [
+        str(
+            result.workspace_root.joinpath(
+                *artifact.relative_path.parts
+            )
+        )
+        for artifact in rendered_artifacts
+    ]
+    published = [
+        str(result.workspace_root.joinpath(*path.parts))
+        for path in result.publication.part_paths
+    ]
+    payload: dict[str, object] = {
+        "jobId": job_id.value,
+        "workspace": str(result.workspace_root),
+        "renderedParts": rendered,
+        "publishedParts": published,
+        "tts": str(
+            result.workspace_root
+            / "artifacts"
+            / "tts"
+            / "voice.wav"
+        ),
+    }
+    if len(rendered) == 1:
+        payload["rendered"] = rendered[0]
+        payload["published"] = published[0]
+    return payload
+
+
 def _run_media(arguments: argparse.Namespace) -> int:
     source = arguments.source.resolve()
     workspace = arguments.workspace.resolve()
@@ -210,16 +268,19 @@ def _run_media(arguments: argparse.Namespace) -> int:
             at=now,
             verification_observed_at=int(datetime.now(timezone.utc).timestamp()),
             blur_regions=tuple(arguments.blur),
+            legacy_s2_render_fingerprint=legacy_s2_render_fingerprint(
+                EffectiveConfig()
+            ),
         ))
     finally:
         state.close()
-    print(json.dumps({
-        "jobId": job_id.value,
-        "workspace": str(result.workspace_root),
-        "rendered": str(result.workspace_root / "artifacts" / "render" / "rendered.mp4"),
-        "published": str(result.workspace_root / "published" / "part-001.mp4"),
-        "tts": str(result.workspace_root / "artifacts" / "tts" / "voice.wav"),
-    }, ensure_ascii=False, separators=(",", ":")))
+    print(
+        json.dumps(
+            _media_output_payload(job_id, result),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
     return 0
 
 

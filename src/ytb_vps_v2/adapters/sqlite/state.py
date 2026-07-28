@@ -203,6 +203,8 @@ class SqliteStateStore:
         current: tuple[StageConfigFingerprint, ...],
         plan: InvalidationPlan,
         at: str,
+        *,
+        preserve_render_units: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         job = _job_id(job_id)
         old = _config_snapshot(previous)
@@ -217,6 +219,27 @@ class SqliteStateStore:
         if direct != plan.direct_stages:
             raise StateStoreError(
                 "Invalidation does not match configuration change"
+            )
+        if (
+            type(preserve_render_units) is not tuple
+            or tuple(sorted(set(preserve_render_units)))
+            != preserve_render_units
+            or any(
+                key != "render:plan"
+                and not (
+                    key.startswith("render:")
+                    and len(key) == len("render:000000")
+                    and key.removeprefix("render:").isdigit()
+                )
+                for key in preserve_render_units
+            )
+        ):
+            raise StateStoreError(
+                "Preserved render units are invalid"
+            )
+        if preserve_render_units and direct != (StageName.RENDER,):
+            raise StateStoreError(
+                "Render-unit preservation requires a render-only change"
             )
         timestamp = _text("Reconfiguration timestamp", at, 128)
         with self._transaction() as connection:
@@ -247,6 +270,30 @@ class SqliteStateStore:
                 raise StateStoreError(
                     "Stored configuration changed before reconfiguration"
                 )
+            if preserve_render_units:
+                preserved_placeholders = ",".join(
+                    "?" for _ in preserve_render_units
+                )
+                preserved_rows = connection.execute(
+                    f"SELECT unit_key,stage FROM work_units "
+                    f"WHERE job_id=? AND unit_key IN "
+                    f"({preserved_placeholders}) ORDER BY unit_key",
+                    (job.value, *preserve_render_units),
+                ).fetchall()
+                if (
+                    tuple(
+                        row["unit_key"]
+                        for row in preserved_rows
+                    )
+                    != preserve_render_units
+                    or any(
+                        row["stage"] != StageName.RENDER.value
+                        for row in preserved_rows
+                    )
+                ):
+                    raise StateStoreError(
+                        "Preserved render units do not match stored state"
+                    )
 
             affected_rows: tuple[sqlite3.Row, ...] = ()
             if plan.affected_stages:
@@ -255,28 +302,43 @@ class SqliteStateStore:
                     for stage in plan.affected_stages
                 )
                 placeholders = ",".join("?" for _ in stages)
+                preservation_sql = ""
+                preservation_parameters: tuple[str, ...] = ()
+                if preserve_render_units:
+                    preserved_placeholders = ",".join(
+                        "?" for _ in preserve_render_units
+                    )
+                    preservation_sql = (
+                        f" AND unit_key NOT IN "
+                        f"({preserved_placeholders})"
+                    )
+                    preservation_parameters = preserve_render_units
                 affected_rows = tuple(
                     connection.execute(
                         f"SELECT unit_key FROM work_units WHERE job_id=? "
                         f"AND stage IN ({placeholders}) AND status<>? "
+                        f"{preservation_sql} "
                         f"ORDER BY unit_key",
                         (
                             job.value,
                             *stages,
                             WorkStatus.INVALID.value,
+                            *preservation_parameters,
                         ),
                     ).fetchall()
                 )
                 connection.execute(
                     f"UPDATE work_units SET status=?, error_kind=NULL, "
                     f"error_message=NULL, updated_at=? WHERE job_id=? "
-                    f"AND stage IN ({placeholders}) AND status<>?",
+                    f"AND stage IN ({placeholders}) AND status<>?"
+                    f"{preservation_sql}",
                     (
                         WorkStatus.INVALID.value,
                         timestamp,
                         job.value,
                         *stages,
                         WorkStatus.INVALID.value,
+                        *preservation_parameters,
                     ),
                 )
                 connection.execute(
@@ -284,8 +346,14 @@ class SqliteStateStore:
                     f"AND unit_key IN ("
                     f"SELECT unit_key FROM work_units WHERE job_id=? "
                     f"AND stage IN ({placeholders})"
+                    f"{preservation_sql}"
                     f") AND is_valid=1",
-                    (job.value, job.value, *stages),
+                    (
+                        job.value,
+                        job.value,
+                        *stages,
+                        *preservation_parameters,
+                    ),
                 )
 
             for stage in StageName:
@@ -1099,6 +1167,83 @@ class SqliteStateStore:
             TypeError,
         ) as exc:
             raise StateStoreError("Unable to read work-unit artifacts") from exc
+
+    def retire_invalid_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        identities: tuple[tuple[str, PurePosixPath], ...],
+    ) -> None:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        if (
+            type(identities) is not tuple
+            or not identities
+            or any(
+                type(identity) is not tuple
+                or len(identity) != 2
+                or type(identity[0]) is not str
+                or type(identity[1]) is not PurePosixPath
+                for identity in identities
+            )
+        ):
+            raise StateStoreError(
+                "Retired artifact identities must be name/path pairs"
+            )
+        requested = tuple(
+            (
+                _text("Retired artifact name", name),
+                str(path),
+            )
+            for name, path in identities
+        )
+        if (
+            len(set(requested)) != len(requested)
+            or any(
+                path.startswith("/")
+                or "\\" in path
+                or ".." in PurePosixPath(path).parts
+                for _, path in requested
+            )
+        ):
+            raise StateStoreError(
+                "Retired artifact identities must be unique safe paths"
+            )
+        with self._transaction() as connection:
+            unit = connection.execute(
+                "SELECT status FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if (
+                unit is None
+                or unit["status"] != WorkStatus.INVALID.value
+            ):
+                raise StateTransitionError(
+                    "Artifacts can retire only from an invalid work unit"
+                )
+            rows = connection.execute(
+                "SELECT name, relative_path FROM artifacts "
+                "WHERE job_id=? AND unit_key=? AND is_valid=0",
+                (job.value, key),
+            ).fetchall()
+            available = {
+                (row["name"], row["relative_path"])
+                for row in rows
+            }
+            if not set(requested).issubset(available):
+                raise StateStoreError(
+                    "Retired artifact identity is not invalid"
+                )
+            connection.executemany(
+                "DELETE FROM artifacts WHERE job_id=? "
+                "AND unit_key=? AND name=? AND relative_path=? "
+                "AND is_valid=0",
+                (
+                    (job.value, key, name, path)
+                    for name, path in requested
+                ),
+            )
 
     def invalidate_work_units(
         self,
