@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 import json
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -52,6 +54,7 @@ from ytb_vps_v2.domain.pipeline import (
     RenderPlanDocument,
     RenderRequest,
     TtsDocument,
+    canonical_document_bytes,
     parse_render_plan_document_bytes,
     parse_publication_document_bytes,
     parse_tts_document_bytes,
@@ -87,7 +90,10 @@ class LocalPartPublisherTests(unittest.TestCase):
         second = publisher.publish(self.source, self.part)
 
         self.assertEqual(first, second)
-        self.assertEqual(first.key, PurePosixPath("published/part-001.mp4"))
+        self.assertEqual(
+            first.key,
+            PurePosixPath("published/part-01-of-01.mp4"),
+        )
         self.assertEqual(
             self.workspace.joinpath(*first.key.parts).read_bytes(),
             self.source.read_bytes(),
@@ -316,8 +322,8 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             if artifact.name
             in {
                 "tts-audio",
-                "rendered-video",
-                "published-part-001",
+                "render-part-000001",
+                "published-part-000001",
             }
         }
         expected_sides = {
@@ -325,25 +331,30 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
                 StageName.TTS,
                 tts_document.audio_path,
                 tts_document.audio_digest,
+                by_owner[StageName.TTS].dependencies,
             ),
-            "rendered-video": (
+            "render-part-000001": (
                 StageName.RENDER,
                 render_plan.rendered_path,
                 render_plan.rendered_digest,
+                ("render-chunk-000000",),
             ),
-            "published-part-001": (
+            "published-part-000001": (
                 StageName.PUBLISH,
                 result.publication.part_paths[0],
                 result.publication.part_digests[0],
+                ("render-part-000001",),
             ),
         }
         self.assertEqual(set(side_by_name), set(expected_sides))
-        for name, (owner, path, digest) in expected_sides.items():
+        for name, (owner, path, digest, dependencies) in (
+            expected_sides.items()
+        ):
             side = side_by_name[name]
             self.assertIs(side.owner, owner)
             self.assertEqual(side.relative_path, path)
             self.assertEqual(FileDigest(side.size_bytes, side.sha256), digest)
-            self.assertEqual(side.dependencies, by_owner[owner].dependencies)
+            self.assertEqual(side.dependencies, dependencies)
             LocalArtifactWriter(self.workspace).verify(path, digest)
 
         self.assertEqual(
@@ -462,7 +473,11 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             artifact
             for artifact in first.artifacts
             if artifact.name
-            in {"tts-audio", "rendered-video", "published-part-001"}
+            in {
+                "tts-audio",
+                "render-part-000001",
+                "published-part-000001",
+            }
         )
         self.assertEqual(len(side_artifacts), 3)
 
@@ -678,7 +693,7 @@ class _LightweightMedia:
             expected.job_id,
             PurePosixPath("inputs") / path.name,
             digest_file(path),
-            Fraction(30),
+            Fraction(expected.frame_count, 30),
             Fraction(30),
             Timeline(30),
             expected.frame_count,
@@ -821,7 +836,11 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                             if point is InterruptionPoint.AFTER_SQLITE_COMMIT
                             else WorkStatus.PENDING
                             if (
-                                stage is StageName.RENDER
+                                stage
+                                in {
+                                    StageName.RENDER,
+                                    StageName.PUBLISH,
+                                }
                                 and point is InterruptionPoint.BEFORE_PROVIDER
                             )
                             else WorkStatus.RUNNING
@@ -863,7 +882,11 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                                 if (
                                     point is InterruptionPoint.AFTER_SQLITE_COMMIT
                                     or (
-                                        stage is StageName.RENDER
+                                        stage
+                                        in {
+                                            StageName.RENDER,
+                                            StageName.PUBLISH,
+                                        }
                                         and point
                                         is InterruptionPoint.BEFORE_PROVIDER
                                     )
@@ -997,6 +1020,284 @@ class OfflineSliceResumeTests(unittest.TestCase):
             StageName.BACKUP,
         ):
             self.assertEqual(after[stage], before[stage] + 1)
+
+    def test_multipart_resume_republishes_only_the_corrupt_part(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        workspace, _, _, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        multipart_request = replace(
+            request,
+            chunk_seconds=10,
+            max_part_seconds=20,
+        )
+
+        first = runner.run(multipart_request)
+
+        self.assertEqual(
+            first.publication.part_paths,
+            (
+                PurePosixPath("published/part-01-of-02.mp4"),
+                PurePosixPath("published/part-02-of-02.mp4"),
+            ),
+        )
+        attempts = {
+            unit.key: unit.attempts
+            for unit in state.work_units(request.job_id)
+            if re.fullmatch(
+                r"(?:render|publish):part:[0-9]{6}",
+                unit.key,
+            )
+        }
+        corrupt = workspace.joinpath(
+            *first.publication.part_paths[1].parts
+        )
+        corrupt.write_bytes(b"corrupt")
+
+        with self.assertRaises(FreshWorkspaceRequired):
+            runner.run(multipart_request)
+
+        fresh = root / "fresh-multipart"
+        fresh.mkdir()
+        resumed = runner.run(
+            replace(
+                multipart_request,
+                fresh_workspace_root=fresh,
+            )
+        )
+
+        after = {
+            unit.key: unit.attempts
+            for unit in state.work_units(request.job_id)
+            if unit.key in attempts
+        }
+        self.assertEqual(
+            after["publish:part:000001"],
+            attempts["publish:part:000001"],
+        )
+        self.assertEqual(
+            after["publish:part:000002"],
+            attempts["publish:part:000002"] + 1,
+        )
+        for key, value in attempts.items():
+            if key.startswith("render:part:"):
+                self.assertEqual(after[key], value)
+        self.assertEqual(
+            resumed.publication.part_paths,
+            first.publication.part_paths,
+        )
+        self.assertEqual(
+            digest_file(
+                fresh.joinpath(
+                    *resumed.publication.part_paths[1].parts
+                )
+            ),
+            resumed.publication.part_digests[1],
+        )
+
+    def test_legacy_single_output_migrates_without_rerendering_chunks(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        workspace, _, _, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        first = runner.run(request)
+        chunk_attempts = {
+            unit.key: unit.attempts
+            for unit in state.work_units(request.job_id)
+            if re.fullmatch(r"render:[0-9]{6}", unit.key)
+        }
+        render_plan_path = workspace.joinpath(
+            *PIPELINE_ARTIFACT_PATHS[RenderPlanDocument].parts
+        )
+        render_plan = parse_render_plan_document_bytes(
+            render_plan_path.read_bytes()
+        )
+        rendered = render_plan.rendered_parts[0]
+        legacy_render_path = PurePosixPath(
+            "artifacts/render/rendered.mp4"
+        )
+        legacy_render_file = workspace.joinpath(
+            *legacy_render_path.parts
+        )
+        legacy_render_file.write_bytes(
+            workspace.joinpath(*rendered.path.parts).read_bytes()
+        )
+        render_payload = json.loads(
+            canonical_document_bytes(render_plan)
+        )
+        del render_payload["rendered_parts"]
+        render_payload["rendered_path"] = str(legacy_render_path)
+        render_payload["rendered_digest"] = {
+            "size_bytes": rendered.digest.size_bytes,
+            "sha256": rendered.digest.sha256,
+        }
+        legacy_render_raw = (
+            json.dumps(
+                render_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+        legacy_render_digest = FileDigest(
+            len(legacy_render_raw),
+            hashlib.sha256(legacy_render_raw).hexdigest(),
+        )
+        render_plan_path.write_bytes(legacy_render_raw)
+
+        legacy_published_path = PurePosixPath(
+            "published/part-001.mp4"
+        )
+        legacy_published_file = workspace.joinpath(
+            *legacy_published_path.parts
+        )
+        legacy_published_file.write_bytes(
+            workspace.joinpath(
+                *first.publication.part_paths[0].parts
+            ).read_bytes()
+        )
+        legacy_publication = replace(
+            first.publication,
+            dependency_digest=legacy_render_digest,
+            part_paths=(legacy_published_path,),
+        )
+        legacy_publication_raw = canonical_document_bytes(
+            legacy_publication
+        )
+        legacy_publication_digest = FileDigest(
+            len(legacy_publication_raw),
+            hashlib.sha256(legacy_publication_raw).hexdigest(),
+        )
+        publication_path = workspace.joinpath(
+            *PIPELINE_ARTIFACT_PATHS[PublicationDocument].parts
+        )
+        publication_path.write_bytes(legacy_publication_raw)
+
+        state.connection.execute(
+            "UPDATE artifacts SET size_bytes=?, sha256=? "
+            "WHERE job_id=? AND unit_key='render' "
+            "AND name='render-document'",
+            (
+                legacy_render_digest.size_bytes,
+                legacy_render_digest.sha256,
+                request.job_id.value,
+            ),
+        )
+        state.connection.execute(
+            "INSERT INTO artifacts("
+            "job_id,name,relative_path,size_bytes,sha256,owner_stage,"
+            "unit_key,dependencies_json,is_valid,committed_at"
+            ") VALUES (?,?,?,?,?,?,?,?,1,?)",
+            (
+                request.job_id.value,
+                "rendered-video",
+                str(legacy_render_path),
+                rendered.digest.size_bytes,
+                rendered.digest.sha256,
+                StageName.RENDER.value,
+                "render",
+                json.dumps(
+                    ("tts-document",),
+                    separators=(",", ":"),
+                ),
+                "legacy",
+            ),
+        )
+        state.connection.execute(
+            "UPDATE artifacts SET size_bytes=?, sha256=? "
+            "WHERE job_id=? AND unit_key='publish' "
+            "AND name='publish-document'",
+            (
+                legacy_publication_digest.size_bytes,
+                legacy_publication_digest.sha256,
+                request.job_id.value,
+            ),
+        )
+        state.connection.execute(
+            "INSERT INTO artifacts("
+            "job_id,name,relative_path,size_bytes,sha256,owner_stage,"
+            "unit_key,dependencies_json,is_valid,committed_at"
+            ") VALUES (?,?,?,?,?,?,?,?,1,?)",
+            (
+                request.job_id.value,
+                "published-part-001",
+                str(legacy_published_path),
+                rendered.digest.size_bytes,
+                rendered.digest.sha256,
+                StageName.PUBLISH.value,
+                "publish",
+                json.dumps(
+                    ("render-document",),
+                    separators=(",", ":"),
+                ),
+                "legacy",
+            ),
+        )
+
+        with self.assertRaises(FreshWorkspaceRequired):
+            runner.run(request)
+
+        self.assertEqual(
+            {
+                unit.key: unit.attempts
+                for unit in state.work_units(request.job_id)
+                if unit.key in chunk_attempts
+            },
+            chunk_attempts,
+        )
+        self.assertTrue(
+            all(
+                state.get_work_unit(
+                    request.job_id,
+                    stage.value.lower(),
+                ).status
+                is WorkStatus.INVALID
+                for stage in (
+                    StageName.RENDER,
+                    StageName.PUBLISH,
+                    StageName.BACKUP,
+                )
+            )
+        )
+        fresh = root / "fresh-legacy-migration"
+        fresh.mkdir()
+
+        migrated = runner.run(
+            replace(request, fresh_workspace_root=fresh)
+        )
+
+        migrated_render_path = fresh.joinpath(
+            *PIPELINE_ARTIFACT_PATHS[RenderPlanDocument].parts
+        )
+        migrated_render_raw = migrated_render_path.read_bytes()
+        migrated_render = parse_render_plan_document_bytes(
+            migrated_render_raw
+        )
+        self.assertIn(b'"rendered_parts"', migrated_render_raw)
+        self.assertNotIn(b'"rendered_path"', migrated_render_raw)
+        self.assertEqual(
+            migrated_render.rendered_parts[0].path,
+            PurePosixPath(
+                "artifacts/render/parts/part-01-of-01.mp4"
+            ),
+        )
+        self.assertEqual(
+            migrated.publication.part_paths,
+            (PurePosixPath("published/part-01-of-01.mp4"),),
+        )
+        self.assertEqual(
+            {
+                unit.key: unit.attempts
+                for unit in state.work_units(request.job_id)
+                if unit.key in chunk_attempts
+            },
+            chunk_attempts,
+        )
 
     def test_corrupt_primary_invalidates_owner_and_recomputes_only_in_fresh_workspace(self) -> None:
         temporary = tempfile.TemporaryDirectory()

@@ -223,6 +223,60 @@ class SqliteArtifactTests(unittest.TestCase):
         )
         self.assertEqual(set(self.store.valid_artifacts(self.job_id)), set(changed))
 
+    def test_explicit_migration_retires_only_named_invalid_artifact(self) -> None:
+        self._running("render", StageName.RENDER)
+        primary = self._artifact(
+            "render-document",
+            StageName.RENDER,
+            "artifacts/render/render-plan.json",
+        )
+        legacy = self._artifact(
+            "rendered-video",
+            StageName.RENDER,
+            "artifacts/render/rendered.mp4",
+        )
+        self.store.commit_artifacts(
+            self.job_id,
+            "render",
+            (primary, legacy),
+            "first",
+        )
+        self.store.invalidate_work_units(
+            self.job_id,
+            ("render",),
+            "invalidated",
+        )
+
+        self.store.retire_invalid_artifacts(
+            self.job_id,
+            "render",
+            ((legacy.name, legacy.relative_path),),
+        )
+        self.store.start_work_unit(
+            self.job_id,
+            "render",
+            "restarted",
+        )
+        replacement = replace(
+            primary,
+            size_bytes=84,
+            sha256="b" * 64,
+        )
+        self.store.commit_artifact(
+            self.job_id,
+            "render",
+            replacement,
+            "migrated",
+        )
+
+        self.assertEqual(
+            self.store.artifacts_for_unit(
+                self.job_id,
+                "render",
+            ),
+            (replacement,),
+        )
+
     def test_commit_rejects_non_running_and_owner_mismatch(self) -> None:
         self.store.put_work_unit(
             self.job_id,

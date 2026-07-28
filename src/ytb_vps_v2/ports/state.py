@@ -115,6 +115,13 @@ class StateRepository(Protocol):
         unit_key: str,
     ) -> tuple[Artifact, ...]: ...
 
+    def retire_invalid_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        identities: tuple[tuple[str, PurePosixPath], ...],
+    ) -> None: ...
+
     def invalidate_work_units(
         self,
         job_id: JobId,

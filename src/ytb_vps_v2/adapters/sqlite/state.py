@@ -1100,6 +1100,83 @@ class SqliteStateStore:
         ) as exc:
             raise StateStoreError("Unable to read work-unit artifacts") from exc
 
+    def retire_invalid_artifacts(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        identities: tuple[tuple[str, PurePosixPath], ...],
+    ) -> None:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        if (
+            type(identities) is not tuple
+            or not identities
+            or any(
+                type(identity) is not tuple
+                or len(identity) != 2
+                or type(identity[0]) is not str
+                or type(identity[1]) is not PurePosixPath
+                for identity in identities
+            )
+        ):
+            raise StateStoreError(
+                "Retired artifact identities must be name/path pairs"
+            )
+        requested = tuple(
+            (
+                _text("Retired artifact name", name),
+                str(path),
+            )
+            for name, path in identities
+        )
+        if (
+            len(set(requested)) != len(requested)
+            or any(
+                path.startswith("/")
+                or "\\" in path
+                or ".." in PurePosixPath(path).parts
+                for _, path in requested
+            )
+        ):
+            raise StateStoreError(
+                "Retired artifact identities must be unique safe paths"
+            )
+        with self._transaction() as connection:
+            unit = connection.execute(
+                "SELECT status FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if (
+                unit is None
+                or unit["status"] != WorkStatus.INVALID.value
+            ):
+                raise StateTransitionError(
+                    "Artifacts can retire only from an invalid work unit"
+                )
+            rows = connection.execute(
+                "SELECT name, relative_path FROM artifacts "
+                "WHERE job_id=? AND unit_key=? AND is_valid=0",
+                (job.value, key),
+            ).fetchall()
+            available = {
+                (row["name"], row["relative_path"])
+                for row in rows
+            }
+            if not set(requested).issubset(available):
+                raise StateStoreError(
+                    "Retired artifact identity is not invalid"
+                )
+            connection.executemany(
+                "DELETE FROM artifacts WHERE job_id=? "
+                "AND unit_key=? AND name=? AND relative_path=? "
+                "AND is_valid=0",
+                (
+                    (job.value, key, name, path)
+                    for name, path in requested
+                ),
+            )
+
     def invalidate_work_units(
         self,
         job_id: JobId,
