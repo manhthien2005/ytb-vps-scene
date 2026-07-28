@@ -507,6 +507,18 @@ class RenderRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RenderedPart:
+    part: Part
+    path: PurePosixPath
+    digest: FileDigest
+
+    def __post_init__(self) -> None:
+        _require_exact("Rendered Part identity", self.part, Part)
+        _artifact_path("Rendered Part path", self.path)
+        _digest("Rendered Part digest", self.digest)
+
+
+@dataclass(frozen=True, slots=True)
 class RenderPlanDocument:
     schema_version: int
     job_id: JobId
@@ -522,8 +534,7 @@ class RenderPlanDocument:
     tts_audio_digest: FileDigest
     parts: tuple[Part, ...]
     output_has_audio: bool
-    rendered_path: PurePosixPath
-    rendered_digest: FileDigest
+    rendered_parts: tuple[RenderedPart, ...]
 
     def __post_init__(self) -> None:
         _base(
@@ -552,10 +563,41 @@ class RenderPlanDocument:
         )
         _artifact_path("Render-plan TTS audio path", self.tts_audio_path)
         _digest("Render-plan TTS audio digest", self.tts_audio_digest)
-        _parts(self.parts, frame_count=self.frame_count)
+        parts = _parts(self.parts, frame_count=self.frame_count)
         _require_exact("Render output audio flag", self.output_has_audio, bool)
-        _artifact_path("Rendered media path", self.rendered_path)
-        _digest("Rendered media digest", self.rendered_digest)
+        if (
+            type(self.rendered_parts) is not tuple
+            or any(
+                type(item) is not RenderedPart
+                for item in self.rendered_parts
+            )
+        ):
+            raise DomainInvariantError(
+                "Rendered Parts must be RenderedPart values"
+            )
+        if tuple(item.part for item in self.rendered_parts) != parts:
+            raise DomainInvariantError(
+                "Rendered Parts must align with the Part plan"
+            )
+        paths = tuple(item.path for item in self.rendered_parts)
+        if len(paths) != len(set(paths)):
+            raise DomainInvariantError("Rendered Part paths must be unique")
+
+    @property
+    def rendered_path(self) -> PurePosixPath:
+        if len(self.rendered_parts) != 1:
+            raise DomainInvariantError(
+                "Multipart render plan has no singular rendered path"
+            )
+        return self.rendered_parts[0].path
+
+    @property
+    def rendered_digest(self) -> FileDigest:
+        if len(self.rendered_parts) != 1:
+            raise DomainInvariantError(
+                "Multipart render plan has no singular rendered digest"
+            )
+        return self.rendered_parts[0].digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +761,14 @@ def _render_chunk_dict(value: RenderChunk) -> dict[str, object]:
     }
 
 
+def _rendered_part_dict(value: RenderedPart) -> dict[str, object]:
+    return {
+        "digest": _digest_dict(value.digest),
+        "part": _part_dict(value.part),
+        "path": str(value.path),
+    }
+
+
 def _base_dict(document: object, document_type: str) -> dict[str, object]:
     return {
         "dependency_digest": _digest_dict(document.dependency_digest),  # type: ignore[attr-defined]
@@ -787,8 +837,10 @@ def _document_dict(document: object) -> dict[str, object]:
             cues=[_cue_dict(item) for item in document.cues],
             output_has_audio=document.output_has_audio,
             parts=[_part_dict(item) for item in document.parts],
-            rendered_digest=_digest_dict(document.rendered_digest),
-            rendered_path=str(document.rendered_path),
+            rendered_parts=[
+                _rendered_part_dict(item)
+                for item in document.rendered_parts
+            ],
             tts_audio_digest=_digest_dict(document.tts_audio_digest),
             tts_audio_path=str(document.tts_audio_path),
         )
@@ -813,8 +865,7 @@ def _document_dict(document: object) -> dict[str, object]:
     )
 
 
-def canonical_document_bytes(document: object) -> bytes:
-    payload = _document_dict(document)
+def _canonical_payload_bytes(payload: object) -> bytes:
     try:
         return json.dumps(
             payload,
@@ -826,6 +877,10 @@ def canonical_document_bytes(document: object) -> bytes:
         raise DomainInvariantError("Pipeline document contains invalid Unicode") from exc
 
 
+def canonical_document_bytes(document: object) -> bytes:
+    return _canonical_payload_bytes(_document_dict(document))
+
+
 _DIGEST_FIELDS = {"sha256", "size_bytes"}
 _FRACTION_FIELDS = {"denominator", "numerator"}
 _INTERVAL_FIELDS = {"end_frame", "start_frame"}
@@ -834,6 +889,7 @@ _CUE_FIELDS = {"box", "cue_index", "interval", "source_text", "target_text"}
 _BLUR_FIELDS = {"box", "interval", "kind"}
 _RENDER_CHUNK_FIELDS = {"index", "interval"}
 _PART_FIELDS = {"chunk_indexes", "interval", "part_count", "part_index"}
+_RENDERED_PART_FIELDS = {"digest", "part", "path"}
 _BASE_FIELDS = {
     "dependency_digest",
     "dependency_path",
@@ -978,6 +1034,19 @@ def _render_chunk_from(value: object) -> RenderChunk:
     return RenderChunk(
         item["index"],  # type: ignore[arg-type]
         _interval_from(item["interval"]),
+    )
+
+
+def _rendered_part_from(value: object) -> RenderedPart:
+    item = _closed_dict(
+        "Rendered Part",
+        value,
+        _RENDERED_PART_FIELDS,
+    )
+    return RenderedPart(
+        _part_from(item["part"]),
+        _text_path("Rendered Part path", item["path"]),
+        _digest_from("Rendered Part digest", item["digest"]),
     )
 
 
@@ -1202,17 +1271,84 @@ def parse_render_chunk_plan_document_bytes(
 def parse_render_plan_document_bytes(
     raw: bytes, upstream: TtsDocument | None = None
 ) -> RenderPlanDocument:
-    fields = _BASE_FIELDS | {
+    common_fields = _BASE_FIELDS | {
         "blur_regions",
         "cues",
         "output_has_audio",
         "parts",
-        "rendered_digest",
-        "rendered_path",
         "tts_audio_digest",
         "tts_audio_path",
     }
-    encoded, root = _decode(raw, document_type="render_plan", fields=fields)
+    new_fields = common_fields | {"rendered_parts"}
+    legacy_fields = common_fields | {
+        "rendered_digest",
+        "rendered_path",
+    }
+    if type(raw) is not bytes:
+        raise DomainInvariantError("Pipeline document input must be bytes")
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+    except DomainInvariantError:
+        raise
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DomainInvariantError(
+            "Pipeline document JSON is invalid"
+        ) from exc
+    if type(payload) is not dict:
+        raise DomainInvariantError(
+            "Pipeline document has missing or unknown fields"
+        )
+    fields = set(payload)
+    if fields == new_fields:
+        legacy = False
+    elif fields == legacy_fields:
+        legacy = True
+    else:
+        raise DomainInvariantError(
+            "Pipeline document has missing or unknown fields"
+        )
+    root = payload
+    if root["document_type"] != "render_plan":
+        raise DomainInvariantError("Expected render_plan pipeline document")
+    parts = tuple(
+        _part_from(item)
+        for item in _array("Parts", root["parts"])
+    )
+    rendered_parts = (
+        (
+            RenderedPart(
+                parts[0],
+                _text_path(
+                    "Rendered media path",
+                    root["rendered_path"],
+                ),
+                _digest_from(
+                    "Rendered media digest",
+                    root["rendered_digest"],
+                ),
+            ),
+        )
+        if legacy and len(parts) == 1
+        else tuple(
+            _rendered_part_from(item)
+            for item in _array(
+                "Rendered Parts",
+                root.get("rendered_parts"),
+            )
+        )
+    )
+    if legacy and len(parts) != 1:
+        raise DomainInvariantError(
+            "Legacy render plan requires exactly one Part"
+        )
     document = RenderPlanDocument(
         *_base_from(root),
         tuple(_cue_from(item) for item in _array("Cues", root["cues"])),
@@ -1222,12 +1358,34 @@ def parse_render_plan_document_bytes(
         ),
         _text_path("Render-plan TTS audio path", root["tts_audio_path"]),
         _digest_from("Render-plan TTS audio digest", root["tts_audio_digest"]),
-        tuple(_part_from(item) for item in _array("Parts", root["parts"])),
+        parts,
         root["output_has_audio"],  # type: ignore[arg-type]
-        _text_path("Rendered media path", root["rendered_path"]),
-        _digest_from("Rendered media digest", root["rendered_digest"]),
+        rendered_parts,
     )
-    result = _finish(encoded, document)
+    if legacy:
+        expected = dict(
+            _base_dict(document, "render_plan"),
+            blur_regions=[
+                _blur_dict(item)
+                for item in document.blur_regions
+            ],
+            cues=[_cue_dict(item) for item in document.cues],
+            output_has_audio=document.output_has_audio,
+            parts=[_part_dict(item) for item in document.parts],
+            rendered_digest=_digest_dict(
+                document.rendered_parts[0].digest
+            ),
+            rendered_path=str(document.rendered_parts[0].path),
+            tts_audio_digest=_digest_dict(document.tts_audio_digest),
+            tts_audio_path=str(document.tts_audio_path),
+        )
+        if _canonical_payload_bytes(expected) != raw:
+            raise DomainInvariantError(
+                "Pipeline document JSON is not canonical"
+            )
+        result = document
+    else:
+        result = _finish(raw, document)
     _verify_upstream(result, upstream, TtsDocument)
     return result  # type: ignore[return-value]
 

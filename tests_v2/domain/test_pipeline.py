@@ -28,6 +28,7 @@ from ytb_vps_v2.domain.pipeline import (
     PublicationDocument,
     RenderChunkPlanDocument,
     RenderPlanDocument,
+    RenderedPart,
     TrackDocument,
     TranslationDocument,
     TtsDocument,
@@ -157,16 +158,24 @@ def tts() -> TtsDocument:
 
 
 def render_plan() -> RenderPlanDocument:
+    part = Part(1, 1, FrameInterval(0, 900), (0,))
     return RenderPlanDocument(
         *common(TTS_ARTIFACT_PATH),  # type: ignore[arg-type]
         translated_cues(),
         track().blur_regions,
         PurePosixPath("artifacts/tts.wav"),
         digest(),
-        (Part(1, 1, FrameInterval(0, 900), (0,)),),
+        (part,),
         True,
-        PurePosixPath("artifacts/render/rendered.mp4"),
-        digest(SHA_B, 20),
+        (
+            RenderedPart(
+                part,
+                PurePosixPath(
+                    "artifacts/render/parts/part-01-of-01.mp4"
+                ),
+                digest(SHA_B, 20),
+            ),
+        ),
     )
 
 
@@ -384,8 +393,7 @@ class PipelineModuleContractTests(unittest.TestCase):
                 "tts_audio_digest",
                 "parts",
                 "output_has_audio",
-                "rendered_path",
-                "rendered_digest",
+                "rendered_parts",
             ),
             "PublicationDocument": (
                 "schema_version",
@@ -424,10 +432,10 @@ class PipelineModuleContractTests(unittest.TestCase):
                 self.assertEqual(tuple(item.name for item in fields(document_type)), names)
                 self.assertIn("__slots__", document_type.__dict__)
 
-    def test_render_plan_persists_the_rendered_side_asset_reference(self) -> None:
+    def test_render_plan_persists_aligned_rendered_part_references(self) -> None:
         self.assertEqual(
-            tuple(item.name for item in fields(RenderPlanDocument))[-2:],
-            ("rendered_path", "rendered_digest"),
+            tuple(item.name for item in fields(RenderPlanDocument))[-1:],
+            ("rendered_parts",),
         )
 
     def test_render_request_is_a_separate_typed_pre_render_contract(self) -> None:
@@ -437,7 +445,7 @@ class PipelineModuleContractTests(unittest.TestCase):
         self.assertTrue(is_dataclass(request_type))
         self.assertEqual(
             tuple(item.name for item in fields(request_type)),
-            tuple(item.name for item in fields(RenderPlanDocument))[:-2],
+            tuple(item.name for item in fields(RenderPlanDocument))[:-1],
         )
         self.assertIn("__slots__", request_type.__dict__)
 
@@ -549,12 +557,59 @@ class PipelineValueTests(unittest.TestCase):
                 with self.assertRaises(DomainInvariantError):
                     replace(tts(), audio_path=path)
                 with self.assertRaises(DomainInvariantError):
-                    replace(render_plan(), rendered_path=path)
+                    replace(
+                        render_plan(),
+                        rendered_parts=(
+                            replace(
+                                render_plan().rendered_parts[0],
+                                path=path,
+                            ),
+                        ),
+                    )
 
         with self.assertRaises(DomainInvariantError):
             replace(ocr(), dependency_digest=SHA_A)
         with self.assertRaises(DomainInvariantError):
-            replace(render_plan(), rendered_digest=SHA_A)
+            replace(
+                render_plan(),
+                rendered_parts=(
+                    replace(
+                        render_plan().rendered_parts[0],
+                        digest=SHA_A,
+                    ),
+                ),
+            )
+
+    def test_rendered_parts_align_exactly_and_use_unique_paths(self) -> None:
+        first = Part(1, 2, FrameInterval(0, 450), (0,))
+        second = Part(2, 2, FrameInterval(450, 900), (1,))
+        path = PurePosixPath(
+            "artifacts/render/parts/part-01-of-02.mp4"
+        )
+        with self.assertRaises(DomainInvariantError):
+            replace(
+                render_plan(),
+                parts=(first, second),
+                rendered_parts=(
+                    RenderedPart(first, path, digest()),
+                    RenderedPart(second, path, digest(SHA_B)),
+                ),
+            )
+        with self.assertRaises(DomainInvariantError):
+            replace(
+                render_plan(),
+                parts=(first, second),
+                rendered_parts=(
+                    RenderedPart(second, path, digest()),
+                    RenderedPart(
+                        first,
+                        PurePosixPath(
+                            "artifacts/render/parts/part-02-of-02.mp4"
+                        ),
+                        digest(SHA_B),
+                    ),
+                ),
+            )
 
     def test_publication_parts_paths_and_digests_are_aligned_and_unique(self) -> None:
         with self.assertRaises(DomainInvariantError):
@@ -782,6 +837,72 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
             ),
             raw,
         )
+
+    def test_render_plan_round_trips_multiple_rendered_parts(self) -> None:
+        first = Part(1, 2, FrameInterval(0, 450), (0,))
+        second = Part(2, 2, FrameInterval(450, 900), (1,))
+        document = replace(
+            render_plan(),
+            parts=(first, second),
+            rendered_parts=(
+                RenderedPart(
+                    first,
+                    PurePosixPath(
+                        "artifacts/render/parts/part-01-of-02.mp4"
+                    ),
+                    digest(SHA_A, 11),
+                ),
+                RenderedPart(
+                    second,
+                    PurePosixPath(
+                        "artifacts/render/parts/part-02-of-02.mp4"
+                    ),
+                    digest(SHA_B, 12),
+                ),
+            ),
+        )
+
+        raw = canonical_document_bytes(document)
+
+        self.assertEqual(parse_render_plan_document_bytes(raw), document)
+        self.assertIn(b'"rendered_parts"', raw)
+        self.assertNotIn(b'"rendered_path"', raw)
+
+    def test_render_plan_parser_normalizes_legacy_single_output(self) -> None:
+        expected = render_plan()
+        payload = json.loads(canonical_document_bytes(expected))
+        del payload["rendered_parts"]
+        payload["rendered_path"] = "artifacts/render/rendered.mp4"
+        payload["rendered_digest"] = {
+            "sha256": SHA_B,
+            "size_bytes": 20,
+        }
+
+        parsed = parse_render_plan_document_bytes(
+            canonical_payload(payload)
+        )
+
+        self.assertEqual(
+            parsed.rendered_parts,
+            (
+                RenderedPart(
+                    expected.parts[0],
+                    PurePosixPath("artifacts/render/rendered.mp4"),
+                    digest(SHA_B, 20),
+                ),
+            ),
+        )
+
+    def test_render_plan_parser_rejects_mixed_rendered_layouts(self) -> None:
+        payload = json.loads(canonical_document_bytes(render_plan()))
+        payload["rendered_path"] = "artifacts/render/rendered.mp4"
+        payload["rendered_digest"] = {
+            "sha256": SHA_B,
+            "size_bytes": 20,
+        }
+
+        with self.assertRaises(DomainInvariantError):
+            parse_render_plan_document_bytes(canonical_payload(payload))
 
     def test_render_chunk_plan_parser_rejects_malformed_chunk_topology(
         self,
