@@ -820,3 +820,64 @@ begin
 end $$;
 
 insert into schema_migrations(version) values (13) on conflict (version) do nothing;
+
+-- migration v14: make Part reservation/completion job-row atomic
+alter table jobs add column if not exists output_ready_part_count integer
+  not null default 0;
+alter table jobs add column if not exists output_part_artifact_ids jsonb
+  not null default '{}'::jsonb;
+alter table jobs add column if not exists output_ready_part_indexes integer[]
+  not null default '{}'::integer[];
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 14) then
+    update jobs j
+    set output_part_count=coalesce(
+          j.output_part_count,
+          plans.part_count
+        ),
+        output_ready_part_count=plans.ready_part_count,
+        output_part_artifact_ids=plans.artifact_ids,
+        output_ready_part_indexes=plans.ready_part_indexes
+    from (
+      select job_id,
+             min(part_count) as part_count,
+             count(*) filter(where status='READY') as ready_part_count,
+             jsonb_object_agg(part_index::text,id) as artifact_ids,
+             coalesce(
+               array_agg(part_index order by part_index)
+                 filter(where status='READY'),
+               '{}'::integer[]
+             ) as ready_part_indexes
+      from artifacts
+      where kind='OUTPUT' and status<>'DELETED'
+      group by job_id
+      having count(distinct part_count)=1
+    ) plans
+    where j.id=plans.job_id;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_ready_part_count_check'
+  ) then
+    alter table jobs add constraint jobs_output_ready_part_count_check
+      check (
+        output_ready_part_count between 0
+          and coalesce(output_part_count,0)
+        and output_ready_part_count
+          = cardinality(output_ready_part_indexes)
+      );
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_part_artifact_ids_check'
+  ) then
+    alter table jobs add constraint jobs_output_part_artifact_ids_check
+      check (jsonb_typeof(output_part_artifact_ids)='object');
+  end if;
+end $$;
+
+insert into schema_migrations(version) values (14) on conflict (version) do nothing;

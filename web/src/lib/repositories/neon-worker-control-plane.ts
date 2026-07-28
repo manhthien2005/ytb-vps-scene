@@ -644,14 +644,42 @@ export function createWorkerControlPlaneRepository(
       const result = await sql.query(
         `with guarded_job as materialized (
            update jobs j
-           set output_part_count=coalesce(j.output_part_count,$12)
+           set output_part_count=coalesce(j.output_part_count,$12),
+               output_part_artifact_ids=case
+                 when $11=any(j.output_ready_part_indexes)
+                 then j.output_part_artifact_ids
+                 else jsonb_set(
+                   j.output_part_artifact_ids,
+                   array[$11::text],
+                   to_jsonb($1::text),
+                   true
+                 )
+               end
            where j.id=$2
              and j.state in ('UPLOADING','CANCEL_REQUESTED')
              and (j.output_part_count is null or j.output_part_count=$12)
+             and (
+               not ($11=any(j.output_ready_part_indexes))
+               or j.output_part_artifact_ids->>($11::text)=$1::text
+             )
              and exists(
                select 1 from job_leases l
                where l.job_id=j.id and l.worker_id=$3
                  and l.fencing_token=$4 and l.expires_at>$9
+             )
+             and not exists(
+               select 1 from artifacts a
+               where a.job_id=j.id and a.kind='OUTPUT'
+                 and a.status<>'DELETED' and a.part_count<>$12
+             )
+             and not exists(
+               select 1 from artifacts a
+               where a.id=$1 and (
+                 a.project_id<>j.project_id or a.job_id<>j.id
+                 or a.kind<>'OUTPUT' or a.part_index<>$11
+                 or a.part_count<>$12 or a.expected_size_bytes<>$7
+                 or a.checksum_sha256<>$8
+               )
              )
            returning j.project_id
          ), eligible as materialized (
@@ -659,11 +687,6 @@ export function createWorkerControlPlaneRepository(
            from guarded_job g
            join job_leases l on l.job_id=$2
            where l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$9
-             and not exists(
-               select 1 from artifacts a
-               where a.job_id=$2 and a.kind='OUTPUT' and a.status<>'DELETED'
-                 and a.part_count<>$12
-             )
            for update of l
          ), existing as materialized (
            select a.id,a.status from artifacts a
@@ -673,17 +696,19 @@ export function createWorkerControlPlaneRepository(
              and a.expected_size_bytes=$7 and a.checksum_sha256=$8
              and a.part_index=$11 and a.part_count=$12
              and exists(select 1 from eligible)
-         ), superseded as (
-           /* A crashed attempt may leave one PENDING identity for this exact
-              Part. The active fence may replace only that Part; READY bytes and
-              other indexes are immutable. */
-           update artifacts a set status='DELETED',updated_at=$9
-           where a.job_id=$2 and a.kind='OUTPUT' and a.status='PENDING' and a.id<>$1
-             and a.part_index=$11 and a.part_count=$12
+         ), retired_exact as (
+           /* Old S3 builds retained superseded PENDING identities as DELETED.
+              Remove only the exact deterministic identity so the live-Part
+              upsert below can safely return A -> B -> A. */
+           delete from artifacts a
+           where a.id=$1 and a.job_id=$2 and a.kind='OUTPUT'
+             and a.status='DELETED' and a.part_index=$11
+             and a.part_count=$12 and a.expected_size_bytes=$7
+             and a.checksum_sha256=$8
              and exists(select 1 from eligible)
              and not exists(select 1 from existing)
            returning a.id
-         ), inserted as (
+         ), upserted as (
            insert into artifacts(
              id,project_id,job_id,kind,status,drive_file_id,drive_parent_id,
              display_name,mime_type,expected_size_bytes,checksum_sha256,
@@ -692,14 +717,12 @@ export function createWorkerControlPlaneRepository(
            select $1,e.project_id,$2,'OUTPUT','PENDING',$5,$6,
                   $10,'video/mp4',$7,$8,$11,$12,$9,$9
            from eligible e
-           cross join (select count(*) as retired from superseded) s
+           cross join (select count(*) as retired from retired_exact) r
            where not exists(select 1 from existing)
-             and not exists(
-               select 1 from artifacts a
-               where a.job_id=$2 and a.kind='OUTPUT' and a.status='READY'
-                 and a.part_index=$11 and a.part_count=$12
-             )
-           on conflict (id) do update set
+           on conflict (job_id,part_index)
+             where kind='OUTPUT' and status<>'DELETED'
+           do update set
+             id=excluded.id,
              status='PENDING',
              drive_file_id=excluded.drive_file_id,
              drive_parent_id=excluded.drive_parent_id,
@@ -710,21 +733,19 @@ export function createWorkerControlPlaneRepository(
              checksum_sha256=excluded.checksum_sha256,
              verified_at=null,
              updated_at=excluded.updated_at
-           where artifacts.status='DELETED'
+           where artifacts.status='PENDING'
+             and artifacts.kind='OUTPUT'
              and artifacts.project_id=excluded.project_id
              and artifacts.job_id=excluded.job_id
-             and artifacts.kind='OUTPUT'
              and artifacts.part_index=excluded.part_index
              and artifacts.part_count=excluded.part_count
-             and artifacts.expected_size_bytes=excluded.expected_size_bytes
-             and artifacts.checksum_sha256=excluded.checksum_sha256
            returning id
          )
          select case status
            when 'PENDING' then 'PENDING_REPLAY'
            when 'READY' then 'READY_REPLAY'
          end as outcome from existing
-         union all select 'RESERVED' as outcome from inserted limit 1`,
+         union all select 'RESERVED' as outcome from upserted limit 1`,
         [
           input.artifactId,
           input.jobId,
@@ -765,80 +786,84 @@ export function createWorkerControlPlaneRepository(
       );
       if (replay.rows.length === 1) return "REPLAY";
       const result = await sql.query(
-        `with guarded_job as materialized (
-           select j.id
-           from jobs j
-           where j.id=$2
+        `with job_advanced as materialized (
+           update jobs j set
+             output_ready_part_count=j.output_ready_part_count+1,
+             output_ready_part_indexes=array_append(
+               j.output_ready_part_indexes,
+               $8
+             ),
+             state=case
+               when j.output_ready_part_count+1=j.output_part_count
+               then 'COMPLETED' else j.state
+             end,
+             active_stage=case
+               when j.output_ready_part_count+1=j.output_part_count
+               then null else j.active_stage
+             end,
+             progress_percent=case
+               when j.output_ready_part_count+1=j.output_part_count
+               then 100 else j.progress_percent
+             end,
+             completed_at=case
+               when j.output_ready_part_count+1=j.output_part_count
+               then $7 else j.completed_at
+             end,
+             updated_at=$7
+           from job_leases l
+           where j.id=$2 and l.job_id=j.id
+             and l.worker_id=$3 and l.fencing_token=$4
+             and l.expires_at>$7
              and j.state in ('UPLOADING','CANCEL_REQUESTED')
              and j.output_part_count=$9
+             and j.output_ready_part_count<$9
+             and not ($8=any(j.output_ready_part_indexes))
+             and j.output_part_artifact_ids->>($8::text)=$1::text
              and exists(
-               select 1 from job_leases l
-               where l.job_id=j.id and l.worker_id=$3
-                 and l.fencing_token=$4 and l.expires_at>$7
+               select 1 from artifacts a
+               where a.id=$1 and a.job_id=j.id and a.kind='OUTPUT'
+                 and a.status='PENDING' and a.drive_file_id=$5
+                 and a.expected_size_bytes=$6 and a.part_index=$8
+                 and a.part_count=$9
              )
-           for update of j
-         ), eligible as materialized (
-           select l.job_id,l.worker_id,l.fencing_token
-           from guarded_job g
-           join job_leases l on l.job_id=g.id
-           where l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$7
-           for update of l
+           returning j.id,l.worker_id,l.fencing_token,
+             j.output_ready_part_count=j.output_part_count as completed
          ), artifact_done as materialized (
-           update artifacts a set status='READY',actual_size_bytes=$6,verified_at=$7,updated_at=$7
-           from eligible e
-           where a.id=$1 and a.job_id=e.job_id and a.kind='OUTPUT' and a.status='PENDING'
-             and a.drive_file_id=$5 and a.expected_size_bytes=$6
-             and a.part_index=$8 and a.part_count=$9
-           returning a.id,a.part_index,a.part_count
-         ), ready_parts as materialized (
-           select a.part_index,a.part_count
-           from artifacts a
-           where a.job_id=$2 and a.kind='OUTPUT' and a.status='READY'
-             and a.id<>$1
-           union all
-           select part_index,part_count from artifact_done
-         ), finalizable as materialized (
-           select 1 as ready
-           from ready_parts
-           having count(*)=$9
-             and count(distinct part_index)=$9
-             and min(part_index)=1
-             and max(part_index)=$9
-             and bool_and(part_count=$9)
-         ), job_done as (
-           update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,
-             completed_at=$7,updated_at=$7
-           from eligible e, artifact_done a, finalizable f
-           /* CANCEL_REQUESTED -> COMPLETED stays allowed by design (a cancel that
-              lands after the upload started finishes the safest already-started
-              operation), but a job already in a terminal state must never be
-              re-completed. */
-           where j.id=e.job_id
-             and j.state not in ('COMPLETED','FAILED_FINAL','CANCELLED','DELETING','DELETED')
-           returning j.id
+           update artifacts a set status='READY',actual_size_bytes=$6,
+             verified_at=$7,updated_at=$7
+           from job_advanced j
+           where a.id=$1 and a.job_id=j.id and a.kind='OUTPUT'
+             and a.status='PENDING' and a.drive_file_id=$5
+             and a.expected_size_bytes=$6 and a.part_index=$8
+             and a.part_count=$9
+           returning a.id
          ), worker_ready as (
            update workers w set state='READY',updated_at=$7
-           from eligible e, job_done j where w.id=e.worker_id returning w.id
+           from job_advanced j, artifact_done a
+           where j.completed and w.id=j.worker_id returning w.id
          ), attempt_done as (
            update job_attempts a set ended_at=$7,outcome='COMPLETED'
-           from eligible e, job_done j
-           where a.job_id=e.job_id and a.worker_id=e.worker_id
-             and a.fencing_token=e.fencing_token and a.ended_at is null returning a.id
+           from job_advanced j, artifact_done d
+           where j.completed and a.job_id=j.id and a.worker_id=j.worker_id
+             and a.fencing_token=j.fencing_token and a.ended_at is null
+           returning a.id
          ), lease_deleted as (
-           delete from job_leases l using eligible e, job_done j
-           where l.job_id=e.job_id and l.worker_id=e.worker_id
-             and l.fencing_token=e.fencing_token returning l.job_id
+           delete from job_leases l using job_advanced j, artifact_done a
+           where j.completed and l.job_id=j.id and l.worker_id=j.worker_id
+             and l.fencing_token=j.fencing_token returning l.job_id
          ), finalized as (
-           select j.id from job_done j
+           select j.id from job_advanced j
              cross join worker_ready w
              cross join attempt_done t
              cross join lease_deleted l
+           where j.completed
          )
          select case
            when exists(select 1 from finalized) then 'COMPLETED'
            else 'PART_COMPLETED'
          end as outcome
-         from artifact_done`,
+         from artifact_done
+         cross join job_advanced`,
         [
           input.artifactId,
           input.jobId,
@@ -871,6 +896,7 @@ export function createWorkerControlPlaneRepository(
          ), attempts_closed as (
            update job_attempts a set ended_at=$1,outcome='LEASE_LOST'
            from expired e
+           join jobs_reset j on j.id=e.job_id
            where a.job_id=e.job_id and a.fencing_token=e.fencing_token and a.ended_at is null
            returning a.id
          ), cancels_finalized as (
@@ -889,10 +915,15 @@ export function createWorkerControlPlaneRepository(
            from cancels_finalized c
            where a.job_id=c.id and a.ended_at is null
            returning a.id
+         ), job_states_settled as materialized (
+           select
+             (select count(*) from jobs_reset)
+             +(select count(*) from cancels_finalized) as touched
          )
-         update workers set state='OFFLINE',updated_at=$1
-         where state in ('SETTING_UP','READY','BUSY')
-           and heartbeat_at<($1::timestamptz - interval '90 seconds')`,
+         update workers w set state='OFFLINE',updated_at=$1
+         from job_states_settled
+         where w.state in ('SETTING_UP','READY','BUSY')
+           and w.heartbeat_at<($1::timestamptz - interval '90 seconds')`,
         [now.toISOString()],
       );
     },
