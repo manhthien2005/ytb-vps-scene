@@ -6,7 +6,7 @@
 - Target branch: `rebuild/v2`
 - Feature branch: `codex/render-s3-multipart`
 - Base SHA: `294f5b79fc67f1024ddf9989e802e6e380b174ae`
-- Pull request: pending
+- Pull request: `https://github.com/manhthien2005/ytb-vps-scene/pull/3`
 - Merge SHA: pending
 
 ## Commits
