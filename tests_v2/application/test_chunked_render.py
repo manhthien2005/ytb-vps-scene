@@ -55,6 +55,9 @@ class _FakeMedia:
         self.rendered: list[int] = []
         self.validated: list[Path] = []
         self.concatenated: list[tuple[Path, ...]] = []
+        self.render_target_fps: list[int] = []
+        self.validate_target_fps: list[int] = []
+        self.concat_target_fps: list[int] = []
 
     def render_chunk(
         self,
@@ -63,8 +66,11 @@ class _FakeMedia:
         plan: RenderRequest,
         chunk,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ):
         self.rendered.append(chunk.index)
+        self.render_target_fps.append(target_fps)
         destination.write_bytes(
             f"chunk:{chunk.index}:{chunk.interval.start_frame}:"
             f"{chunk.interval.end_frame}".encode("ascii")
@@ -75,10 +81,13 @@ class _FakeMedia:
         self,
         path: Path,
         expected: RenderRequest,
+        *,
+        target_fps: int = 30,
         **_: object,
     ):
         raw = path.read_bytes()
         self.validated.append(path)
+        self.validate_target_fps.append(target_fps)
         if path.name.startswith("chunk-"):
             index = expected.parts[0].chunk_indexes[0]
             if not raw.startswith(f"chunk:{index}:".encode("ascii")):
@@ -90,8 +99,11 @@ class _FakeMedia:
         chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ):
         self.concatenated.append(chunks)
+        self.concat_target_fps.append(target_fps)
         destination.write_bytes(
             b"|".join(path.read_bytes() for path in chunks)
         )
@@ -421,6 +433,36 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
                 for group in (artifacts[:2], artifacts[2:])
             ],
         )
+
+    def test_uses_the_media_timeline_fps_for_planning_and_validation(
+        self,
+    ) -> None:
+        prepared = self.coordinator.prepare(
+            job_id=self.job_id,
+            source=self.source,
+            tts_wav=self.voice,
+            request=self.plan,
+            render_fingerprint=Fingerprint("f" * 64),
+            chunk_seconds=10,
+            max_part_seconds=20,
+            target_fps=25,
+            workspace=self.workspace,
+            snapshot_dir=self.snapshots,
+            writer=LocalArtifactWriter(self.workspace),
+            at="run-25-fps",
+            verification_observed_at=100,
+        )
+
+        self.assertEqual(
+            prepared.request.parts,
+            (
+                Part(1, 2, FrameInterval(0, 500), (0, 1)),
+                Part(2, 2, FrameInterval(500, 901), (2, 3)),
+            ),
+        )
+        self.assertEqual(self.media.render_target_fps, [25] * 4)
+        self.assertEqual(self.media.concat_target_fps, [25] * 2)
+        self.assertEqual(self.media.validate_target_fps, [25] * 6)
 
     def _assert_restart(
         self,

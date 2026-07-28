@@ -381,6 +381,12 @@ def _build_effective_config(
                 defaults.render.subtitle_font_name,
                 "render",
             ),
+            max_part_seconds=_pop_int(
+                render,
+                "max_part_seconds",
+                defaults.render.max_part_seconds,
+                "render",
+            ),
         ),
         publish=PublishConfig(remote_root=remote_root),
         runtime=RuntimeConfig(

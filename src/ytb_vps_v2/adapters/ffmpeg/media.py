@@ -1014,8 +1014,11 @@ class FfmpegMediaAdapter:
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument:
         self.require_tools()
+        if type(target_fps) is not int or target_fps < 1:
+            raise FfmpegMediaError("Media target FPS must be positive")
         inherited_fd: int | None = None
         if pass_fds:
             if (
@@ -1121,7 +1124,7 @@ class FfmpegMediaAdapter:
                 source_digest,
                 duration,
                 fps,
-                Timeline(30),
+                Timeline(target_fps),
                 frame_count,
                 width,
                 height,
@@ -1541,7 +1544,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
         anonymous = self._preflight_render_destination(destination)
         try:
-            source_media = self.probe(source)
+            source_media = self.probe(
+                source,
+                target_fps=target_fps,
+            )
             if not self._matches_plan(source_media, plan):
                 raise FfmpegMediaError(
                     "Render source does not match the typed render plan"
@@ -1596,7 +1602,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render target FPS must be positive")
         anonymous = self._preflight_render_destination(destination)
         try:
-            source_media = self.probe(source)
+            source_media = self.probe(
+                source,
+                target_fps=target_fps,
+            )
             if not self._matches_plan(source_media, plan):
                 raise FfmpegMediaError(
                     "Render source does not match the typed render plan"
@@ -1726,7 +1735,11 @@ class FfmpegMediaAdapter:
         chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument:
+        if type(target_fps) is not int or target_fps < 1:
+            raise FfmpegMediaError("Render target FPS must be positive")
         sources = self._concat_sources(chunks, plan)
         anonymous = self._preflight_render_destination(destination)
         named: _OwnedRenderStaging | None = None
@@ -1789,7 +1802,11 @@ class FfmpegMediaAdapter:
                 named.claim_output()
                 pinned = named.pin(final_output)
                 try:
-                    validated = self.validate_render(output, plan)
+                    validated = self.validate_render(
+                        output,
+                        plan,
+                        target_fps=target_fps,
+                    )
                     pinned.verify(validated.source_digest)
                     pinned.publish()
                 finally:
@@ -1800,6 +1817,7 @@ class FfmpegMediaAdapter:
                     plan,
                     pass_fds=pass_fds,
                     logical_name=final_output.name,
+                    target_fps=target_fps,
                 )
                 anonymous.verify(validated.source_digest)
                 anonymous.publish()
@@ -1863,6 +1881,7 @@ class FfmpegMediaAdapter:
             path,
             pass_fds=pass_fds,
             logical_name=logical_name,
+            target_fps=target_fps,
         )
         expected_duration = Fraction(expected.frame_count, target_fps)
         if actual.width != expected.width or actual.height != expected.height:

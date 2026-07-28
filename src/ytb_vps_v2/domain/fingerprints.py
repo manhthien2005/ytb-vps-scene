@@ -89,14 +89,61 @@ def _canonical(value: object) -> object:
     )
 
 
-def fingerprint_value(value: object) -> Fingerprint:
+def _fingerprint_canonical(value: object) -> Fingerprint:
     payload = json.dumps(
-        _canonical(value),
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
     return Fingerprint(hashlib.sha256(payload).hexdigest())
+
+
+def fingerprint_value(value: object) -> Fingerprint:
+    return _fingerprint_canonical(_canonical(value))
+
+
+def legacy_s2_render_fingerprint(
+    config: EffectiveConfig,
+    *,
+    render_inputs: RenderFingerprintInputs | None = None,
+) -> Fingerprint:
+    """Reproduce the S2 RENDER fingerprint before Part sizing was added."""
+    if not isinstance(config, EffectiveConfig):
+        raise DomainInvariantError(
+            "Legacy render fingerprint requires EffectiveConfig"
+        )
+    render = (
+        RenderFingerprintInputs()
+        if render_inputs is None
+        else render_inputs
+    )
+    if type(render) is not RenderFingerprintInputs:
+        raise DomainInvariantError(
+            "Legacy render fingerprint inputs are invalid"
+        )
+    legacy_render_config = {
+        "type": (
+            f"{type(config.render).__module__}."
+            f"{type(config.render).__qualname__}"
+        ),
+        "fields": {
+            item.name: _canonical(
+                getattr(config.render, item.name)
+            )
+            for item in fields(config.render)
+            if item.name != "max_part_seconds"
+        },
+    }
+    return _fingerprint_canonical(
+        {
+            "tuple": [
+                _canonical(config.media.chunk_seconds),
+                legacy_render_config,
+                _canonical(render),
+            ]
+        }
+    )
 
 
 def stage_config_projection(

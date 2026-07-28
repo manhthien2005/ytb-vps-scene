@@ -74,6 +74,7 @@ class MediaPipeline(Protocol):
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument: ...
 
     def render(
@@ -91,6 +92,8 @@ class MediaPipeline(Protocol):
         plan: RenderRequest,
         chunk: RenderChunk,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument: ...
 
     def concatenate_render_chunks(
@@ -98,6 +101,8 @@ class MediaPipeline(Protocol):
         chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument: ...
 
     def validate_render(
@@ -107,6 +112,7 @@ class MediaPipeline(Protocol):
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument: ...
 
 

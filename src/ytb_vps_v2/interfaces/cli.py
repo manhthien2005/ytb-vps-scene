@@ -38,7 +38,10 @@ from ytb_vps_v2.application.offline_slice import (
 )
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
+from ytb_vps_v2.domain.fingerprints import (
+    legacy_s2_render_fingerprint,
+    stage_config_fingerprints,
+)
 from ytb_vps_v2.domain.models import BlurRegion, BoundingBox, JobId, RegionKind
 from ytb_vps_v2.domain.timeline import FrameInterval
 from ytb_vps_v2.interfaces.worker import WorkerCredentialStore, WorkerLoop
@@ -265,6 +268,9 @@ def _run_media(arguments: argparse.Namespace) -> int:
             at=now,
             verification_observed_at=int(datetime.now(timezone.utc).timestamp()),
             blur_regions=tuple(arguments.blur),
+            legacy_s2_render_fingerprint=legacy_s2_render_fingerprint(
+                EffectiveConfig()
+            ),
         ))
     finally:
         state.close()

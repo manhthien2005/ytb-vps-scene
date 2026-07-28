@@ -152,8 +152,10 @@ class OfflineSliceRequest:
     # User-authored static masks from the scene editor.  These are intentionally
     # immutable for one run and are combined with OCR-derived dynamic masks.
     blur_regions: tuple[BlurRegion, ...] = ()
+    target_fps: int = 30
     chunk_seconds: int = 300
     max_part_seconds: int = MAX_PART_SECONDS
+    legacy_s2_render_fingerprint: Fingerprint | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,13 +247,81 @@ class OfflineSliceRunner:
                     request.config_fingerprints,
                 )
                 if invalidation.affected_stages:
+                    preserved_render_units: tuple[str, ...] = ()
+                    legacy_retirements: tuple[
+                        tuple[str, str, PurePosixPath],
+                        ...,
+                    ] = ()
+                    if (
+                        request.max_part_seconds == MAX_PART_SECONDS
+                        and request.legacy_s2_render_fingerprint is not None
+                        and invalidation.direct_stages
+                        == (StageName.RENDER,)
+                        and next(
+                            item.fingerprint
+                            for item in stored
+                            if item.stage is StageName.RENDER
+                        )
+                        == request.legacy_s2_render_fingerprint
+                    ):
+                        preserved_render_units = tuple(
+                            sorted(
+                                unit.key
+                                for unit in self.state.work_units(
+                                    request.job_id
+                                )
+                                if (
+                                    unit.key == "render:plan"
+                                    or re.fullmatch(
+                                        r"render:\d{6}",
+                                        unit.key,
+                                    )
+                                    is not None
+                                )
+                            )
+                        )
+                        legacy_retirements = tuple(
+                            (
+                                key,
+                                name,
+                                path,
+                            )
+                            for key, name, path in (
+                                (
+                                    "render",
+                                    _LEGACY_RENDERED_NAME,
+                                    _LEGACY_RENDERED_PATH,
+                                ),
+                                (
+                                    "publish",
+                                    _LEGACY_PUBLISHED_NAME,
+                                    _LEGACY_PUBLISHED_PATH,
+                                ),
+                            )
+                            if any(
+                                artifact.name == name
+                                and artifact.relative_path == path
+                                for artifact
+                                in self.state.artifacts_for_unit(
+                                    request.job_id,
+                                    key,
+                                )
+                            )
+                        )
                     self.state.reconfigure_job(
                         request.job_id,
                         stored,
                         request.config_fingerprints,
                         invalidation,
                         request.at,
+                        preserve_render_units=preserved_render_units,
                     )
+                    for key, name, path in legacy_retirements:
+                        self.state.retire_invalid_artifacts(
+                            request.job_id,
+                            key,
+                            ((name, path),),
+                        )
             self.state.record_verified_input(request.job_id, request.verified_input)
             self._ensure_units(request)
             resumed = self._resume_workspace(request)
@@ -448,6 +518,10 @@ class OfflineSliceRunner:
                 )
         if type(request.output_has_audio) is not bool:
             raise OfflineSliceError("Output audio policy must be boolean")
+        if type(request.target_fps) is not int or request.target_fps < 1:
+            raise OfflineSliceError(
+                "Media target FPS must be a positive integer"
+            )
         if (
             type(request.chunk_seconds) is not int
             or request.chunk_seconds < 1
@@ -461,6 +535,13 @@ class OfflineSliceRunner:
         ):
             raise OfflineSliceError(
                 "Maximum Part seconds must cover at least one render chunk"
+            )
+        if (
+            request.legacy_s2_render_fingerprint is not None
+            and type(request.legacy_s2_render_fingerprint) is not Fingerprint
+        ):
+            raise OfflineSliceError(
+                "Legacy S2 render fingerprint must be Fingerprint"
             )
         if (
             type(request.verification_observed_at) is not int
@@ -506,10 +587,17 @@ class OfflineSliceRunner:
                         stage is StageName.RENDER
                         and unit.dependencies
                         and all(
-                            re.fullmatch(
-                                r"render:part:\d{6}",
-                                item,
-                            )
+                            re.fullmatch(r"render:part:\d{6}", item)
+                            is not None
+                            for item in unit.dependencies
+                        )
+                    )
+                    or (
+                        stage is StageName.RENDER
+                        and unit.dependencies
+                        and all(
+                            re.fullmatch(r"render:\d{6}", item)
+                            is not None
                             for item in unit.dependencies
                         )
                     )
@@ -953,6 +1041,9 @@ class OfflineSliceRunner:
                     )
         if not canonical:
             return False
+        media = documents.get(StageName.INGEST)
+        if local_request is not None and type(media) is not MediaDocument:
+            return False
         try:
             writer.verify(
                 artifact.relative_path,
@@ -967,6 +1058,7 @@ class OfflineSliceRunner:
                         *artifact.relative_path.parts
                     ),
                     local_request,
+                    target_fps=media.timeline.target_fps,
                 )
         except (OSError, RuntimeError):
             return False
@@ -1217,6 +1309,11 @@ class OfflineSliceRunner:
                     self._render_request(plan),
                     plan.parts[0],
                 ),
+                target_fps=self._document(
+                    documents,
+                    StageName.INGEST,
+                    MediaDocument,
+                ).timeline.target_fps,
             )
         elif type(document) is CheckpointDocument:
             records = tuple(
@@ -1245,7 +1342,10 @@ class OfflineSliceRunner:
     ) -> PreparedStage:
         if stage is StageName.INGEST:
             return replace(
-                self.media.probe(request.source),
+                self.media.probe(
+                    request.source,
+                    target_fps=request.target_fps,
+                ),
                 job_id=request.job_id,
                 source_path=request.verified_input.archive.key,
                 source_digest=request.verified_input.archive.digest,
@@ -1281,6 +1381,11 @@ class OfflineSliceRunner:
                 self._document(documents, StageName.TRANSLATE, TranslationDocument)
             )
         if stage is StageName.RENDER:
+            media = self._document(
+                documents,
+                StageName.INGEST,
+                MediaDocument,
+            )
             tts = self._document(documents, StageName.TTS, TtsDocument)
             track = self._document(documents, StageName.TRACK, TrackDocument)
             render_request = RenderRequest(
@@ -1324,6 +1429,16 @@ class OfflineSliceRunner:
                 render_fingerprint=render_fingerprint,
                 chunk_seconds=request.chunk_seconds,
                 max_part_seconds=request.max_part_seconds,
+                compatible_plan_fingerprints=(
+                    (request.legacy_s2_render_fingerprint,)
+                    if (
+                        request.max_part_seconds == MAX_PART_SECONDS
+                        and request.legacy_s2_render_fingerprint
+                        is not None
+                    )
+                    else ()
+                ),
+                target_fps=media.timeline.target_fps,
                 workspace=workspace,
                 snapshot_dir=request.snapshot_dir,
                 writer=writer,

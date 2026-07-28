@@ -42,7 +42,10 @@ from ytb_vps_v2.application.offline_slice import (
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.config import EffectiveConfig
-from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
+from ytb_vps_v2.domain.fingerprints import (
+    legacy_s2_render_fingerprint,
+    stage_config_fingerprints,
+)
 from ytb_vps_v2.domain.models import BlurRegion, BoundingBox, Part, RegionKind
 from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.pipeline import (
@@ -56,6 +59,7 @@ from ytb_vps_v2.domain.pipeline import (
     TtsDocument,
     canonical_document_bytes,
     parse_render_plan_document_bytes,
+    parse_render_chunk_plan_document_bytes,
     parse_publication_document_bytes,
     parse_tts_document_bytes,
 )
@@ -615,15 +619,19 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
 
 class _LightweightMedia:
     @staticmethod
-    def probe(source: Path) -> MediaDocument:
+    def probe(
+        source: Path,
+        *,
+        target_fps: int = 30,
+    ) -> MediaDocument:
         return MediaDocument(
             1,
             JobId("offline-job"),
             PurePosixPath("inputs") / source.name,
             digest_file(source),
-            Fraction(30),
-            Fraction(30),
-            Timeline(30),
+            Fraction(900, target_fps),
+            Fraction(target_fps),
+            Timeline(target_fps),
             900,
             320,
             180,
@@ -655,6 +663,8 @@ class _LightweightMedia:
         plan: RenderRequest,
         chunk,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument:
         if digest_file(source) != plan.media_digest:
             raise RuntimeError("lightweight render source mismatch")
@@ -669,6 +679,7 @@ class _LightweightMedia:
         return self.validate_render(
             destination,
             chunk_local_request(plan, chunk),
+            target_fps=target_fps,
         )
 
     def concatenate_render_chunks(
@@ -676,15 +687,26 @@ class _LightweightMedia:
         chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
+        *,
+        target_fps: int = 30,
     ) -> MediaDocument:
         destination.write_bytes(
             b"lightweight-render-v1\0"
             + b"|".join(path.read_bytes() for path in chunks)
         )
-        return self.validate_render(destination, plan)
+        return self.validate_render(
+            destination,
+            plan,
+            target_fps=target_fps,
+        )
 
     @staticmethod
-    def validate_render(path: Path, expected: RenderRequest) -> MediaDocument:
+    def validate_render(
+        path: Path,
+        expected: RenderRequest,
+        *,
+        target_fps: int = 30,
+    ) -> MediaDocument:
         raw = path.read_bytes()
         if not raw.startswith(b"lightweight-render-v1\0"):
             raise RuntimeError("lightweight rendered bytes are invalid")
@@ -693,9 +715,9 @@ class _LightweightMedia:
             expected.job_id,
             PurePosixPath("inputs") / path.name,
             digest_file(path),
-            Fraction(expected.frame_count, 30),
-            Fraction(30),
-            Timeline(30),
+            Fraction(expected.frame_count, target_fps),
+            Fraction(target_fps),
+            Timeline(target_fps),
             expected.frame_count,
             expected.width,
             expected.height,
@@ -974,6 +996,119 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         return workspace, archive_root, remote, state, runner, request
 
+    def test_media_timeline_fps_reaches_chunk_render_and_validation(
+        self,
+    ) -> None:
+        class RecordingMedia(_LightweightMedia):
+            def __init__(self) -> None:
+                self.observed_fps: list[int] = []
+
+            def probe(
+                self,
+                source: Path,
+                *,
+                target_fps: int = 30,
+            ) -> MediaDocument:
+                self.observed_fps.append(target_fps)
+                return super().probe(
+                    source,
+                    target_fps=target_fps,
+                )
+
+            def render_chunk(
+                self,
+                source: Path,
+                tts_wav: Path,
+                plan: RenderRequest,
+                chunk,
+                destination: Path,
+                *,
+                target_fps: int = 30,
+            ) -> MediaDocument:
+                self.observed_fps.append(target_fps)
+                return super().render_chunk(
+                    source,
+                    tts_wav,
+                    plan,
+                    chunk,
+                    destination,
+                    target_fps=target_fps,
+                )
+
+            def concatenate_render_chunks(
+                self,
+                chunks: tuple[Path, ...],
+                plan: RenderRequest,
+                destination: Path,
+                *,
+                target_fps: int = 30,
+            ) -> MediaDocument:
+                self.observed_fps.append(target_fps)
+                return super().concatenate_render_chunks(
+                    chunks,
+                    plan,
+                    destination,
+                    target_fps=target_fps,
+                )
+
+            def validate_render(
+                self,
+                path: Path,
+                expected: RenderRequest,
+                *,
+                target_fps: int = 30,
+            ) -> MediaDocument:
+                self.observed_fps.append(target_fps)
+                return super().validate_render(
+                    path,
+                    expected,
+                    target_fps=target_fps,
+                )
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _, _, _, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        media = RecordingMedia()
+        runner.media = media
+        baseline = EffectiveConfig()
+        configured = replace(
+            baseline,
+            media=replace(
+                baseline.media,
+                target_fps=25,
+                chunk_seconds=10,
+            ),
+            render=replace(
+                baseline.render,
+                max_part_seconds=20,
+            ),
+        )
+
+        result = runner.run(
+            replace(
+                request,
+                config_fingerprints=stage_config_fingerprints(
+                    configured
+                ),
+                target_fps=25,
+                chunk_seconds=10,
+                max_part_seconds=20,
+            )
+        )
+
+        self.assertEqual(
+            result.publication.parts[0].interval.start_frame,
+            0,
+        )
+        self.assertEqual(
+            result.publication.parts[-1].interval.end_frame,
+            900,
+        )
+        self.assertTrue(media.observed_fps)
+        self.assertEqual(set(media.observed_fps), {25})
+
     def test_render_configuration_change_reconciles_before_resume(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1105,11 +1240,52 @@ class OfflineSliceResumeTests(unittest.TestCase):
         workspace, _, _, state, runner, request = self._environment(root)
         self.addCleanup(state.close)
         first = runner.run(request)
+        legacy_render_fingerprint = legacy_s2_render_fingerprint(
+            EffectiveConfig()
+        )
         chunk_attempts = {
             unit.key: unit.attempts
             for unit in state.work_units(request.job_id)
             if re.fullmatch(r"render:[0-9]{6}", unit.key)
         }
+        chunk_plan_path = workspace.joinpath(
+            *RENDER_CHUNK_PLAN_ARTIFACT_PATH.parts
+        )
+        chunk_plan = parse_render_chunk_plan_document_bytes(
+            chunk_plan_path.read_bytes()
+        )
+        legacy_chunk_plan = replace(
+            chunk_plan,
+            render_fingerprint=legacy_render_fingerprint,
+            parts=(
+                Part(
+                    1,
+                    1,
+                    FrameInterval(0, chunk_plan.frame_count),
+                    tuple(
+                        chunk.index for chunk in chunk_plan.chunks
+                    ),
+                ),
+            ),
+        )
+        legacy_chunk_plan_raw = canonical_document_bytes(
+            legacy_chunk_plan
+        )
+        legacy_chunk_plan_digest = FileDigest(
+            len(legacy_chunk_plan_raw),
+            hashlib.sha256(legacy_chunk_plan_raw).hexdigest(),
+        )
+        chunk_plan_path.write_bytes(legacy_chunk_plan_raw)
+        state.connection.execute(
+            "UPDATE artifacts SET size_bytes=?, sha256=? "
+            "WHERE job_id=? AND unit_key='render:plan' "
+            "AND name='render-chunk-plan'",
+            (
+                legacy_chunk_plan_digest.size_bytes,
+                legacy_chunk_plan_digest.sha256,
+                request.job_id.value,
+            ),
+        )
         render_plan_path = workspace.joinpath(
             *PIPELINE_ARTIFACT_PATHS[RenderPlanDocument].parts
         )
@@ -1238,9 +1414,22 @@ class OfflineSliceResumeTests(unittest.TestCase):
                 "legacy",
             ),
         )
+        state.connection.execute(
+            "UPDATE config_fingerprints SET sha256=? "
+            "WHERE job_id=? AND stage=?",
+            (
+                legacy_render_fingerprint.sha256,
+                request.job_id.value,
+                StageName.RENDER.value,
+            ),
+        )
+        migration_request = replace(
+            request,
+            legacy_s2_render_fingerprint=legacy_render_fingerprint,
+        )
 
         with self.assertRaises(FreshWorkspaceRequired):
-            runner.run(request)
+            runner.run(migration_request)
 
         self.assertEqual(
             {
@@ -1268,7 +1457,10 @@ class OfflineSliceResumeTests(unittest.TestCase):
         fresh.mkdir()
 
         migrated = runner.run(
-            replace(request, fresh_workspace_root=fresh)
+            replace(
+                migration_request,
+                fresh_workspace_root=fresh,
+            )
         )
 
         migrated_render_path = fresh.joinpath(
@@ -1505,7 +1697,11 @@ class OfflineSliceResumeTests(unittest.TestCase):
     def test_provider_failure_records_one_bounded_retry_event_and_can_retry(self) -> None:
         class FailingProbe(_LightweightMedia):
             @staticmethod
-            def probe(source: Path) -> MediaDocument:
+            def probe(
+                source: Path,
+                *,
+                target_fps: int = 30,
+            ) -> MediaDocument:
                 raise RuntimeError("x" * 10_000)
 
         temporary = tempfile.TemporaryDirectory()

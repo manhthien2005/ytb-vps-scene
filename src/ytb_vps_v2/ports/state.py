@@ -36,6 +36,8 @@ class StateRepository(Protocol):
         current: tuple[StageConfigFingerprint, ...],
         plan: InvalidationPlan,
         at: str,
+        *,
+        preserve_render_units: tuple[str, ...] = (),
     ) -> tuple[str, ...]: ...
 
     def record_verified_input(

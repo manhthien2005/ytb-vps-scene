@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from array import array
 from dataclasses import replace
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
@@ -408,6 +409,26 @@ class CanonicalizeSourceTests(unittest.TestCase):
         self.assertAlmostEqual(duration(canonical), duration(source), delta=0.2)
         self.assertGreater(duration(canonical), 30.5)
         self.assertEqual(document.frame_count, round(duration(source) * 30))
+
+    def test_source_uses_configured_timeline_and_canvas(self) -> None:
+        source = self.make_long_source()
+        canonical, document = canonicalize_source(
+            self.root / "work-25-fps",
+            source,
+            target_fps=25,
+            max_width=120,
+            max_height=68,
+        )
+
+        self.assertTrue(canonical.is_file())
+        self.assertEqual(document.timeline.target_fps, 25)
+        self.assertEqual(document.source_fps, Fraction(25))
+        self.assertLessEqual(document.width, 120)
+        self.assertLessEqual(document.height, 68)
+        self.assertEqual(
+            document.frame_count,
+            round(duration(source) * 25),
+        )
 
     def test_cover_art_source_is_accepted(self) -> None:
         source = build_fixture("cover_art", self.root)

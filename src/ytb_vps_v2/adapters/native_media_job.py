@@ -45,12 +45,20 @@ from ytb_vps_v2.application.offline_slice import OfflineSliceRequest, OfflineSli
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.fingerprints import (
     RenderFingerprintInputs,
+    legacy_s2_render_fingerprint,
     stage_config_fingerprints,
 )
 from ytb_vps_v2.domain.models import JobId
 
 
-def canonicalize_source(workspace: Path, source: Path) -> tuple[Path, Any]:
+def canonicalize_source(
+    workspace: Path,
+    source: Path,
+    *,
+    target_fps: int = 30,
+    max_width: int = 1920,
+    max_height: int = 1080,
+) -> tuple[Path, Any]:
     """Normalize accepted media without truncating its canonical timeline."""
     ffmpeg, ffprobe = _media_binaries()
     try:
@@ -82,9 +90,9 @@ def canonicalize_source(workspace: Path, source: Path) -> tuple[Path, Any]:
 
     canvas = plan_canvas(
         manifest,
-        max_width=1920,
-        max_height=1080,
-        target_fps=30,
+        max_width=max_width,
+        max_height=max_height,
+        target_fps=target_fps,
     )
     destination = workspace / "normalized" / "source.mp4"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +117,13 @@ def canonicalize_source(workspace: Path, source: Path) -> tuple[Path, Any]:
         raise MediaJobError("source could not be canonicalized") from error
     return (
         destination,
-        FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe).probe(destination),
+        FfmpegMediaAdapter(
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+        ).probe(
+            destination,
+            target_fps=target_fps,
+        ),
     )
 
 
@@ -123,16 +137,22 @@ def run_native_pipeline(
 ) -> tuple[MediaOutput, ...]:
     ffmpeg, ffprobe = _media_binaries()
     media = FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe)
-    canonical_source, media_document = canonicalize_source(workspace, source)
+    baseline = EffectiveConfig() if config is None else config
+    if not isinstance(baseline, EffectiveConfig):
+        raise MediaJobError("native pipeline configuration is invalid")
+    canonical_source, media_document = canonicalize_source(
+        workspace,
+        source,
+        target_fps=baseline.media.target_fps,
+        max_width=baseline.media.max_width,
+        max_height=baseline.media.max_height,
+    )
     projection = scene_render_projection(
         settings,
         media_document.width,
         media_document.height,
         frame_count=media_document.frame_count,
     )
-    baseline = EffectiveConfig() if config is None else config
-    if not isinstance(baseline, EffectiveConfig):
-        raise MediaJobError("native pipeline configuration is invalid")
     effective = replace(
         baseline,
         tts=replace(
@@ -140,12 +160,13 @@ def run_native_pipeline(
             rate=projection.tts_rate,
         ),
     )
+    render_inputs = RenderFingerprintInputs(
+        projection.blur_regions,
+        output_has_audio=True,
+    )
     fingerprints = stage_config_fingerprints(
         effective,
-        render_inputs=RenderFingerprintInputs(
-            projection.blur_regions,
-            output_has_audio=True,
-        ),
+        render_inputs=render_inputs,
     )
     workspace.mkdir(parents=True, exist_ok=True)
     archive_root, remote_root, snapshot_root = workspace / "archive", workspace / "remote", workspace / "snapshots"
@@ -181,8 +202,13 @@ def run_native_pipeline(
             at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             verification_observed_at=1,
             blur_regions=projection.blur_regions,
+            target_fps=effective.media.target_fps,
             chunk_seconds=effective.media.chunk_seconds,
             max_part_seconds=effective.render.max_part_seconds,
+            legacy_s2_render_fingerprint=legacy_s2_render_fingerprint(
+                effective,
+                render_inputs=render_inputs,
+            ),
         ))
     finally:
         state.close()
