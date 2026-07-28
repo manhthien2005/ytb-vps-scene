@@ -93,6 +93,13 @@ class MediaPipeline(Protocol):
         destination: Path,
     ) -> MediaDocument: ...
 
+    def concatenate_render_chunks(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+        destination: Path,
+    ) -> MediaDocument: ...
+
     def validate_render(
         self,
         path: Path,

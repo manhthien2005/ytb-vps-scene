@@ -55,6 +55,17 @@ def _input_timestamp(value: Fraction) -> str:
     return f"{whole}.{digits}"
 
 
+def _concat_line(path: Path) -> str:
+    try:
+        resolved = path.resolve(strict=True).as_posix()
+    except OSError as exc:
+        raise FfmpegMediaError(
+            "Render chunk path could not be resolved"
+        ) from exc
+    escaped = resolved.replace("'", "'\\''")
+    return f"file '{escaped}'\n"
+
+
 @dataclass(frozen=True, slots=True)
 class RenderInputs:
     source: Path
@@ -1623,6 +1634,168 @@ class FfmpegMediaAdapter:
         finally:
             if anonymous is not None:
                 anonymous.cleanup()
+
+    def _concat_sources(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+    ) -> tuple[Path, ...]:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Concat plan must be a RenderRequest")
+        if type(chunks) is not tuple or not chunks:
+            raise FfmpegMediaError(
+                "Concat chunks must be a non-empty tuple"
+            )
+        expected_count = sum(
+            len(part.chunk_indexes)
+            for part in plan.parts
+        )
+        if len(chunks) != expected_count:
+            raise FfmpegMediaError(
+                "Concat chunk count does not match the render plan"
+            )
+        resolved: list[Path] = []
+        for chunk in chunks:
+            if (
+                not isinstance(chunk, Path)
+                or not chunk.is_file()
+                or chunk.is_symlink()
+            ):
+                raise FfmpegMediaError(
+                    "Concat chunk must be a regular non-symlink file"
+                )
+            try:
+                resolved.append(chunk.resolve(strict=True))
+            except OSError as exc:
+                raise FfmpegMediaError(
+                    "Concat chunk could not be resolved"
+                ) from exc
+        if len(set(resolved)) != len(resolved):
+            raise FfmpegMediaError("Concat chunk paths must be unique")
+        return tuple(resolved)
+
+    def _concat_arguments(
+        self,
+        manifest: Path,
+        destination: Path,
+    ) -> list[str]:
+        return [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(manifest),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-metadata",
+            "creation_time=2000-01-01T00:00:00Z",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    def concatenate_render_chunks(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+        destination: Path,
+    ) -> MediaDocument:
+        sources = self._concat_sources(chunks, plan)
+        anonymous = self._preflight_render_destination(destination)
+        named: _OwnedRenderStaging | None = None
+        concat_assets: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            concat_assets = tempfile.TemporaryDirectory(
+                prefix="ytb-vps-concat-",
+            )
+            manifest = Path(concat_assets.name) / "chunks.txt"
+            try:
+                with manifest.open(
+                    "x",
+                    encoding="utf-8",
+                    newline="",
+                ) as handle:
+                    for source in sources:
+                        handle.write(_concat_line(source))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise FfmpegMediaError(
+                    "Concat manifest could not be written"
+                ) from exc
+
+            if anonymous is None:
+                final_output = self._destination(destination)
+                named = _OwnedRenderStaging.create(final_output)
+                output = named.output
+                pass_fds: tuple[int, ...] = ()
+                overwrite_policy = "-n"
+            else:
+                final_output = destination
+                output = anonymous.fd_path
+                pass_fds = (anonymous.render_fd,)
+                overwrite_policy = "-y"
+            arguments = self._concat_arguments(
+                manifest,
+                Path(str(output)),
+            )
+            arguments[arguments.index("-y")] = overwrite_policy
+            if anonymous is not None:
+                arguments[-1:] = ["-f", "mp4", str(output)]
+            self._run(
+                arguments,
+                timeout=self.render_timeout_seconds,
+                stdout_limit=self.diagnostic_limit,
+                pass_fds=pass_fds,
+            )
+            if anonymous is None:
+                if named is None:
+                    raise FfmpegMediaError(
+                        "Windows concat staging is unavailable"
+                    )
+                named.claim_output()
+                pinned = named.pin(final_output)
+                try:
+                    validated = self.validate_render(output, plan)
+                    pinned.verify(validated.source_digest)
+                    pinned.publish()
+                finally:
+                    pinned.close()
+            else:
+                validated = self.validate_render(
+                    output,
+                    plan,
+                    pass_fds=pass_fds,
+                    logical_name=final_output.name,
+                )
+                anonymous.verify(validated.source_digest)
+                anonymous.publish()
+            return replace(
+                validated,
+                source_path=PurePosixPath("inputs") / final_output.name,
+            )
+        finally:
+            if concat_assets is not None:
+                concat_assets.cleanup()
+            if anonymous is not None:
+                anonymous.cleanup()
+            elif named is not None:
+                named.cleanup()
 
     def validate_render(
         self,
