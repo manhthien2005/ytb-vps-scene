@@ -58,6 +58,8 @@ from ytb_vps_v2.domain.pipeline import (
     parse_tts_document_bytes,
 )
 from ytb_vps_v2.domain.render_chunks import (
+    part_file_name,
+    plan_parts_for_chunks,
     plan_render_chunks,
     single_part_for_chunks,
 )
@@ -137,6 +139,8 @@ __all__ = [
     "parse_track_document_bytes",
     "parse_translation_document_bytes",
     "parse_tts_document_bytes",
+    "part_file_name",
+    "plan_parts_for_chunks",
     "plan_render_chunks",
     "single_part_for_chunks",
     "to_fraction",

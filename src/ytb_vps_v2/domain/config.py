@@ -5,6 +5,7 @@ from fractions import Fraction
 
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import PipelineMode
+from ytb_vps_v2.domain.parts import MAX_PART_SECONDS
 
 
 class ConfigError(DomainInvariantError):
@@ -165,6 +166,7 @@ class RenderConfig:
     outline: int = 4
     subtitle_height_ratio: Fraction = Fraction(5, 100)
     subtitle_font_name: str = "Arial"
+    max_part_seconds: int = MAX_PART_SECONDS
 
     def __post_init__(self) -> None:
         _text("Render profile revision", self.profile_revision)
@@ -178,6 +180,11 @@ class RenderConfig:
             minimum_inclusive=False,
         )
         _text("Render subtitle font name", self.subtitle_font_name)
+        _integer(
+            "Render maximum Part seconds",
+            self.max_part_seconds,
+            minimum=1,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,3 +246,7 @@ class EffectiveConfig:
             _nested(name, value, expected)
         if self.ocr.sample_fps > self.media.target_fps:
             raise ConfigError("OCR sample FPS cannot exceed media target FPS")
+        if self.render.max_part_seconds < self.media.chunk_seconds:
+            raise ConfigError(
+                "Render Part target cannot be shorter than a media chunk"
+            )
