@@ -108,7 +108,7 @@ it("accepts only canonical worker security configuration", () => {
   const env = parseServerEnv({
     ...VALID_CP2_ENV,
     WORKER_AUTH_KEY_V1: "A".repeat(43),
-    WORKER_RELEASE_REPOSITORY: "https://github.com/Vanvuong2005827/REUP-RENDER.git",
+    WORKER_RELEASE_REPOSITORY: "https://github.com/manhthien2005/ytb-vps-scene.git",
     WORKER_RELEASE_COMMIT: "a".repeat(40),
     WORKER_PIPELINE_BRIDGE_VERSION: "cp3-control-only",
   });
@@ -170,7 +170,7 @@ Add these exact production values to `ServerEnv` and `.env.example`:
 
 ```text
 WORKER_AUTH_KEY_V1=<43-char-base64url-32-byte-key>
-WORKER_RELEASE_REPOSITORY=https://github.com/Vanvuong2005827/REUP-RENDER.git
+WORKER_RELEASE_REPOSITORY=https://github.com/manhthien2005/ytb-vps-scene.git
 WORKER_RELEASE_COMMIT=<40-lowercase-hex-commit>
 WORKER_PIPELINE_BRIDGE_VERSION=cp3-control-only
 ```
