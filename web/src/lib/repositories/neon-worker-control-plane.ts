@@ -642,15 +642,29 @@ export function createWorkerControlPlaneRepository(
 
     async reserveOutput(input) {
       const result = await sql.query(
-        `with eligible as materialized (
-           select j.project_id
-           from job_leases l join jobs j on j.id=l.job_id
-           where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$9
+        `with guarded_job as materialized (
+           update jobs j
+           set output_part_count=coalesce(j.output_part_count,$12)
+           where j.id=$2
+             and j.state in ('UPLOADING','CANCEL_REQUESTED')
+             and (j.output_part_count is null or j.output_part_count=$12)
+             and exists(
+               select 1 from job_leases l
+               where l.job_id=j.id and l.worker_id=$3
+                 and l.fencing_token=$4 and l.expires_at>$9
+             )
+           returning j.project_id
+         ), eligible as materialized (
+           select g.project_id
+           from guarded_job g
+           join job_leases l on l.job_id=$2
+           where l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$9
              and not exists(
                select 1 from artifacts a
                where a.job_id=$2 and a.kind='OUTPUT' and a.status<>'DELETED'
                  and a.part_count<>$12
              )
+           for update of l
          ), existing as materialized (
            select a.id,a.status from artifacts a
            where a.job_id=$2 and a.kind='OUTPUT'
@@ -680,7 +694,31 @@ export function createWorkerControlPlaneRepository(
            from eligible e
            cross join (select count(*) as retired from superseded) s
            where not exists(select 1 from existing)
-           on conflict do nothing returning id
+             and not exists(
+               select 1 from artifacts a
+               where a.job_id=$2 and a.kind='OUTPUT' and a.status='READY'
+                 and a.part_index=$11 and a.part_count=$12
+             )
+           on conflict (id) do update set
+             status='PENDING',
+             drive_file_id=excluded.drive_file_id,
+             drive_parent_id=excluded.drive_parent_id,
+             display_name=excluded.display_name,
+             mime_type=excluded.mime_type,
+             expected_size_bytes=excluded.expected_size_bytes,
+             actual_size_bytes=null,
+             checksum_sha256=excluded.checksum_sha256,
+             verified_at=null,
+             updated_at=excluded.updated_at
+           where artifacts.status='DELETED'
+             and artifacts.project_id=excluded.project_id
+             and artifacts.job_id=excluded.job_id
+             and artifacts.kind='OUTPUT'
+             and artifacts.part_index=excluded.part_index
+             and artifacts.part_count=excluded.part_count
+             and artifacts.expected_size_bytes=excluded.expected_size_bytes
+             and artifacts.checksum_sha256=excluded.checksum_sha256
+           returning id
          )
          select case status
            when 'PENDING' then 'PENDING_REPLAY'
@@ -727,10 +765,24 @@ export function createWorkerControlPlaneRepository(
       );
       if (replay.rows.length === 1) return "REPLAY";
       const result = await sql.query(
-        `with eligible as materialized (
+        `with guarded_job as materialized (
+           select j.id
+           from jobs j
+           where j.id=$2
+             and j.state in ('UPLOADING','CANCEL_REQUESTED')
+             and j.output_part_count=$9
+             and exists(
+               select 1 from job_leases l
+               where l.job_id=j.id and l.worker_id=$3
+                 and l.fencing_token=$4 and l.expires_at>$7
+             )
+           for update of j
+         ), eligible as materialized (
            select l.job_id,l.worker_id,l.fencing_token
-           from job_leases l
-           where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$7
+           from guarded_job g
+           join job_leases l on l.job_id=g.id
+           where l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$7
+           for update of l
          ), artifact_done as materialized (
            update artifacts a set status='READY',actual_size_bytes=$6,verified_at=$7,updated_at=$7
            from eligible e

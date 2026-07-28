@@ -65,6 +65,21 @@ describe("worker control plane repository", () => {
     ).resolves.toMatchObject({ rows: [{ version: 12 }] });
   });
 
+  it("installs the serialized output-plan guard migration v13", async () => {
+    const columns = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_name='jobs' and column_name='output_part_count'`,
+    );
+    expect(columns.rows).toEqual([
+      { column_name: "output_part_count" },
+    ]);
+    await expect(
+      db.query(
+        "select version from schema_migrations where version=13",
+      ),
+    ).resolves.toMatchObject({ rows: [{ version: 13 }] });
+  });
+
   async function enrollWorker(suffix: string) {
     const tokenDigest = suffix.repeat(64).slice(0, 64);
     const sessionDigest = (suffix === "a" ? "c" : "d").repeat(64);
@@ -455,6 +470,10 @@ describe("worker control plane repository", () => {
     expect(assignment).not.toBeNull();
     await expect(repository.getFencedExecution(worker.id, job!.id, 1, NOW))
       .resolves.toEqual(assignment!.execution);
+    await db.query(
+      "update jobs set state='UPLOADING' where id=$1",
+      [job!.id],
+    );
 
     const reservation = {
       artifactId: "50000000-0000-4000-8000-000000000001",
@@ -564,6 +583,153 @@ describe("worker control plane repository", () => {
     ]);
   });
 
+  it("serializes conflicting multipart totals on the job row", async () => {
+    const worker = await enrollWorker("a");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "b".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(worker.id, NOW, "bridge-v1");
+    await db.query(
+      "update jobs set state='UPLOADING' where id=$1",
+      [job!.id],
+    );
+    const base = {
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveParentId: "drive-project-001",
+      partIndex: 1,
+      sizeBytes: 1234,
+      now: BEFORE_EXPIRY,
+    };
+
+    const outcomes = await Promise.all([
+      repository.reserveOutput({
+        ...base,
+        artifactId: "50000000-0000-4000-8000-000000000001",
+        driveFileId: "drive-output-two-parts",
+        partCount: 2,
+        checksumSha256: "b".repeat(64),
+      }),
+      repository.reserveOutput({
+        ...base,
+        artifactId: "50000000-0000-4000-8000-000000000002",
+        driveFileId: "drive-output-three-parts",
+        partCount: 3,
+        checksumSha256: "c".repeat(64),
+      }),
+    ]);
+
+    expect([...outcomes].sort()).toEqual([
+      "LEASE_LOST",
+      "RESERVED",
+    ]);
+    const stored = await db.query<{
+      output_part_count: number;
+      artifact_part_count: number;
+    }>(
+      `select j.output_part_count,
+              min(a.part_count)::integer as artifact_part_count
+       from jobs j
+       join artifacts a on a.job_id=j.id
+         and a.kind='OUTPUT' and a.status<>'DELETED'
+       where j.id=$1
+       group by j.output_part_count`,
+      [job!.id],
+    );
+    expect(stored.rows).toHaveLength(1);
+    expect(stored.rows[0]?.artifact_part_count)
+      .toBe(stored.rows[0]?.output_part_count);
+  });
+
+  it("rejects stale reserve and completion after lease takeover", async () => {
+    const workerA = await enrollWorker("a");
+    const workerB = await enrollWorker("b");
+    const projectId = await seedSourceReadyProject();
+    const job = await repository.queueProjectJob({
+      jobId: "40000000-0000-4000-8000-000000000001",
+      projectId,
+      requestKeyDigest: "c".repeat(64),
+      now: NOW,
+    });
+    await repository.claimJob(workerA.id, NOW, "bridge-v1");
+    await db.query(
+      "update jobs set state='UPLOADING' where id=$1",
+      [job!.id],
+    );
+    const stale = {
+      artifactId: "50000000-0000-4000-8000-000000000001",
+      jobId: job!.id,
+      workerId: workerA.id,
+      fencingToken: 1,
+      driveFileId: "drive-output-stale",
+      driveParentId: "drive-project-001",
+      partIndex: 1,
+      partCount: 2,
+      sizeBytes: 1234,
+      checksumSha256: "d".repeat(64),
+      now: BEFORE_EXPIRY,
+    };
+    await expect(repository.reserveOutput(stale))
+      .resolves.toBe("RESERVED");
+
+    const takeover = await repository.claimJob(
+      workerB.id,
+      AFTER_EXPIRY,
+      "bridge-v1",
+    );
+    expect(takeover?.lease.fencingToken).toBe(2);
+    await db.query(
+      "update jobs set state='UPLOADING' where id=$1",
+      [job!.id],
+    );
+    await expect(repository.reserveOutput({
+      ...stale,
+      artifactId: "50000000-0000-4000-8000-000000000003",
+      driveFileId: "drive-output-stale-part-two",
+      partIndex: 2,
+      now: AFTER_EXPIRY,
+    })).resolves.toBe("LEASE_LOST");
+    await expect(repository.completeOutput({
+      artifactId: stale.artifactId,
+      jobId: job!.id,
+      workerId: workerA.id,
+      fencingToken: 1,
+      driveFileId: stale.driveFileId,
+      partIndex: 1,
+      partCount: 2,
+      sizeBytes: 1234,
+      now: AFTER_EXPIRY,
+    })).resolves.toBe("LEASE_LOST");
+
+    const replacement = {
+      ...stale,
+      artifactId: "50000000-0000-4000-8000-000000000002",
+      workerId: workerB.id,
+      fencingToken: 2,
+      driveFileId: "drive-output-current",
+      checksumSha256: "e".repeat(64),
+      now: AFTER_EXPIRY,
+    };
+    await expect(repository.reserveOutput(replacement))
+      .resolves.toBe("RESERVED");
+    await expect(repository.completeOutput({
+      artifactId: replacement.artifactId,
+      jobId: job!.id,
+      workerId: workerB.id,
+      fencingToken: 2,
+      driveFileId: replacement.driveFileId,
+      partIndex: 1,
+      partCount: 2,
+      sizeBytes: 1234,
+      now: AFTER_EXPIRY,
+    })).resolves.toBe("PART_COMPLETED");
+  });
+
   it("never claims a job whose READY source is gone, leaving no orphaned lease", async () => {
     const worker = await enrollWorker("a");
     const projectId = await seedSourceReadyProject();
@@ -631,6 +797,10 @@ describe("worker control plane repository", () => {
       now: NOW,
     });
     await repository.claimJob(worker.id, NOW, "bridge-v1");
+    await db.query(
+      "update jobs set state='UPLOADING' where id=$1",
+      [job!.id],
+    );
     const staleReservation = {
       artifactId: "50000000-0000-4000-8000-000000000001",
       jobId: job!.id,
@@ -667,6 +837,18 @@ describe("worker control plane repository", () => {
     expect(artifacts.rows).toEqual([
       { id: "50000000-0000-4000-8000-000000000001", status: "DELETED" },
       { id: "50000000-0000-4000-8000-000000000002", status: "PENDING" },
+      { id: "50000000-0000-4000-8000-000000000003", status: "PENDING" },
+    ]);
+
+    await expect(repository.reserveOutput(staleReservation))
+      .resolves.toBe("RESERVED");
+    const returnedToOriginal = await db.query(
+      "select id,status from artifacts where job_id=$1 and kind='OUTPUT' order by id",
+      [job!.id],
+    );
+    expect(returnedToOriginal.rows).toEqual([
+      { id: "50000000-0000-4000-8000-000000000001", status: "PENDING" },
+      { id: "50000000-0000-4000-8000-000000000002", status: "DELETED" },
       { id: "50000000-0000-4000-8000-000000000003", status: "PENDING" },
     ]);
   });

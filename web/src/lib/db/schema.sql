@@ -788,3 +788,35 @@ create unique index if not exists artifacts_one_live_output_per_job_part_idx
   where kind='OUTPUT' and status <> 'DELETED';
 
 insert into schema_migrations(version) values (12) on conflict (version) do nothing;
+
+-- migration v13: serialize and freeze the multipart OUTPUT plan per job
+alter table jobs add column if not exists output_part_count integer;
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 13) then
+    update jobs j
+    set output_part_count=plans.part_count
+    from (
+      select job_id,min(part_count) as part_count
+      from artifacts
+      where kind='OUTPUT' and status<>'DELETED'
+      group by job_id
+      having count(distinct part_count)=1
+    ) plans
+    where j.id=plans.job_id and j.output_part_count is null;
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'jobs'::regclass
+      and conname = 'jobs_output_part_count_check'
+  ) then
+    alter table jobs add constraint jobs_output_part_count_check
+      check (
+        output_part_count is null
+        or output_part_count between 1 and 999
+      );
+  end if;
+end $$;
+
+insert into schema_migrations(version) values (13) on conflict (version) do nothing;
