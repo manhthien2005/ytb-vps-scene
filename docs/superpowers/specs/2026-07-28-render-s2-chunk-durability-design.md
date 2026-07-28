@@ -202,8 +202,10 @@ Migration 3 adds:
 Existing v2 artifact rows are migrated with `unit_key = lower(owner_stage)`,
 which matches the current stage work-unit keys. Migration is transactional and
 must preserve every checksum, status, attempt count, and checkpoint record.
-When an existing job next runs, `_ensure_units` fills and verifies the
-dependency edges that did not exist in schema v2 before any work starts.
+Migration also inserts the seven existing linear stage edges
+`ingest -> ocr -> track -> translate -> tts -> render -> publish -> backup`.
+When an existing job next runs, `_ensure_units` verifies those edges before any
+work starts.
 
 Artifact recommit ambiguity is evaluated per owner unit, not per stage. This is
 required for independently invalidated chunks to recommit one at a time.
