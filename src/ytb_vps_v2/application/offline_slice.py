@@ -38,6 +38,7 @@ from ytb_vps_v2.domain.pipeline import (
     OCR_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
     PUBLICATION_ARTIFACT_PATH,
+    RENDER_CHUNK_PLAN_ARTIFACT_PATH,
     RENDER_PLAN_ARTIFACT_PATH,
     TTS_ARTIFACT_PATH,
     CheckpointDocument,
@@ -777,6 +778,7 @@ class OfflineSliceRunner:
         writer = self.artifact_writers(request.workspace_root)
         documents: dict[StageName, PipelineDocument] = {}
         damaged: StageName | None = None
+        exact_damaged_unit: str | None = None
         upstream: PipelineDocument | None = None
         primary_by_stage: dict[StageName, Artifact] = {}
         for index, stage in enumerate(STAGE_ORDER):
@@ -816,6 +818,67 @@ class OfflineSliceRunner:
             upstream = document
 
         if damaged is None:
+            for unit in self.state.work_units(request.job_id):
+                match = re.fullmatch(
+                    r"render:(plan|[0-9]{6})",
+                    unit.key,
+                )
+                if (
+                    match is None
+                    or unit.status is not WorkStatus.SUCCEEDED
+                ):
+                    continue
+                auxiliary = self.state.artifacts_for_unit(
+                    request.job_id,
+                    unit.key,
+                )
+                canonical = len(auxiliary) == 1
+                if canonical:
+                    artifact = auxiliary[0]
+                    if match.group(1) == "plan":
+                        canonical = (
+                            artifact.name == "render-chunk-plan"
+                            and artifact.relative_path
+                            == RENDER_CHUNK_PLAN_ARTIFACT_PATH
+                            and artifact.owner is StageName.RENDER
+                            and artifact.dependencies == ("tts-document",)
+                        )
+                    else:
+                        index = int(match.group(1))
+                        canonical = (
+                            artifact.name
+                            == f"render-chunk-{index:06d}"
+                            and artifact.relative_path
+                            == PurePosixPath(
+                                "artifacts/render/chunks/"
+                                f"chunk-{index:06d}.mp4"
+                            )
+                            and artifact.owner is StageName.RENDER
+                            and artifact.dependencies
+                            == ("render-chunk-plan",)
+                        )
+                if canonical:
+                    try:
+                        writer.verify(
+                            auxiliary[0].relative_path,
+                            FileDigest(
+                                auxiliary[0].size_bytes,
+                                auxiliary[0].sha256,
+                            ),
+                        )
+                    except (OSError, RuntimeError):
+                        canonical = False
+                if not canonical:
+                    self.state.invalidate_work_units(
+                        request.job_id,
+                        (unit.key,),
+                        request.at,
+                    )
+                    damaged = StageName.RENDER
+                    exact_damaged_unit = unit.key
+                    break
+
+        if damaged is None:
             for stage, key in zip(STAGE_ORDER, _UNIT_KEYS, strict=True):
                 if self.state.get_work_unit(request.job_id, key).status is WorkStatus.INVALID:
                     damaged = stage
@@ -823,11 +886,12 @@ class OfflineSliceRunner:
         if damaged is None:
             return ResumeState(request.workspace_root, documents, None)
 
-        self.state.invalidate_work_units(
-            request.job_id,
-            (damaged.value.lower(),),
-            request.at,
-        )
+        if exact_damaged_unit is None:
+            self.state.invalidate_work_units(
+                request.job_id,
+                (damaged.value.lower(),),
+                request.at,
+            )
         proof_repair_token = None
         if damaged is StageName.BACKUP:
             primary = primary_by_stage.get(StageName.BACKUP)

@@ -275,6 +275,91 @@ class CheckpointPublisher:
         if result != entry:
             raise CheckpointError("Additive store returned mismatching evidence")
 
+    def _adopt_verified_remote(
+        self,
+        job_id: JobId,
+        checkpoint_id: str,
+        observed_at: int,
+        method: str,
+    ) -> CheckpointManifest | None:
+        prefix = _prefix(job_id, checkpoint_id)
+        manifest_key = prefix / "manifest-v2.json"
+        try:
+            raw = self.object_store.read_bytes(
+                manifest_key,
+                _MAX_MANIFEST_BYTES,
+            )
+        except BackupStoreError:
+            return None
+        try:
+            manifest = parse_manifest_bytes(raw)
+            manifest_entry = ManifestEntry(
+                manifest_key,
+                _bytes_digest(raw),
+            )
+            verified_input = self.state.verified_input(job_id)
+            if (
+                manifest.version != 2
+                or manifest.job_id != job_id
+                or manifest.checkpoint_id != checkpoint_id
+                or manifest.state_snapshot.key
+                != prefix / "state" / "job-v2.sqlite"
+                or verified_input is None
+                or manifest.source != verified_input.source
+                or manifest.input_archive
+                != ManifestEntry(
+                    _input_object(
+                        job_id,
+                        verified_input.archive.digest,
+                    ),
+                    verified_input.archive.digest,
+                )
+            ):
+                raise CheckpointError(
+                    "Remote checkpoint cannot be adopted by this job"
+                )
+            expected_artifacts = tuple(
+                sorted(
+                    (
+                        ManifestEntry(
+                            _artifact_object(job_id, artifact),
+                            FileDigest(
+                                artifact.size_bytes,
+                                artifact.sha256,
+                            ),
+                        )
+                        for artifact
+                        in self.state.valid_artifacts(job_id)
+                    ),
+                    key=lambda item: str(item.key),
+                )
+            )
+            if manifest.artifacts != expected_artifacts:
+                raise CheckpointError(
+                    "Remote checkpoint artifacts differ from local state"
+                )
+            for entry in (
+                manifest_entry,
+                manifest.input_archive,
+                manifest.state_snapshot,
+                *manifest.artifacts,
+            ):
+                self._verify_entry(entry, observed_at, method)
+            self.state.record_checkpoint(
+                job_id,
+                checkpoint_id,
+                manifest_entry,
+                manifest.state_snapshot,
+                manifest.created_at,
+            )
+            return manifest
+        except CheckpointError:
+            raise
+        except (DomainInvariantError, RuntimeError, TypeError, ValueError) as exc:
+            raise CheckpointError(
+                "Remote checkpoint adoption failed"
+            ) from exc
+
     def publish(
         self,
         job_id: JobId,
@@ -300,6 +385,18 @@ class CheckpointPublisher:
             )
             if completed is not None:
                 return completed
+            adopted = self._adopt_verified_remote(
+                job_id,
+                identifier,
+                (
+                    verification_observed_at
+                    if verification_observed_at is not None
+                    else 0
+                ),
+                verification_method,
+            )
+            if adopted is not None:
+                return adopted
 
             verified_input = self.state.verified_input(job_id)
             if verified_input is None:
