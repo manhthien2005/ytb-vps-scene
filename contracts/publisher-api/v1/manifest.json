@@ -1,0 +1,43 @@
+{
+  "apiMajor": 1,
+  "apiMinor": 0,
+  "contractSha256": "5e6202610a222a1a48e172ca05781a836fe02df42cf5bd9f90a6306d19aa136e",
+  "files": [
+    {
+      "path": "fixtures/capabilities.json",
+      "sha256": "916d07c9864f57772d99c776e3ffcb7aba74deeff93c0d0576ebd7d359d7094b"
+    },
+    {
+      "path": "fixtures/claim-response.json",
+      "sha256": "eb0d02d513400c01413fdba35c48d9bed9c175fba23a33b71910493c9f8bc888"
+    },
+    {
+      "path": "fixtures/completion-request.json",
+      "sha256": "71e7ffcbe6955dd263bc64588822c1afef4a0d2f9281c5b3d43b0ea6edd5332c"
+    },
+    {
+      "path": "openapi.json",
+      "sha256": "f053d8142676b5999063d075216a6d8dbbe8b704720eae7e45ee7e1f6b3cb9c3"
+    },
+    {
+      "path": "schemas/channel.json",
+      "sha256": "320b7efc53e74661c6bb514b7efc4f452df0619eb95fb6b215abb9a70b43a7f8"
+    },
+    {
+      "path": "schemas/common.json",
+      "sha256": "e27670b9d171db56668b68d6624de0d78a1ae361aa5349891a3a9aecf2fc9848"
+    },
+    {
+      "path": "schemas/device.json",
+      "sha256": "754e95e7416e1196702c388e0ed3565843a7d2dcee9a6df792a474c3569fcbb1"
+    },
+    {
+      "path": "schemas/output.json",
+      "sha256": "663c990dfdba0ff45858034367a86293f8390ddd9ad046500672c256ef7f65be"
+    },
+    {
+      "path": "schemas/task.json",
+      "sha256": "81d55473dfa828a37e20bc32549380ec3985550d781d4afe5c92b71a79c7b683"
+    }
+  ]
+}

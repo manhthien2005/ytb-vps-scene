@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemas": {
+    "PublicationMetadata": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "scheduledAt": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "visibility": {
+                "const": "SCHEDULED"
+              }
+            },
+            "required": [
+              "visibility"
+            ]
+          },
+          "then": {
+            "properties": {
+              "scheduledAt": {
+                "format": "date-time",
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "ageRestriction": {
+          "enum": [
+            "NONE",
+            "AGE_18_PLUS"
+          ],
+          "type": "string"
+        },
+        "allowEmbedding": {
+          "type": "boolean"
+        },
+        "allowRemixing": {
+          "enum": [
+            "VIDEO_AND_AUDIO",
+            "AUDIO_ONLY",
+            "DISABLED"
+          ],
+          "type": "string"
+        },
+        "audience": {
+          "enum": [
+            "MADE_FOR_KIDS",
+            "NOT_MADE_FOR_KIDS"
+          ],
+          "type": "string"
+        },
+        "automaticChapters": {
+          "type": "boolean"
+        },
+        "automaticConcepts": {
+          "type": "boolean"
+        },
+        "categoryId": {
+          "pattern": "^\\d{1,4}$",
+          "type": "string"
+        },
+        "commentsMode": {
+          "enum": [
+            "ALLOW_ALL",
+            "HOLD_POTENTIALLY_INAPPROPRIATE",
+            "HOLD_ALL",
+            "DISABLED"
+          ],
+          "type": "string"
+        },
+        "containsSyntheticMedia": {
+          "type": "boolean"
+        },
+        "description": {
+          "maxLength": 5000,
+          "type": "string"
+        },
+        "featuredPlaces": {
+          "type": "boolean"
+        },
+        "hashtags": {
+          "items": {
+            "pattern": "^#[\\p{L}\\p{N}_]{1,100}$",
+            "type": "string"
+          },
+          "maxItems": 30,
+          "type": "array"
+        },
+        "language": {
+          "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+          "type": "string"
+        },
+        "license": {
+          "enum": [
+            "YOUTUBE",
+            "CREATIVE_COMMONS"
+          ],
+          "type": "string"
+        },
+        "notifySubscribers": {
+          "type": "boolean"
+        },
+        "paidPromotion": {
+          "type": "boolean"
+        },
+        "playlistIds": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "scheduledAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "showRatings": {
+          "type": "boolean"
+        },
+        "tags": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "PRIVATE",
+            "UNLISTED",
+            "SCHEDULED"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "tags",
+        "hashtags",
+        "categoryId",
+        "language",
+        "audience",
+        "ageRestriction",
+        "playlistIds",
+        "license",
+        "commentsMode",
+        "showRatings",
+        "paidPromotion",
+        "containsSyntheticMedia",
+        "automaticChapters",
+        "featuredPlaces",
+        "automaticConcepts",
+        "allowEmbedding",
+        "notifySubscribers",
+        "allowRemixing",
+        "visibility",
+        "scheduledAt"
+      ],
+      "type": "object",
+      "x-runtime-refinements": [
+        "scheduledAt matches visibility"
+      ]
+    },
+    "PublicationState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "READY",
+        "RESERVED",
+        "DOWNLOADING",
+        "GENERATING",
+        "REVIEW",
+        "BROWSER_PREP",
+        "UPLOADING",
+        "WAITING_CONFIRMATION",
+        "MANUAL_ASSIST",
+        "RECONCILE_REQUIRED",
+        "SCHEDULED",
+        "PUBLISHED",
+        "FAILED_RETRYABLE",
+        "RELEASED"
+      ],
+      "type": "string"
+    },
+    "PublisherPublicError": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+              "type": "string"
+            },
+            "message": {
+              "maxLength": 500,
+              "minLength": 1,
+              "type": "string"
+            },
+            "requestId": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retryable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "requestId"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    }
+  }
+}

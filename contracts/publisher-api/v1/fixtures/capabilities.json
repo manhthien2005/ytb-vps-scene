@@ -1,0 +1,13 @@
+{
+  "apiMajor": 1,
+  "apiMinor": 0,
+  "automationPolicy": "STANDARD_ASSIST",
+  "contractSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "features": {
+    "directDriveDownload": true,
+    "studioAssist": true,
+    "thumbnailApi": true
+  },
+  "latestClientVersion": "0.1.0",
+  "minimumClientVersion": "0.1.0"
+}

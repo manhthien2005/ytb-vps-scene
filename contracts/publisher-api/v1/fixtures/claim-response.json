@@ -1,0 +1,53 @@
+{
+  "fencingToken": 1,
+  "leaseExpiresAt": "2026-07-28T12:01:30.000Z",
+  "leaseId": "123e4567-e89b-42d3-a456-426614174006",
+  "profile": {
+    "channelId": "123e4567-e89b-42d3-a456-426614174000",
+    "createdAt": "2026-07-28T12:00:00.000Z",
+    "defaultTags": [
+      "channel-tag"
+    ],
+    "descriptionPrompt": "Create a description",
+    "profileId": "123e4567-e89b-42d3-a456-426614174003",
+    "scheduleRules": {
+      "blackouts": [],
+      "maximumPerDay": 1,
+      "minimumGapMinutes": 1440,
+      "minimumLeadMinutes": 120,
+      "preferredSlots": [
+        {
+          "time": "19:30",
+          "weekday": 3
+        }
+      ],
+      "timezone": "Asia/Bangkok"
+    },
+    "tagsPrompt": "Create tags",
+    "thumbnailPrompt": "Create a thumbnail",
+    "titlePrompt": "Create a title",
+    "uploadDefaults": {
+      "ageRestriction": "NONE",
+      "allowEmbedding": true,
+      "allowRemixing": "VIDEO_AND_AUDIO",
+      "audience": "NOT_MADE_FOR_KIDS",
+      "automaticChapters": true,
+      "automaticConcepts": true,
+      "categoryId": "22",
+      "commentsMode": "ALLOW_ALL",
+      "containsSyntheticMedia": false,
+      "featuredPlaces": true,
+      "language": "vi",
+      "license": "YOUTUBE",
+      "notifySubscribers": false,
+      "paidPromotion": false,
+      "playlistIds": [],
+      "showRatings": true,
+      "visibility": "PRIVATE"
+    },
+    "version": 1,
+    "youtubeChannelId": "UC1234567890123456789012"
+  },
+  "proposedScheduleAt": null,
+  "taskId": "123e4567-e89b-42d3-a456-426614174001"
+}

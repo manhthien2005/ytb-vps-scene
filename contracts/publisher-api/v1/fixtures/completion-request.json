@@ -1,0 +1,38 @@
+{
+  "effectiveAt": "2026-07-28T12:00:00.000Z",
+  "fencingToken": 1,
+  "finalMetadata": {
+    "ageRestriction": "NONE",
+    "allowEmbedding": true,
+    "allowRemixing": "VIDEO_AND_AUDIO",
+    "audience": "NOT_MADE_FOR_KIDS",
+    "automaticChapters": true,
+    "automaticConcepts": true,
+    "categoryId": "22",
+    "commentsMode": "ALLOW_ALL",
+    "containsSyntheticMedia": false,
+    "description": "A reviewed description",
+    "featuredPlaces": true,
+    "hashtags": [
+      "#example"
+    ],
+    "language": "vi",
+    "license": "YOUTUBE",
+    "notifySubscribers": false,
+    "paidPromotion": false,
+    "playlistIds": [],
+    "scheduledAt": null,
+    "showRatings": true,
+    "tags": [
+      "channel-tag"
+    ],
+    "title": "A reviewed title",
+    "visibility": "PRIVATE"
+  },
+  "observedAt": "2026-07-28T12:00:00.000Z",
+  "outcome": "PUBLISHED",
+  "requestId": "123e4567-e89b-42d3-a456-426614174005",
+  "thumbnailArtifactId": null,
+  "youtubeUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  "youtubeVideoId": "dQw4w9WgXcQ"
+}

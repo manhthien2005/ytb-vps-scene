@@ -1,0 +1,483 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemas": {
+    "ChannelProfileSnapshot": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "channelId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+          "type": "string"
+        },
+        "defaultTags": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "descriptionPrompt": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "type": "string"
+        },
+        "profileId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "scheduleRules": {
+          "additionalProperties": false,
+          "properties": {
+            "blackouts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "endsAt": {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+                    "type": "string"
+                  },
+                  "startsAt": {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "startsAt",
+                  "endsAt"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "maximumPerDay": {
+              "maximum": 24,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "minimumGapMinutes": {
+              "maximum": 44640,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minimumLeadMinutes": {
+              "maximum": 44640,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "preferredSlots": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "time": {
+                    "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+                    "type": "string"
+                  },
+                  "weekday": {
+                    "maximum": 7,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "weekday",
+                  "time"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "timezone": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "timezone",
+            "preferredSlots",
+            "minimumGapMinutes",
+            "maximumPerDay",
+            "minimumLeadMinutes",
+            "blackouts"
+          ],
+          "type": "object"
+        },
+        "tagsPrompt": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "type": "string"
+        },
+        "thumbnailPrompt": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "type": "string"
+        },
+        "titlePrompt": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "type": "string"
+        },
+        "uploadDefaults": {
+          "additionalProperties": false,
+          "properties": {
+            "ageRestriction": {
+              "enum": [
+                "NONE",
+                "AGE_18_PLUS"
+              ],
+              "type": "string"
+            },
+            "allowEmbedding": {
+              "type": "boolean"
+            },
+            "allowRemixing": {
+              "enum": [
+                "VIDEO_AND_AUDIO",
+                "AUDIO_ONLY",
+                "DISABLED"
+              ],
+              "type": "string"
+            },
+            "audience": {
+              "enum": [
+                "MADE_FOR_KIDS",
+                "NOT_MADE_FOR_KIDS"
+              ],
+              "type": "string"
+            },
+            "automaticChapters": {
+              "type": "boolean"
+            },
+            "automaticConcepts": {
+              "type": "boolean"
+            },
+            "categoryId": {
+              "pattern": "^\\d{1,4}$",
+              "type": "string"
+            },
+            "commentsMode": {
+              "enum": [
+                "ALLOW_ALL",
+                "HOLD_POTENTIALLY_INAPPROPRIATE",
+                "HOLD_ALL",
+                "DISABLED"
+              ],
+              "type": "string"
+            },
+            "containsSyntheticMedia": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "featuredPlaces": {
+              "type": "boolean"
+            },
+            "language": {
+              "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+              "type": "string"
+            },
+            "license": {
+              "enum": [
+                "YOUTUBE",
+                "CREATIVE_COMMONS"
+              ],
+              "type": "string"
+            },
+            "notifySubscribers": {
+              "type": "boolean"
+            },
+            "paidPromotion": {
+              "type": "boolean"
+            },
+            "playlistIds": {
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "showRatings": {
+              "type": "boolean"
+            },
+            "visibility": {
+              "enum": [
+                "PRIVATE",
+                "UNLISTED",
+                "SCHEDULED"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "categoryId",
+            "language",
+            "audience",
+            "ageRestriction",
+            "playlistIds",
+            "license",
+            "commentsMode",
+            "showRatings",
+            "paidPromotion",
+            "containsSyntheticMedia",
+            "automaticChapters",
+            "featuredPlaces",
+            "automaticConcepts",
+            "allowEmbedding",
+            "notifySubscribers",
+            "allowRemixing",
+            "visibility"
+          ],
+          "type": "object"
+        },
+        "version": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "youtubeChannelId": {
+          "pattern": "^UC[A-Za-z0-9_-]{22}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profileId",
+        "channelId",
+        "youtubeChannelId",
+        "version",
+        "titlePrompt",
+        "descriptionPrompt",
+        "tagsPrompt",
+        "thumbnailPrompt",
+        "defaultTags",
+        "uploadDefaults",
+        "scheduleRules",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ScheduleRules": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "blackouts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "endsAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+                "type": "string"
+              },
+              "startsAt": {
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "startsAt",
+              "endsAt"
+            ],
+            "type": "object"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "maximumPerDay": {
+          "maximum": 24,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "minimumGapMinutes": {
+          "maximum": 44640,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimumLeadMinutes": {
+          "maximum": 44640,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preferredSlots": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "time": {
+                "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+                "type": "string"
+              },
+              "weekday": {
+                "maximum": 7,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "weekday",
+              "time"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        },
+        "timezone": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "timezone",
+        "preferredSlots",
+        "minimumGapMinutes",
+        "maximumPerDay",
+        "minimumLeadMinutes",
+        "blackouts"
+      ],
+      "type": "object"
+    },
+    "UploadDefaults": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "ageRestriction": {
+          "enum": [
+            "NONE",
+            "AGE_18_PLUS"
+          ],
+          "type": "string"
+        },
+        "allowEmbedding": {
+          "type": "boolean"
+        },
+        "allowRemixing": {
+          "enum": [
+            "VIDEO_AND_AUDIO",
+            "AUDIO_ONLY",
+            "DISABLED"
+          ],
+          "type": "string"
+        },
+        "audience": {
+          "enum": [
+            "MADE_FOR_KIDS",
+            "NOT_MADE_FOR_KIDS"
+          ],
+          "type": "string"
+        },
+        "automaticChapters": {
+          "type": "boolean"
+        },
+        "automaticConcepts": {
+          "type": "boolean"
+        },
+        "categoryId": {
+          "pattern": "^\\d{1,4}$",
+          "type": "string"
+        },
+        "commentsMode": {
+          "enum": [
+            "ALLOW_ALL",
+            "HOLD_POTENTIALLY_INAPPROPRIATE",
+            "HOLD_ALL",
+            "DISABLED"
+          ],
+          "type": "string"
+        },
+        "containsSyntheticMedia": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "featuredPlaces": {
+          "type": "boolean"
+        },
+        "language": {
+          "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+          "type": "string"
+        },
+        "license": {
+          "enum": [
+            "YOUTUBE",
+            "CREATIVE_COMMONS"
+          ],
+          "type": "string"
+        },
+        "notifySubscribers": {
+          "type": "boolean"
+        },
+        "paidPromotion": {
+          "type": "boolean"
+        },
+        "playlistIds": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "showRatings": {
+          "type": "boolean"
+        },
+        "visibility": {
+          "enum": [
+            "PRIVATE",
+            "UNLISTED",
+            "SCHEDULED"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "categoryId",
+        "language",
+        "audience",
+        "ageRestriction",
+        "playlistIds",
+        "license",
+        "commentsMode",
+        "showRatings",
+        "paidPromotion",
+        "containsSyntheticMedia",
+        "automaticChapters",
+        "featuredPlaces",
+        "automaticConcepts",
+        "allowEmbedding",
+        "notifySubscribers",
+        "allowRemixing",
+        "visibility"
+      ],
+      "type": "object"
+    }
+  }
+}
