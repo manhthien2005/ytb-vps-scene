@@ -1,6 +1,7 @@
 # src/ytb_vps_v2/adapters/ffmpeg/subtitles_ass.py
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from fractions import Fraction
@@ -8,11 +9,28 @@ from fractions import Fraction
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import Cue
 
+_ASS_COLOUR = re.compile(r"^&H[0-9A-Fa-f]{6,8}$")
+_STYLE_FORBIDDEN = frozenset(",{}\r\n")
+
+
+def _require_style_text(name: str, value: object) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise DomainInvariantError(f"Subtitle {name} must be non-empty text")
+    if any(character in _STYLE_FORBIDDEN for character in value):
+        raise DomainInvariantError(
+            f"Subtitle {name} must not contain a comma, brace or newline"
+        )
+
+
+def _ass_ratio(value: Fraction) -> str:
+    return f"{float(value):.1f}"
+
+
 _HEADER = """[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
 PlayResY: {height}
-WrapStyle: 2
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.709
 
@@ -57,10 +75,29 @@ class SubtitleStyle:
     max_lines: int = 2
 
     def __post_init__(self) -> None:
-        if not isinstance(self.font_name, str) or not self.font_name.strip():
-            raise DomainInvariantError("Subtitle font name must be non-empty")
-        if not isinstance(self.height_ratio, Fraction) or not 0 < self.height_ratio <= 1:
+        _require_style_text("font name", self.font_name)
+        for name, value in (
+            ("primary colour", self.primary_colour),
+            ("outline colour", self.outline_colour),
+        ):
+            _require_style_text(name, value)
+            if _ASS_COLOUR.fullmatch(value) is None:
+                raise DomainInvariantError(
+                    f"Subtitle {name} must look like &HAABBGGRR or &HBBGGRR"
+                )
+        for name, value in (
+            ("height ratio", self.height_ratio),
+            ("outline ratio", self.outline_ratio),
+            ("shadow ratio", self.shadow_ratio),
+        ):
+            if not isinstance(value, Fraction) or not 0 <= value <= 1:
+                raise DomainInvariantError(
+                    f"Subtitle {name} must be a Fraction within [0, 1]"
+                )
+        if self.height_ratio <= 0:
             raise DomainInvariantError("Subtitle height ratio must be within (0, 1]")
+        if not isinstance(self.bold, bool):
+            raise DomainInvariantError("Subtitle bold must be a bool")
         if not isinstance(self.max_lines, int) or self.max_lines < 1:
             raise DomainInvariantError("Subtitle max lines must be at least 1")
 
@@ -92,6 +129,7 @@ def escape_ass_text(value: str) -> str:
         .replace("{", "(")
         .replace("}", ")")
         .replace("\r\n", "\n")
+        .replace("\r", "\n")
         .replace("\n", r"\N")
     )
 
@@ -121,8 +159,8 @@ def build_ass_document(
         primary=style.primary_colour,
         outline_colour=style.outline_colour,
         bold=-1 if style.bold else 0,
-        outline=max(1, int(size * style.outline_ratio)),
-        shadow=max(0, int(size * style.shadow_ratio)),
+        outline=_ass_ratio(max(Fraction(1, 10), size * style.outline_ratio)),
+        shadow=_ass_ratio(max(Fraction(0), size * style.shadow_ratio)),
         margin_l=int(canvas_width * rectangle.x),
         margin_r=int(canvas_width * (1 - rectangle.x - rectangle.width)),
         # ASS MarginV measures from the bottom edge for bottom-anchored alignments.

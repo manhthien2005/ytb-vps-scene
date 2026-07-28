@@ -7,6 +7,7 @@ from fractions import Fraction
 from ytb_vps_v2.adapters.ffmpeg.subtitles_ass import (
     SubtitleRectangle, SubtitleStyle, ass_timestamp, build_ass_document, escape_ass_text,
 )
+from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import BoundingBox, Cue
 from ytb_vps_v2.domain.timeline import FrameInterval
 
@@ -46,11 +47,32 @@ class EscapeTests(unittest.TestCase):
     def test_newlines_become_hard_breaks(self) -> None:
         self.assertEqual(escape_ass_text("a\nb"), r"a\Nb")
 
+    def test_bare_carriage_returns_become_hard_breaks(self) -> None:
+        self.assertEqual(escape_ass_text("a\rb"), r"a\Nb")
+
     def test_backslash_is_neutralised(self) -> None:
         self.assertNotIn("\\p", escape_ass_text(r"a\pos b"))
 
     def test_vietnamese_diacritics_survive(self) -> None:
         self.assertEqual(escape_ass_text("Đây là phụ đề"), "Đây là phụ đề")
+
+
+class StyleValidationTests(unittest.TestCase):
+    def test_ass_record_delimiters_are_rejected_in_style_fields(self) -> None:
+        for field in ("font_name", "primary_colour", "outline_colour"):
+            for character in ",\r\n{}":
+                value = f"Arial{character}Injected" if field == "font_name" else (
+                    f"&H00FF{character}FFFF"
+                )
+                with self.subTest(field=field, character=repr(character)):
+                    with self.assertRaises(DomainInvariantError):
+                        SubtitleStyle(**{field: value})
+
+    def test_colours_must_use_ass_hex_notation(self) -> None:
+        for field in ("primary_colour", "outline_colour"):
+            with self.subTest(field=field):
+                with self.assertRaises(DomainInvariantError):
+                    SubtitleStyle(**{field: "white"})
 
 
 class DocumentTests(unittest.TestCase):
@@ -82,11 +104,17 @@ class DocumentTests(unittest.TestCase):
                         Cue(2, FrameInterval(150, 240), BoundingBox(0, 600, 1280, 700), "源"))
         self.assertEqual(text.count("\nDialogue:"), 1)
 
-    def test_wrap_style_prevents_libass_reflowing_our_breaks(self) -> None:
-        self.assertIn("WrapStyle: 2", document(cue(1, 30, 120, "xin chào")))
+    def test_wrap_style_allows_libass_to_wrap_at_the_rectangle_margins(self) -> None:
+        self.assertIn("WrapStyle: 0", document(cue(1, 30, 120, "xin chào")))
 
     def test_scaled_border_keeps_outline_proportional(self) -> None:
         self.assertIn("ScaledBorderAndShadow: yes", document(cue(1, 30, 120, "xin chào")))
+
+    def test_fractional_outline_and_shadow_are_not_truncated_away(self) -> None:
+        text = document(cue(1, 30, 120, "xin chào"))
+        style_line = next(line for line in text.splitlines() if line.startswith("Style:"))
+        fields = style_line.split(",")
+        self.assertEqual(fields[16:18], ["2.2", "0.7"])
 
     def test_empty_cue_list_still_produces_a_loadable_document(self) -> None:
         text = document()
