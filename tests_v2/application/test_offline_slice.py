@@ -45,6 +45,7 @@ from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.pipeline import (
     CHECKPOINT_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
+    RENDER_CHUNK_PLAN_ARTIFACT_PATH,
     MediaDocument,
     PublicationDocument,
     RenderPlanDocument,
@@ -241,7 +242,11 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             all(unit.status is WorkStatus.SUCCEEDED for unit in result.work_units)
         )
         self.assertEqual(len(result.artifacts), 11)
-        expected_paths = tuple(PIPELINE_ARTIFACT_PATHS.values())
+        expected_paths = tuple(
+            path
+            for path in PIPELINE_ARTIFACT_PATHS.values()
+            if path != RENDER_CHUNK_PLAN_ARTIFACT_PATH
+        )
         primary_paths = set(expected_paths)
         primary_artifacts = tuple(
             artifact
@@ -1033,8 +1038,8 @@ class OfflineSliceResumeTests(unittest.TestCase):
                     state.connection.execute(
                         "INSERT INTO artifacts("
                         "job_id,name,relative_path,size_bytes,sha256,owner_stage,"
-                        "dependencies_json,is_valid,committed_at"
-                        ") VALUES (?,?,?,?,?,?,?,1,?)",
+                        "unit_key,dependencies_json,is_valid,committed_at"
+                        ") VALUES (?,?,?,?,?,?,?,?,1,?)",
                         (
                             request.job_id.value,
                             "ambiguous-ocr-document",
@@ -1042,6 +1047,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
                             1,
                             "a" * 64,
                             StageName.OCR.value,
+                            StageName.OCR.value.lower(),
                             json.dumps(("ingest-document",), separators=(",", ":")),
                             "tampered",
                         ),

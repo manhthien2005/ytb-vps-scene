@@ -12,6 +12,7 @@ from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_
 from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
+from ytb_vps_v2.adapters.sqlite.schema import SCHEMA_VERSION
 from ytb_vps_v2.application import restore as restore_module
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
@@ -119,7 +120,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         self.assertEqual(result.job_id, self.job_id)
         self.assertEqual(result.checkpoint_id, self.manifest.checkpoint_id)
         self.assertEqual(result.artifact_count, 1)
-        self.assertEqual(result.schema_version, 2)
+        self.assertEqual(result.schema_version, SCHEMA_VERSION)
         self.assertIsNone(result.migrated_from)
         self.assertEqual(
             (target / "archive").joinpath(*self.archive.archive.key.parts).read_bytes(),

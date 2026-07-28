@@ -52,6 +52,71 @@ class SqliteWorkUnitTests(unittest.TestCase):
 
         self.assertEqual(unit, WorkUnit("ocr:000001", StageName.OCR))
 
+    def test_dependencies_survive_reopen_and_gate_start(self) -> None:
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("tts", StageName.TTS),
+            "t1",
+        )
+        dependent = WorkUnit(
+            "render:plan",
+            StageName.RENDER,
+            dependencies=("tts",),
+        )
+        self.store.put_work_unit(self.job_id, dependent, "t1")
+
+        with self.assertRaises(StateTransitionError):
+            self.store.start_work_unit(self.job_id, "render:plan", "blocked")
+
+        self.store.close()
+        self.store = SqliteStateStore(self.path)
+        self.assertEqual(
+            self.store.get_work_unit(self.job_id, "render:plan"),
+            dependent,
+        )
+        self.assertEqual(
+            self.store.work_units(self.job_id),
+            (
+                WorkUnit("render:plan", StageName.RENDER, dependencies=("tts",)),
+                WorkUnit("tts", StageName.TTS),
+            ),
+        )
+
+    def test_dependency_must_exist_and_idempotent_put_requires_exact_graph(
+        self,
+    ) -> None:
+        with self.assertRaises(StateStoreError):
+            self.store.put_work_unit(
+                self.job_id,
+                WorkUnit(
+                    "render:plan",
+                    StageName.RENDER,
+                    dependencies=("tts",),
+                ),
+                "missing",
+            )
+
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("tts", StageName.TTS),
+            "t1",
+        )
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit(
+                "render:plan",
+                StageName.RENDER,
+                dependencies=("tts",),
+            ),
+            "t2",
+        )
+        with self.assertRaises(StateStoreError):
+            self.store.put_work_unit(
+                self.job_id,
+                WorkUnit("render:plan", StageName.RENDER),
+                "changed",
+            )
+
     def test_job_creation_is_idempotent_only_for_matching_identity(self) -> None:
         self.store.create_job(self.job_id, self.source, self.config, "t1")
 

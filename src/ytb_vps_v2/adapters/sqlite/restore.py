@@ -20,7 +20,7 @@ from ytb_vps_v2.adapters.sqlite.schema import (
 )
 from ytb_vps_v2.domain.backup import CheckpointManifest, FileDigest, ManifestEntry
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.models import Artifact, JobId, StageName
+from ytb_vps_v2.domain.models import Artifact, JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.restore import RestoreArtifact, RestoreLayout
 from ytb_vps_v2.ports.backup import BackupStoreError
 
@@ -86,7 +86,9 @@ def _require_current_schema(connection: sqlite3.Connection) -> None:
     finally:
         reference.close()
     if _schema_signature(connection) != expected:
-        raise StagedRestoreError("Staged SQLite schema does not match schema v2")
+        raise StagedRestoreError(
+            "Staged SQLite schema does not match the current schema"
+        )
 
 
 def _artifact(row: sqlite3.Row) -> Artifact:
@@ -164,13 +166,32 @@ def inspect_staged_state(
         ):
             raise StagedRestoreError("Checkpoint object layout is invalid")
 
+        unit_rows = connection.execute(
+            "SELECT unit_key, stage, status FROM work_units WHERE job_id=?",
+            (manifest.job_id.value,),
+        ).fetchall()
+        units = {
+            row["unit_key"]: (row["stage"], row["status"])
+            for row in unit_rows
+        }
         rows = connection.execute(
             "SELECT name, relative_path, size_bytes, sha256, owner_stage, "
-            "dependencies_json FROM artifacts "
+            "unit_key, dependencies_json FROM artifacts "
             "WHERE job_id=? AND is_valid=1 ORDER BY relative_path",
             (manifest.job_id.value,),
         ).fetchall()
-        stored_artifacts = tuple(_artifact(row) for row in rows)
+        stored_artifacts: list[Artifact] = []
+        for row in rows:
+            unit = units.get(row["unit_key"])
+            if (
+                unit is None
+                or unit[0] != row["owner_stage"]
+                or unit[1] != WorkStatus.SUCCEEDED.value
+            ):
+                raise StagedRestoreError(
+                    "Valid artifact owner unit is inconsistent"
+                )
+            stored_artifacts.append(_artifact(row))
         remote_by_key = {str(item.key): item for item in manifest.artifacts}
         if len(remote_by_key) != len(manifest.artifacts):
             raise StagedRestoreError("Manifest artifact objects are ambiguous")
