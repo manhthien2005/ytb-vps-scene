@@ -193,3 +193,14 @@ class Part:
             raise DomainInvariantError("Part must contain at least one render chunk")
         if tuple(sorted(set(self.chunk_indexes))) != self.chunk_indexes:
             raise DomainInvariantError("Render chunk indexes must be ordered and unique")
+
+
+@dataclass(frozen=True, slots=True)
+class RenderChunk:
+    index: int
+    interval: FrameInterval
+
+    def __post_init__(self) -> None:
+        _require_int("Render chunk index", self.index, minimum=0)
+        if type(self.interval) is not FrameInterval:
+            raise DomainInvariantError("Render chunk interval must be FrameInterval")
