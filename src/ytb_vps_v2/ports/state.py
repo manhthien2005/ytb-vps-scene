@@ -67,6 +67,15 @@ class StateRepository(Protocol):
 
     def work_units(self, job_id: JobId) -> tuple[WorkUnit, ...]: ...
 
+    def replace_work_unit_dependencies(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        expected: tuple[str, ...],
+        current: tuple[str, ...],
+        at: str,
+    ) -> None: ...
+
     def start_work_unit(self, job_id: JobId, unit_key: str, at: str) -> WorkUnit: ...
 
     def fail_work_unit(

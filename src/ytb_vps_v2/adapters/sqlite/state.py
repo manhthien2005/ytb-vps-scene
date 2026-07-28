@@ -621,6 +621,131 @@ class SqliteStateStore:
         except (sqlite3.DatabaseError, DomainInvariantError, ValueError) as exc:
             raise StateStoreError("Unable to read work units") from exc
 
+    def replace_work_unit_dependencies(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        expected: tuple[str, ...],
+        current: tuple[str, ...],
+        at: str,
+    ) -> None:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        timestamp = _text("Work unit timestamp", at, 128)
+        for name, values in (
+            ("Expected dependencies", expected),
+            ("Current dependencies", current),
+        ):
+            if (
+                type(values) is not tuple
+                or any(
+                    type(value) is not str
+                    or not value
+                    or value != value.strip()
+                    or len(value) > 512
+                    for value in values
+                )
+                or tuple(sorted(set(values))) != values
+            ):
+                raise StateStoreError(
+                    f"{name} must be ordered unique work-unit keys"
+                )
+        if key in current:
+            raise StateStoreError("Work unit cannot depend on itself")
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT stage, status, attempts FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if row is None:
+                raise StateStoreError(f"Work unit does not exist: {key}")
+            if row["status"] not in {
+                WorkStatus.PENDING.value,
+                WorkStatus.FAILED.value,
+                WorkStatus.INVALID.value,
+            }:
+                raise StateStoreError(
+                    "Work-unit dependencies cannot change in its current state"
+                )
+            stored = self._dependencies_for_unit(
+                connection,
+                job.value,
+                key,
+            )
+            if stored != expected:
+                raise StateStoreError(
+                    "Work-unit dependency compare-and-swap failed"
+                )
+            if current:
+                placeholders = ",".join("?" for _ in current)
+                dependencies = connection.execute(
+                    f"SELECT unit_key FROM work_units WHERE job_id=? "
+                    f"AND unit_key IN ({placeholders}) ORDER BY unit_key",
+                    (job.value, *current),
+                ).fetchall()
+                if (
+                    tuple(item["unit_key"] for item in dependencies)
+                    != current
+                ):
+                    raise StateStoreError(
+                        "Work unit dependency does not exist for this job"
+                    )
+
+            unit_rows = connection.execute(
+                "SELECT unit_key FROM work_units WHERE job_id=? "
+                "ORDER BY unit_key",
+                (job.value,),
+            ).fetchall()
+            graph = {
+                item["unit_key"]: self._dependencies_for_unit(
+                    connection,
+                    job.value,
+                    item["unit_key"],
+                )
+                for item in unit_rows
+            }
+            graph[key] = current
+            visiting: set[str] = set()
+            visited: set[str] = set()
+
+            def visit(node: str) -> None:
+                if node in visiting:
+                    raise StateStoreError(
+                        "Work-unit dependency graph contains a cycle"
+                    )
+                if node in visited:
+                    return
+                visiting.add(node)
+                for dependency in graph[node]:
+                    visit(dependency)
+                visiting.remove(node)
+                visited.add(node)
+
+            for node in graph:
+                visit(node)
+
+            connection.execute(
+                "DELETE FROM work_unit_dependencies "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            )
+            connection.executemany(
+                "INSERT INTO work_unit_dependencies("
+                "job_id, unit_key, depends_on_key"
+                ") VALUES (?, ?, ?)",
+                (
+                    (job.value, key, dependency)
+                    for dependency in current
+                ),
+            )
+            connection.execute(
+                "UPDATE work_units SET updated_at=? "
+                "WHERE job_id=? AND unit_key=?",
+                (timestamp, job.value, key),
+            )
+
     def start_work_unit(self, job_id: JobId, unit_key: str, at: str) -> WorkUnit:
         job = _job_id(job_id)
         key = _text("Work unit key", unit_key)

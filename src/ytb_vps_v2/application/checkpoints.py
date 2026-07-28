@@ -248,6 +248,28 @@ class CheckpointPublisher:
                 return manifest
         return None
 
+    def verify_manifest(
+        self,
+        manifest: CheckpointManifest,
+        observed_at: int,
+        method: str = _VERIFY_METHOD,
+    ) -> CheckpointManifest:
+        if type(manifest) is not CheckpointManifest:
+            raise CheckpointError(
+                "Verified checkpoint must be CheckpointManifest"
+            )
+        completed = self._completed(
+            manifest.job_id,
+            manifest.checkpoint_id,
+            observed_at=observed_at,
+            method=method,
+        )
+        if completed != manifest:
+            raise CheckpointError(
+                "Checkpoint does not match its verified completion"
+            )
+        return completed
+
     def _put_exact(self, source: Path, entry: ManifestEntry) -> None:
         result = self.object_store.put(source, entry.key, entry.digest)
         if result != entry:

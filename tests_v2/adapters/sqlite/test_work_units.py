@@ -16,7 +16,13 @@ from ytb_vps_v2.domain.backup import (
 )
 from ytb_vps_v2.domain.config import EffectiveConfig, OcrConfig
 from ytb_vps_v2.domain.fingerprints import Fingerprint, stage_config_fingerprints
-from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus, WorkUnit
+from ytb_vps_v2.domain.models import (
+    Artifact,
+    JobId,
+    StageName,
+    WorkStatus,
+    WorkUnit,
+)
 from ytb_vps_v2.domain.state import StateTransitionError
 
 
@@ -117,6 +123,98 @@ class SqliteWorkUnitTests(unittest.TestCase):
                 self.job_id,
                 WorkUnit("render:plan", StageName.RENDER),
                 "changed",
+            )
+
+    def test_pending_dependencies_replace_with_exact_compare_and_swap(
+        self,
+    ) -> None:
+        for unit in (
+            WorkUnit("tts", StageName.TTS),
+            WorkUnit(
+                "render:plan",
+                StageName.RENDER,
+                dependencies=("tts",),
+            ),
+            WorkUnit(
+                "render:000000",
+                StageName.RENDER,
+                dependencies=("render:plan",),
+            ),
+            WorkUnit("render", StageName.RENDER),
+        ):
+            self.store.put_work_unit(self.job_id, unit, "planned")
+
+        self.store.replace_work_unit_dependencies(
+            self.job_id,
+            "render",
+            (),
+            ("render:000000",),
+            "rewired",
+        )
+
+        self.assertEqual(
+            self.store.get_work_unit(self.job_id, "render").dependencies,
+            ("render:000000",),
+        )
+        with self.assertRaises(StateStoreError):
+            self.store.replace_work_unit_dependencies(
+                self.job_id,
+                "render",
+                (),
+                ("tts",),
+                "stale",
+            )
+        self.assertEqual(
+            self.store.get_work_unit(self.job_id, "render").dependencies,
+            ("render:000000",),
+        )
+
+    def test_dependency_replacement_rejects_running_or_cyclic_graph(
+        self,
+    ) -> None:
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("tts", StageName.TTS),
+            "planned",
+        )
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit(
+                "render:plan",
+                StageName.RENDER,
+                dependencies=("tts",),
+            ),
+            "planned",
+        )
+        self.store.start_work_unit(self.job_id, "tts", "started")
+        with self.assertRaises(StateStoreError):
+            self.store.replace_work_unit_dependencies(
+                self.job_id,
+                "tts",
+                (),
+                ("render:plan",),
+                "running",
+            )
+        self.store.commit_artifact(
+            self.job_id,
+            "tts",
+            # The content identity is irrelevant to graph replacement.
+            Artifact(
+                "tts",
+                PurePosixPath("artifacts/tts/tts.json"),
+                1,
+                "b" * 64,
+                StageName.TTS,
+            ),
+            "committed",
+        )
+        with self.assertRaises(StateStoreError):
+            self.store.replace_work_unit_dependencies(
+                self.job_id,
+                "render:plan",
+                ("tts",),
+                ("render:plan",),
+                "self-cycle",
             )
 
     def test_job_creation_is_idempotent_only_for_matching_identity(self) -> None:
