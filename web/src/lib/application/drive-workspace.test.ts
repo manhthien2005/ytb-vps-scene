@@ -26,6 +26,8 @@ function record(input: Omit<Partial<ManagedArtifactRecord>, "artifact"> & {
     projectName: input.projectName ?? "Phim A",
     jobId: input.jobId ?? null,
     verifiedAt: input.verifiedAt === undefined ? VERIFIED_AT : input.verifiedAt,
+    partIndex: input.partIndex ?? null,
+    partCount: input.partCount ?? null,
     artifact: {
       id: input.artifact?.id ?? SOURCE_ID,
       projectId: input.artifact?.projectId ?? PROJECT_ID,
@@ -62,6 +64,12 @@ function metadata(item: ManagedArtifactRecord): DriveVideoMetadata {
       ytbVpsArtifactId: item.artifact.id,
       ytbVpsProjectId: item.artifact.projectId,
       ytbVpsRole: item.artifact.kind.toLowerCase(),
+      ...(item.partIndex === undefined || item.partIndex === null
+        ? {}
+        : {
+          ytbVpsPartIndex: String(item.partIndex),
+          ytbVpsPartCount: String(item.partCount),
+        }),
     },
   };
 }
@@ -440,5 +448,71 @@ describe("DriveWorkspaceService", () => {
     expect(files.inspectVideoMetadata).not.toHaveBeenCalled();
     expect(files.deleteFile).not.toHaveBeenCalled();
     expect(repository.markManagedArtifactDeleted).not.toHaveBeenCalled();
+  });
+
+  it("keeps multipart output files in Part order", async () => {
+    records = [
+      record({
+        jobId: "30000000-0000-4000-8000-000000000001",
+        partIndex: 2,
+        partCount: 2,
+        artifact: {
+          id: OTHER_ID,
+          kind: "OUTPUT",
+          driveFileId: "drive-output-file-002",
+          driveParentId: "drive-project-folder-001",
+          displayName: "part-02-of-02.mp4",
+        },
+      }),
+      record({
+        jobId: "30000000-0000-4000-8000-000000000001",
+        partIndex: 1,
+        partCount: 2,
+        artifact: {
+          id: OUTPUT_ID,
+          kind: "OUTPUT",
+          driveFileId: "drive-output-file-001",
+          driveParentId: "drive-project-folder-001",
+          displayName: "part-01-of-02.mp4",
+        },
+      }),
+    ];
+
+    const view = await service().list();
+
+    expect(view.output[0]?.files.map((file) => file.name)).toEqual([
+      "part-01-of-02.mp4",
+      "part-02-of-02.mp4",
+    ]);
+  });
+
+  it("omits an OUTPUT whose remote Part properties do not match", async () => {
+    records = [record({
+      jobId: "30000000-0000-4000-8000-000000000001",
+      partIndex: 2,
+      partCount: 4,
+      artifact: {
+        id: OUTPUT_ID,
+        kind: "OUTPUT",
+        driveFileId: "drive-output-file-002",
+        driveParentId: "drive-project-folder-001",
+        displayName: "part-02-of-04.mp4",
+      },
+    })];
+    files.inspectVideoMetadata = vi.fn(async () => {
+      const remote = metadata(records[0]!);
+      return {
+        ...remote,
+        appProperties: {
+          ...remote.appProperties,
+          ytbVpsPartIndex: "1",
+        },
+      };
+    });
+
+    expect((await service().list()).output).toEqual([]);
+    expect(diagnostics).toHaveBeenCalledWith({
+      code: "DRIVE_WORKSPACE_REMOTE_MISMATCH",
+    });
   });
 });

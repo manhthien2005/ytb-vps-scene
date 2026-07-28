@@ -22,6 +22,7 @@ from ytb_vps_v2.domain.fingerprints import (
     stage_config_fingerprints,
 )
 from ytb_vps_v2.domain.models import StageName
+from ytb_vps_v2.domain.render_chunks import part_file_name
 from ytb_vps_v2.domain.timeline import FrameInterval
 
 
@@ -630,10 +631,17 @@ class MediaJobTests(unittest.TestCase):
                 (
                     payload["partIndex"],
                     payload["partCount"],
+                    part_file_name(
+                        payload["partIndex"],
+                        payload["partCount"],
+                    ),
                 )
                 for payload in sessions
             ),
-            ((1, 2), (2, 2)),
+            (
+                (1, 2, "part-01-of-02.mp4"),
+                (2, 2, "part-02-of-02.mp4"),
+            ),
         )
         completions = tuple(
             payload

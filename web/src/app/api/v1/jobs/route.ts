@@ -18,6 +18,7 @@ function publicJob(job: JobSummary): JobSummary {
     updatedAt: job.updatedAt,
     settingsSnapshot: job.settingsSnapshot ?? null,
     sourceMetadata: job.sourceMetadata ?? null,
+    outputParts: job.outputParts ?? [],
     activePhase: job.activePhase ?? null,
     phaseProgressPercent: job.phaseProgressPercent ?? null,
     latestMessage: job.latestMessage ?? null,

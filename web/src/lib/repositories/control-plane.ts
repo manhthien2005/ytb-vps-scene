@@ -1,5 +1,6 @@
 import type {
   JobDetail,
+  JobOutputPartMetadata,
   JobSourceMetadata,
   JobSummary,
   WorkerState,
@@ -16,6 +17,7 @@ export type JobCancellationOutcome =
 export type JobDetailReadModel = Readonly<JobDetail & {
   createdAt: string;
   outputMetadata: JobSourceMetadata | null;
+  outputParts: readonly JobOutputPartMetadata[];
   workerSummary: Readonly<{
     id: string;
     state: WorkerState;

@@ -31,6 +31,8 @@ type StoredSourceCapacity = Readonly<{
 type ManagedArtifactMetadata = Readonly<{
   jobId: string | null;
   verifiedAt: string | null;
+  partIndex?: number | null;
+  partCount?: number | null;
   createdAt: string;
 }>;
 
@@ -66,7 +68,12 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
 
   private storeManagedArtifactMetadata(
     artifactId: string,
-    metadata: Readonly<{ jobId: string | null; verifiedAt: string | null }>,
+    metadata: Readonly<{
+      jobId: string | null;
+      verifiedAt: string | null;
+      partIndex?: number | null;
+      partCount?: number | null;
+    }>,
   ): void {
     const existing = this.managedArtifactMetadata.get(artifactId);
     this.managedArtifactMetadata.set(artifactId, {
@@ -260,6 +267,8 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
           projectName: project.name,
           jobId: metadata.jobId,
           verifiedAt: metadata.verifiedAt,
+          partIndex: metadata.partIndex,
+          partCount: metadata.partCount,
         };
       })
       .sort((left, right) => {
@@ -269,6 +278,14 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
         const rightMetadata = this.managedArtifactMetadata.get(right.artifact.id)!;
         return leftProject.createdAt.localeCompare(rightProject.createdAt) ||
           left.projectName.localeCompare(right.projectName) ||
+          (
+            left.artifact.kind === "OUTPUT" &&
+            right.artifact.kind === "OUTPUT" &&
+            left.jobId === right.jobId
+              ? (left.partIndex ?? Number.MAX_SAFE_INTEGER) -
+                (right.partIndex ?? Number.MAX_SAFE_INTEGER)
+              : 0
+          ) ||
           leftMetadata.createdAt.localeCompare(rightMetadata.createdAt) ||
           left.artifact.id.localeCompare(right.artifact.id);
       });
@@ -281,6 +298,8 @@ export class FakeDriveControlPlaneRepository implements DriveControlPlaneReposit
     this.storeManagedArtifactMetadata(record.artifact.id, {
       jobId: record.jobId,
       verifiedAt: record.verifiedAt,
+      partIndex: record.partIndex,
+      partCount: record.partCount,
     });
   }
 

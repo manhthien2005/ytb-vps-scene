@@ -45,6 +45,11 @@ export type JobSourceMetadata = Readonly<{
   checksumSha256: string | null;
 }>;
 
+export type JobOutputPartMetadata = Readonly<JobSourceMetadata & {
+  partIndex: number;
+  partCount: number;
+}>;
+
 export type JobPhaseTelemetry = Readonly<{
   activePhase: string | null;
   phaseProgressPercent: number | null;
@@ -75,6 +80,7 @@ export type JobSummary = Readonly<{
   projectId?: string | null;
   workerSummary?: Readonly<{ id: string; state: WorkerState; accountLabel: string | null }> | null;
   outputMetadata?: Readonly<{ artifactId: string | null; sizeBytes: number | null }> | null;
+  outputParts?: readonly JobOutputPartMetadata[];
   settingsSnapshot?: SceneSettings | null;
   sourceMetadata?: JobSourceMetadata | null;
   activePhase?: string | null;
