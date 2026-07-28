@@ -369,11 +369,15 @@ function outputProperties(
   projectId: string,
   jobId: string,
   artifactId: string,
+  partIndex: number,
+  partCount: number,
 ): Readonly<Record<string, string>> {
   return {
     ytbVpsProjectId: projectId,
     ytbVpsArtifactId: artifactId,
     ytbVpsJobId: jobId,
+    ytbVpsPartIndex: String(partIndex),
+    ytbVpsPartCount: String(partCount),
     ytbVpsRole: "output",
     schema: "1",
   };
@@ -696,11 +700,23 @@ export function createGoogleDriveFilesAdapter(options: GoogleDriveFilesOptions =
       validateProjectId(input.jobId);
       validateProjectId(input.artifactId);
       if (!boundedDriveId(input.parentId)) throw stableError("DRIVE_PROVIDER_REJECTED");
+      let name: string;
+      try {
+        name = outputPartFileName(input.partIndex, input.partCount);
+      } catch {
+        throw stableError("DRIVE_PROVIDER_REJECTED");
+      }
       const output = await ensureExpected(accessToken, {
-        name: outputPartFileName(1, 1),
+        name,
         mimeType: "video/mp4",
         parentId: input.parentId,
-        appProperties: outputProperties(input.projectId, input.jobId, input.artifactId),
+        appProperties: outputProperties(
+          input.projectId,
+          input.jobId,
+          input.artifactId,
+          input.partIndex,
+          input.partCount,
+        ),
         empty: true,
       });
       return output.id;
