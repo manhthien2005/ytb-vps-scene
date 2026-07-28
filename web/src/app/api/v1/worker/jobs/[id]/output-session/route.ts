@@ -13,20 +13,34 @@ import { redactSecrets } from "@/lib/security/redact";
 export const runtime = "nodejs";
 const HEADERS = { "cache-control": "no-store" } as const;
 const UUID_V5_DNS_NAMESPACE = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
-const OUTPUT_ARTIFACT_ID_DOMAIN = "ytb-vps/output-artifact/v1";
+const OUTPUT_ARTIFACT_ID_DOMAIN = "ytb-vps/output-artifact/v2";
 const schema = z.object({
   fencingToken: z.number().int().positive(),
+  partIndex: z.number().int().min(1).max(999),
+  partCount: z.number().int().min(1).max(999),
   sizeBytes: z.number().int().safe().min(1).max(1_099_511_627_776),
   checksumSha256: z.string().regex(/^[0-9a-f]{64}$/),
-}).strict();
+}).strict().refine(
+  (value) => value.partIndex <= value.partCount,
+  { path: ["partIndex"], message: "partIndex must not exceed partCount" },
+);
 type Context = Readonly<{ params: Promise<Readonly<{ id: string }>> }>;
 
-function deriveOutputArtifactId(jobId: string, sizeBytes: number, checksumSha256: string): string {
+function deriveOutputArtifactId(
+  jobId: string,
+  partIndex: number,
+  partCount: number,
+  sizeBytes: number,
+  checksumSha256: string,
+): string {
   const bytes = createHash("sha1")
     .update(UUID_V5_DNS_NAMESPACE)
     .update(OUTPUT_ARTIFACT_ID_DOMAIN, "utf8")
     .update("\0", "utf8")
-    .update(JSON.stringify([jobId, sizeBytes, checksumSha256]), "utf8")
+    .update(
+      JSON.stringify([jobId, partIndex, partCount, sizeBytes, checksumSha256]),
+      "utf8",
+    )
     .digest()
     .subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
@@ -47,17 +61,20 @@ export async function POST(request: NextRequest, context: Context) {
     const driveRepository = createNeonDriveControlPlaneRepository(env.databaseUrl);
     const drive = createConfiguredDrive(env, driveRepository);
     const accessToken = await drive.access.getAccessToken();
-    const artifactId = deriveOutputArtifactId(jobId, body.sizeBytes, body.checksumSha256);
+    const artifactId = deriveOutputArtifactId(
+      jobId,
+      body.partIndex,
+      body.partCount,
+      body.sizeBytes,
+      body.checksumSha256,
+    );
     const driveFileId = await drive.files.ensureOutputFile(accessToken, {
       projectId: execution.projectId,
       jobId,
       artifactId,
       parentId: execution.outputParentId,
-    });
-    const session = await drive.files.createResumableUpdateSession(accessToken, {
-      fileId: driveFileId,
-      mimeType: "video/mp4",
-      sizeBytes: body.sizeBytes,
+      partIndex: body.partIndex,
+      partCount: body.partCount,
     });
     const outcome = await repository.reserveOutput({
       artifactId,
@@ -66,19 +83,34 @@ export async function POST(request: NextRequest, context: Context) {
       fencingToken: body.fencingToken,
       driveFileId,
       driveParentId: execution.outputParentId,
+      partIndex: body.partIndex,
+      partCount: body.partCount,
       sizeBytes: body.sizeBytes,
       checksumSha256: body.checksumSha256,
       now: new Date(),
     });
     if (outcome === "LEASE_LOST") {
       // Never delete the Drive file here: artifactId derives only from
-      // (jobId, sizeBytes, checksum), so the CURRENT lease holder resolves to the
-      // same file via ensureOutputFile and may be uploading to it right now. An
-      // unfenced delete by a stale worker would destroy the active attempt's output;
-      // the file is reused (find-or-create) by any future attempt with this identity.
+      // the exact job/Part/content identity, so the CURRENT lease holder resolves
+      // to the same file and may be uploading to it right now. An unfenced delete
+      // by a stale worker would destroy the active attempt's output.
       throw new AppError("LEASE_LOST", 409);
     }
-    return NextResponse.json({ artifactId, driveFileId, ...session }, { headers: HEADERS });
+    if (outcome === "READY_REPLAY") {
+      return NextResponse.json(
+        { status: "READY", artifactId, driveFileId },
+        { headers: HEADERS },
+      );
+    }
+    const session = await drive.files.createResumableUpdateSession(accessToken, {
+      fileId: driveFileId,
+      mimeType: "video/mp4",
+      sizeBytes: body.sizeBytes,
+    });
+    return NextResponse.json(
+      { status: "UPLOAD", artifactId, driveFileId, ...session },
+      { headers: HEADERS },
+    );
   } catch (error) {
     if (error instanceof AppError) return NextResponse.json(publicErrorBody(error), { status: error.status, headers: HEADERS });
     console.error("[api] unhandled error", redactSecrets(error));
