@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.filesystem.artifacts import LocalArtifactWriter
@@ -53,7 +54,7 @@ class _FakeMedia:
     def __init__(self) -> None:
         self.rendered: list[int] = []
         self.validated: list[Path] = []
-        self.concatenated: tuple[Path, ...] | None = None
+        self.concatenated: list[tuple[Path, ...]] = []
 
     def render_chunk(
         self,
@@ -90,7 +91,7 @@ class _FakeMedia:
         plan: RenderRequest,
         destination: Path,
     ):
-        self.concatenated = chunks
+        self.concatenated.append(chunks)
         destination.write_bytes(
             b"|".join(path.read_bytes() for path in chunks)
         )
@@ -248,7 +249,7 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             ),
         )
 
-    def test_prepares_four_durable_chunks_and_temporary_assembly(self) -> None:
+    def test_prepares_four_durable_chunks_and_two_durable_parts(self) -> None:
         prepared = self.coordinator.prepare(
             job_id=self.job_id,
             source=self.source,
@@ -256,6 +257,7 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             request=self.plan,
             render_fingerprint=Fingerprint("f" * 64),
             chunk_seconds=10,
+            max_part_seconds=20,
             workspace=self.workspace,
             snapshot_dir=self.snapshots,
             writer=LocalArtifactWriter(self.workspace),
@@ -290,7 +292,7 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
                 self.job_id,
                 "render",
             ).dependencies,
-            chunk_keys,
+            ("render:part:000001", "render:part:000002"),
         )
         artifacts = tuple(
             self.state.artifacts_for_unit(self.job_id, key)[0]
@@ -313,11 +315,65 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             )
         self.assertEqual(
             self.media.concatenated,
-            tuple(
-                self.workspace.joinpath(*artifact.relative_path.parts)
-                for artifact in artifacts
+            [
+                tuple(
+                    self.workspace.joinpath(*artifact.relative_path.parts)
+                    for artifact in artifacts[:2]
+                ),
+                tuple(
+                    self.workspace.joinpath(*artifact.relative_path.parts)
+                    for artifact in artifacts[2:]
+                ),
+            ],
+        )
+        self.assertEqual(
+            prepared.request.parts,
+            (
+                Part(1, 2, FrameInterval(0, 600), (0, 1)),
+                Part(2, 2, FrameInterval(600, 901), (2, 3)),
             ),
         )
+        self.assertEqual(
+            tuple(item.part for item in prepared.rendered_parts),
+            prepared.request.parts,
+        )
+        self.assertEqual(
+            tuple(item.path for item in prepared.rendered_parts),
+            (
+                PurePosixPath(
+                    "artifacts/render/parts/part-01-of-02.mp4"
+                ),
+                PurePosixPath(
+                    "artifacts/render/parts/part-02-of-02.mp4"
+                ),
+            ),
+        )
+        for rendered in prepared.rendered_parts:
+            path = self.workspace.joinpath(*rendered.path.parts)
+            self.assertTrue(path.is_file())
+            self.assertEqual(digest_file(path), rendered.digest)
+        for index, part in enumerate(prepared.request.parts, start=1):
+            key = f"render:part:{index:06d}"
+            unit = self.state.get_work_unit(self.job_id, key)
+            artifact = self.state.artifacts_for_unit(
+                self.job_id,
+                key,
+            )[0]
+            self.assertIs(unit.status, WorkStatus.SUCCEEDED)
+            self.assertEqual(
+                unit.dependencies,
+                tuple(
+                    f"render:{chunk_index:06d}"
+                    for chunk_index in part.chunk_indexes
+                ),
+            )
+            self.assertEqual(
+                artifact.dependencies,
+                tuple(
+                    f"render-chunk-{chunk_index:06d}"
+                    for chunk_index in part.chunk_indexes
+                ),
+            )
         self.assertEqual(len(self.checkpoints.calls), 4)
         self.assertTrue(
             all(
@@ -337,11 +393,6 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             self.checkpoints.latest,
             (self.job_id, "render-chunk-", 100),
         )
-        self.assertEqual(
-            prepared.request.parts[0].chunk_indexes,
-            (0, 1, 2, 3),
-        )
-        self.assertTrue(prepared.temporary_path.is_file())
         self.assertFalse(
             self.workspace.joinpath(
                 "artifacts",
@@ -359,15 +410,17 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             [3 * 16 * 1024 * 1024] * 4,
         )
         self.assertEqual(
-            self.disk_needs[4],
-            (
-                sum(artifact.size_bytes for artifact in artifacts)
-                * 5
-                + 1
-            )
-            // 2,
+            self.disk_needs[4:],
+            [
+                (
+                    sum(artifact.size_bytes for artifact in group)
+                    * 5
+                    + 1
+                )
+                // 2
+                for group in (artifacts[:2], artifacts[2:])
+            ],
         )
-        prepared.temporary_path.unlink()
 
     def _assert_restart(
         self,
@@ -439,61 +492,61 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             at="resume",
             verification_observed_at=101,
         )
-        try:
-            self.assertEqual(
-                self.state.artifacts_for_unit(
-                    self.job_id,
-                    "render:000000",
-                )[0],
-                first_chunk,
-            )
-            self.assertEqual(
+        self.assertEqual(
+            self.state.artifacts_for_unit(
+                self.job_id,
+                "render:000000",
+            )[0],
+            first_chunk,
+        )
+        self.assertEqual(
+            self.state.get_work_unit(
+                self.job_id,
+                "render:000000",
+            ).attempts,
+            first_attempts,
+        )
+        self.assertEqual(
+            self.state.get_work_unit(
+                self.job_id,
+                "render:000001",
+            ).attempts,
+            1 if committed_before_interrupt else 2,
+        )
+        self.assertEqual(self.media.rendered.count(0), 1)
+        self.assertEqual(
+            self.media.rendered.count(1),
+            (
+                1
+                if point
+                in {
+                    ChunkInterruptionPoint.BEFORE_RENDER,
+                    ChunkInterruptionPoint.AFTER_SQLITE_COMMIT,
+                    ChunkInterruptionPoint.DURING_CHECKPOINT,
+                }
+                else 2
+            ),
+        )
+        rendered_path = self.workspace.joinpath(
+            *prepared.rendered_parts[0].path.parts
+        )
+        self.assertEqual(
+            rendered_path.read_bytes(),
+            (
+                b"chunk:0:0:300|chunk:1:300:600|"
+                b"chunk:2:600:900|chunk:3:900:901"
+            ),
+        )
+        self.assertTrue(
+            all(
                 self.state.get_work_unit(
                     self.job_id,
-                    "render:000000",
-                ).attempts,
-                first_attempts,
+                    f"render:{index:06d}",
+                ).status
+                is WorkStatus.SUCCEEDED
+                for index in range(4)
             )
-            self.assertEqual(
-                self.state.get_work_unit(
-                    self.job_id,
-                    "render:000001",
-                ).attempts,
-                1 if committed_before_interrupt else 2,
-            )
-            self.assertEqual(self.media.rendered.count(0), 1)
-            self.assertEqual(
-                self.media.rendered.count(1),
-                (
-                    1
-                    if point
-                    in {
-                        ChunkInterruptionPoint.BEFORE_RENDER,
-                        ChunkInterruptionPoint.AFTER_SQLITE_COMMIT,
-                        ChunkInterruptionPoint.DURING_CHECKPOINT,
-                    }
-                    else 2
-                ),
-            )
-            self.assertEqual(
-                prepared.temporary_path.read_bytes(),
-                (
-                    b"chunk:0:0:300|chunk:1:300:600|"
-                    b"chunk:2:600:900|chunk:3:900:901"
-                ),
-            )
-            self.assertTrue(
-                all(
-                    self.state.get_work_unit(
-                        self.job_id,
-                        f"render:{index:06d}",
-                    ).status
-                    is WorkStatus.SUCCEEDED
-                    for index in range(4)
-                )
-            )
-        finally:
-            prepared.temporary_path.unlink()
+        )
 
     def test_restart_before_chunk_render(self) -> None:
         self._assert_restart(ChunkInterruptionPoint.BEFORE_RENDER)
@@ -517,7 +570,7 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
         self._assert_restart(ChunkInterruptionPoint.DURING_CHECKPOINT)
 
     def test_missing_chunk_rerenders_only_its_unit_and_dependents(self) -> None:
-        first = self.coordinator.prepare(
+        self.coordinator.prepare(
             job_id=self.job_id,
             source=self.source,
             tts_wav=self.voice,
@@ -530,7 +583,6 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             at="first",
             verification_observed_at=100,
         )
-        first.temporary_path.unlink()
         before = {
             index: self.state.get_work_unit(
                 self.job_id,
@@ -557,35 +609,170 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             at="resume",
             verification_observed_at=101,
         )
-        try:
-            self.assertEqual(self.media.rendered, [0, 1, 2, 3, 1])
-            for index in (0, 2, 3):
-                self.assertEqual(
-                    self.state.get_work_unit(
-                        self.job_id,
-                        f"render:{index:06d}",
-                    ).attempts,
-                    before[index],
-                )
+        self.assertEqual(self.media.rendered, [0, 1, 2, 3, 1])
+        for index in (0, 2, 3):
             self.assertEqual(
                 self.state.get_work_unit(
                     self.job_id,
-                    "render:000001",
+                    f"render:{index:06d}",
                 ).attempts,
-                before[1] + 1,
+                before[index],
             )
-            self.assertIs(
+        self.assertEqual(
+            self.state.get_work_unit(
+                self.job_id,
+                "render:000001",
+            ).attempts,
+            before[1] + 1,
+        )
+        self.assertIs(
+            self.state.get_work_unit(
+                self.job_id,
+                "render",
+            ).status,
+            WorkStatus.INVALID,
+        )
+        self.assertTrue(
+            self.workspace.joinpath(
+                *resumed.rendered_parts[0].path.parts
+            ).is_file()
+        )
+
+    def test_corrupt_part_reassembles_only_that_part(self) -> None:
+        first = self.coordinator.prepare(
+            job_id=self.job_id,
+            source=self.source,
+            tts_wav=self.voice,
+            request=self.plan,
+            render_fingerprint=Fingerprint("f" * 64),
+            chunk_seconds=10,
+            max_part_seconds=20,
+            workspace=self.workspace,
+            snapshot_dir=self.snapshots,
+            writer=LocalArtifactWriter(self.workspace),
+            at="first",
+            verification_observed_at=100,
+        )
+        attempts = tuple(
+            self.state.get_work_unit(
+                self.job_id,
+                f"render:part:{index:06d}",
+            ).attempts
+            for index in (1, 2)
+        )
+        corrupt_path = self.workspace.joinpath(
+            *first.rendered_parts[1].path.parts
+        )
+        corrupt_path.write_bytes(b"corrupt")
+
+        resumed = self.coordinator.prepare(
+            job_id=self.job_id,
+            source=self.source,
+            tts_wav=self.voice,
+            request=self.plan,
+            render_fingerprint=Fingerprint("f" * 64),
+            chunk_seconds=10,
+            max_part_seconds=20,
+            workspace=self.workspace,
+            snapshot_dir=self.snapshots,
+            writer=LocalArtifactWriter(self.workspace),
+            at="resume",
+            verification_observed_at=101,
+        )
+
+        self.assertEqual(self.media.rendered, [0, 1, 2, 3])
+        self.assertEqual(len(self.media.concatenated), 3)
+        self.assertEqual(
+            self.media.concatenated[-1],
+            tuple(
+                self.workspace
+                / "artifacts"
+                / "render"
+                / "chunks"
+                / f"chunk-{index:06d}.mp4"
+                for index in (2, 3)
+            ),
+        )
+        self.assertEqual(
+            tuple(
                 self.state.get_work_unit(
                     self.job_id,
-                    "render",
-                ).status,
-                WorkStatus.INVALID,
-            )
-        finally:
-            resumed.temporary_path.unlink()
+                    f"render:part:{index:06d}",
+                ).attempts
+                for index in (1, 2)
+            ),
+            (attempts[0], attempts[1] + 1),
+        )
+        self.assertEqual(
+            digest_file(corrupt_path),
+            resumed.rendered_parts[1].digest,
+        )
+        self.assertIs(
+            self.state.get_work_unit(
+                self.job_id,
+                "render",
+            ).status,
+            WorkStatus.INVALID,
+        )
+
+    def test_accepts_matching_legacy_single_part_chunk_plan(self) -> None:
+        writer = LocalArtifactWriter(self.workspace)
+        _, requested = self.coordinator._plan_document(
+            self.plan,
+            Fingerprint("f" * 64),
+            10,
+            20,
+        )
+        legacy = replace(
+            requested,
+            parts=(
+                Part(
+                    1,
+                    1,
+                    FrameInterval(0, 901),
+                    (0, 1, 2, 3),
+                ),
+            ),
+        )
+        self.coordinator._ensure_unit(
+            self.job_id,
+            WorkUnit(
+                "render:plan",
+                StageName.RENDER,
+                dependencies=("tts",),
+            ),
+            "legacy",
+        )
+        self.coordinator._commit_or_verify_plan(
+            self.job_id,
+            legacy,
+            writer,
+            "legacy",
+        )
+
+        prepared = self.coordinator.prepare(
+            job_id=self.job_id,
+            source=self.source,
+            tts_wav=self.voice,
+            request=self.plan,
+            render_fingerprint=Fingerprint("f" * 64),
+            chunk_seconds=10,
+            max_part_seconds=20,
+            workspace=self.workspace,
+            snapshot_dir=self.snapshots,
+            writer=writer,
+            at="resume",
+            verification_observed_at=101,
+        )
+
+        self.assertEqual(
+            tuple(part.chunk_indexes for part in prepared.request.parts),
+            ((0, 1), (2, 3)),
+        )
+        self.assertEqual(len(prepared.rendered_parts), 2)
 
     def test_succeeded_plan_rejects_changed_canonical_bytes(self) -> None:
-        first = self.coordinator.prepare(
+        self.coordinator.prepare(
             job_id=self.job_id,
             source=self.source,
             tts_wav=self.voice,
@@ -598,7 +785,6 @@ class ChunkedRenderCoordinatorTests(unittest.TestCase):
             at="first",
             verification_observed_at=100,
         )
-        first.temporary_path.unlink()
 
         with self.assertRaisesRegex(
             RuntimeError,

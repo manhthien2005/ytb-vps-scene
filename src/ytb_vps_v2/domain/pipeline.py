@@ -446,10 +446,26 @@ class RenderChunkPlanDocument:
         )
         if type(self.render_fingerprint) is not Fingerprint:
             raise DomainInvariantError("Chunk plan needs a render fingerprint")
-        expected = single_part_for_chunks(self.frame_count, self.chunks)
-        if self.parts != (expected,):
+        complete = single_part_for_chunks(self.frame_count, self.chunks)
+        parts = _parts(self.parts, frame_count=self.frame_count)
+        if (
+            tuple(
+                chunk_index
+                for part in parts
+                for chunk_index in part.chunk_indexes
+            )
+            != complete.chunk_indexes
+            or any(
+                part.interval
+                != FrameInterval(
+                    self.chunks[part.chunk_indexes[0]].interval.start_frame,
+                    self.chunks[part.chunk_indexes[-1]].interval.end_frame,
+                )
+                for part in parts
+            )
+        ):
             raise DomainInvariantError(
-                "Chunk plan Part must cover every render chunk"
+                "Chunk plan Parts must align with every render chunk"
             )
         _require_exact(
             "Chunk-plan audio flag",

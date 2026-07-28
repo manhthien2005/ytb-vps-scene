@@ -838,6 +838,22 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
             raw,
         )
 
+    def test_render_chunk_plan_round_trips_multiple_parts(self) -> None:
+        document = replace(
+            render_chunk_plan(),
+            parts=(
+                Part(1, 2, FrameInterval(0, 600), (0, 1)),
+                Part(2, 2, FrameInterval(600, 601), (2,)),
+            ),
+        )
+
+        raw = canonical_document_bytes(document)
+
+        self.assertEqual(
+            parse_render_chunk_plan_document_bytes(raw),
+            document,
+        )
+
     def test_render_plan_round_trips_multiple_rendered_parts(self) -> None:
         first = Part(1, 2, FrameInterval(0, 450), (0,))
         second = Part(2, 2, FrameInterval(450, 900), (1,))
