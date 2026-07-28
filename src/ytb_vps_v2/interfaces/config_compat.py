@@ -160,6 +160,16 @@ def _build_effective_config(
             "safety.cleanup_after_upload",
             "queue.cleanup_after_upload",
         )
+    if "mirror_video" in render:
+        mirror_video = _pop_bool(
+            render,
+            "mirror_video",
+            False,
+            "render",
+        )
+        if mirror_video:
+            raise ConfigError("render.mirror_video is no longer supported")
+        _warn_alias(warnings, "render.mirror_video")
 
     ffmpeg_threads = _pop_int(
         runtime,
@@ -359,14 +369,17 @@ def _build_effective_config(
                 render, "font_size", defaults.render.font_size, "render"
             ),
             outline=_pop_int(render, "outline", defaults.render.outline, "render"),
-            mirror_video=_pop_bool(
+            subtitle_height_ratio=_pop_fraction(
                 render,
-                "mirror_video",
-                defaults.render.mirror_video,
+                "subtitle_height_ratio",
+                defaults.render.subtitle_height_ratio,
                 "render",
             ),
-            blur_mode=_pop_text(
-                render, "blur_mode", defaults.render.blur_mode, "render"
+            subtitle_font_name=_pop_text(
+                render,
+                "subtitle_font_name",
+                defaults.render.subtitle_font_name,
+                "render",
             ),
         ),
         publish=PublishConfig(remote_root=remote_root),

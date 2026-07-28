@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from ytb_vps_v2.application.media_job import MediaJobExecutor, MediaJobError, scene_blur_regions
+from ytb_vps_v2.domain.timeline import FrameInterval
 
 
 class FakeTransfer:
@@ -78,10 +79,18 @@ def assignment(source_sha256: str) -> dict[str, object]:
 
 class MediaJobTests(unittest.TestCase):
     def test_scene_rectangles_are_converted_to_source_pixel_regions(self) -> None:
-        regions = scene_blur_regions(assignment("a" * 64)["execution"]["sceneSettings"], 1920, 1080)  # type: ignore[arg-type]
+        regions = scene_blur_regions(
+            assignment("a" * 64)["execution"]["sceneSettings"],  # type: ignore[arg-type]
+            1920,
+            1080,
+            frame_count=900,
+        )
         self.assertEqual(regions[0].box.xmin, 192)
         self.assertEqual(regions[0].box.ymin, 756)
         self.assertEqual(regions[1].box.xmax, 1824)
+        self.assertTrue(
+            all(region.interval == FrameInterval(0, 900) for region in regions)
+        )
 
     def test_execute_streams_input_runs_pipeline_and_completes_output(self) -> None:
         client = FakeClient()

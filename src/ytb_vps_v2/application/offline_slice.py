@@ -884,10 +884,7 @@ class OfflineSliceRunner:
             )
         if stage is StageName.TRACK:
             ocr = self._document(documents, StageName.OCR, OcrDocument)
-            configured_regions = tuple(
-                BlurRegion(region.kind, FrameInterval(0, ocr.frame_count), region.box)
-                for region in request.blur_regions
-            )
+            configured_regions = request.blur_regions
             return TrackDocument(
                 ocr.schema_version,
                 ocr.job_id,

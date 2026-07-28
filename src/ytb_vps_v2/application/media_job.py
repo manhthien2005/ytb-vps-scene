@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import threading
 from collections.abc import Callable, Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -71,27 +72,36 @@ def _digest_file(path: Path) -> tuple[int, str]:
     return size, hasher.hexdigest()
 
 
-def _rectangle(settings: Mapping[str, Any], name: str, width: int, height: int) -> BlurRegion:
-    value = settings.get(name)
-    if not isinstance(value, Mapping):
-        raise MediaJobError(f"scene setting {name} is invalid")
+def _rectangle_box(
+    value: Mapping[str, Any],
+    width: int,
+    height: int,
+    name: str,
+) -> BoundingBox:
     try:
-        x = float(value["x"])
-        y = float(value["y"])
-        w = float(value["width"])
-        h = float(value["height"])
+        x, y = float(value["x"]), float(value["y"])
+        w, h = float(value["width"]), float(value["height"])
     except (KeyError, TypeError, ValueError) as error:
-        raise MediaJobError(f"scene setting {name} is invalid") from error
-    if not all(0 <= item <= 1 for item in (x, y, w, h)) or w <= 0 or h <= 0 or x + w > 1 or y + h > 1:
-        raise MediaJobError(f"scene setting {name} is outside the source")
-    xmin, ymin = round(x * width), round(y * height)
-    xmax, ymax = round((x + w) * width), round((y + h) * height)
-    # The web validates only normalized 0..1 rectangles, so a web-valid snapshot can
-    # produce sub-8px regions here. Clamp (grow within bounds) instead of failing
-    # every attempt deterministically; only a source smaller than 8px is fatal.
-    xmin, xmax = _expand_to_minimum(xmin, xmax, 8, width, name)
-    ymin, ymax = _expand_to_minimum(ymin, ymax, 8, height, name)
-    return BlurRegion(RegionKind.STATIC, FrameInterval(0, 1), BoundingBox(xmin, ymin, xmax, ymax))
+        raise MediaJobError(f"scene region {name} is invalid") from error
+    if not all(0 <= item <= 1 for item in (x, y, w, h)) or w <= 0 or h <= 0:
+        raise MediaJobError(f"scene region {name} is outside the source")
+    if x + w > 1 or y + h > 1:
+        raise MediaJobError(f"scene region {name} is outside the source")
+    xmin, xmax = _expand_to_minimum(
+        round(x * width),
+        round((x + w) * width),
+        8,
+        width,
+        name,
+    )
+    ymin, ymax = _expand_to_minimum(
+        round(y * height),
+        round((y + h) * height),
+        8,
+        height,
+        name,
+    )
+    return BoundingBox(xmin, ymin, xmax, ymax)
 
 
 def _expand_to_minimum(low: int, high: int, minimum: int, bound: int, name: str) -> tuple[int, int]:
@@ -105,10 +115,121 @@ def _expand_to_minimum(low: int, high: int, minimum: int, bound: int, name: str)
     return low, high
 
 
-def scene_blur_regions(settings: Mapping[str, Any], width: int, height: int) -> tuple[BlurRegion, ...]:
+_MASK_KINDS = {"blur", "channelLogo"}
+_LEGACY_KIND_MAP = {
+    "sourceSubtitle": "blur",
+    "logo": "channelLogo",
+    "custom": "blur",
+}
+
+
+def _regions_from_settings(
+    settings: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    if isinstance(settings.get("regions"), list):
+        return [
+            item
+            for item in settings["regions"]
+            if isinstance(item, Mapping)
+        ]
+    blur = settings.get("blur")
+    if isinstance(blur, Mapping) and isinstance(blur.get("regions"), list):
+        return [
+            {
+                **item,
+                "kind": _LEGACY_KIND_MAP.get(
+                    str(item.get("kind")),
+                    "blur",
+                ),
+            }
+            for item in blur["regions"]
+            if isinstance(item, Mapping)
+        ]
+    legacy = []
+    for name, kind in (
+        ("sourceSubtitle", "blur"),
+        ("logo", "channelLogo"),
+    ):
+        rectangle = settings.get(name)
+        if isinstance(rectangle, Mapping):
+            legacy.append(
+                {
+                    "kind": kind,
+                    "label": name,
+                    "enabled": True,
+                    "rectangle": rectangle,
+                }
+            )
+    if legacy:
+        return legacy
+    raise MediaJobError("scene settings contain no regions")
+
+
+def _time_intervals(
+    value: object,
+    *,
+    frame_count: int,
+) -> tuple[FrameInterval, ...]:
+    if value is None:
+        return (FrameInterval(0, frame_count),)
+    if not isinstance(value, list):
+        raise MediaJobError("scene region time ranges are invalid")
+    intervals = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise MediaJobError("scene region time range is invalid")
+        try:
+            start = Fraction(str(item["startSeconds"]))
+            end = Fraction(str(item["endSeconds"]))
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+            raise MediaJobError("scene region time range is invalid") from error
+        if start < 0 or end <= start:
+            raise MediaJobError("scene region time range is invalid")
+        start_value = start * 30
+        end_value = end * 30
+        start_frame = start_value.numerator // start_value.denominator
+        end_frame = -(-end_value.numerator // end_value.denominator)
+        if start_frame >= frame_count or end_frame > frame_count:
+            raise MediaJobError("scene region time range is outside the media timeline")
+        intervals.append(FrameInterval(start_frame, end_frame))
+    return tuple(intervals)
+
+
+def scene_blur_regions(
+    settings: Mapping[str, Any],
+    width: int,
+    height: int,
+    *,
+    frame_count: int,
+) -> tuple[BlurRegion, ...]:
     if not isinstance(settings, Mapping):
         raise MediaJobError("scene settings are invalid")
-    return (_rectangle(settings, "sourceSubtitle", width, height), _rectangle(settings, "logo", width, height))
+    if not isinstance(frame_count, int) or isinstance(frame_count, bool) or frame_count < 1:
+        raise MediaJobError("scene regions need a positive frame count")
+    regions = []
+    for index, item in enumerate(_regions_from_settings(settings)):
+        if (
+            str(item.get("kind")) not in _MASK_KINDS
+            or not item.get("enabled", True)
+        ):
+            continue
+        rectangle = item.get("rectangle")
+        if not isinstance(rectangle, Mapping):
+            raise MediaJobError(f"scene region {index} has no rectangle")
+        box = _rectangle_box(
+            rectangle,
+            width,
+            height,
+            str(item.get("label") or index),
+        )
+        regions.extend(
+            BlurRegion(RegionKind.STATIC, interval, box)
+            for interval in _time_intervals(
+                item.get("timeRanges"),
+                frame_count=frame_count,
+            )
+        )
+    return tuple(regions)
 
 
 class MediaJobExecutor:

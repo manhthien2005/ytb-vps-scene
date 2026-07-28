@@ -5,10 +5,15 @@ import os
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from ytb_vps_v2.adapters.ffmpeg.canonicalize import (
+    canonicalize_arguments,
+    plan_canvas,
+)
+from ytb_vps_v2.adapters.ffmpeg.probe import ProbeError, parse_probe_payload
+from ytb_vps_v2.adapters.filesystem.disk_guard import ensure_free_space
 
 def _media_binaries() -> tuple[str, str]:
     # Ubuntu 22.04's system FFmpeg 4.4 lacks the v2 -fps_mode contract, so the
@@ -36,70 +41,79 @@ from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
 from ytb_vps_v2.domain.models import JobId
 
 
-def _quick_shape(source: Path, ffprobe: str) -> tuple[float | None, Fraction | None, bool]:
-    """Duration, frame rate and audio presence without decoding the whole file.
-
-    FfmpegMediaAdapter.probe counts frames exactly (-count_frames), which is right
-    for a canonical 30-second slice but decodes every frame of the input. On a real
-    upload - a few minutes of 720p - that alone blows the 30-second probe timeout
-    and the job can never leave the OCR phase, so the "is this already canonical?"
-    question has to be answered cheaply first."""
-    command = [
-        ffprobe, "-v", "error", "-show_entries",
-        "stream=codec_type,r_frame_rate,duration:format=duration",
-        "-of", "json", str(source),
-    ]
+def canonicalize_source(workspace: Path, source: Path) -> tuple[Path, Any]:
+    """Normalize accepted media without truncating its canonical timeline."""
+    ffmpeg, ffprobe = _media_binaries()
     try:
-        completed = subprocess.run(command, check=True, capture_output=True, timeout=60, text=True)
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-of",
+                "json",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+            text=True,
+        )
         payload = json.loads(completed.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        raise MediaJobError("source media could not be inspected") from error
-    streams = payload.get("streams") if isinstance(payload, dict) else None
-    if not isinstance(streams, list):
-        raise MediaJobError("source media could not be inspected")
-    has_audio = any(isinstance(item, dict) and item.get("codec_type") == "audio" for item in streams)
-    video = next((item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"), None)
-    if video is None:
-        raise MediaJobError("source media has no video stream")
-    rate: Fraction | None
-    try:
-        rate = Fraction(str(video.get("r_frame_rate")))
-    except (TypeError, ValueError, ZeroDivisionError):
-        rate = None
-    duration_text = video.get("duration") or (payload.get("format") or {}).get("duration")
-    try:
-        duration = float(duration_text)
-    except (TypeError, ValueError):
-        duration = None
-    return duration, rate, has_audio
-
-
-def _canonical_source(source: Path, workspace: Path, media: FfmpegMediaAdapter, ffmpeg: str, ffprobe: str) -> tuple[Path, Any]:
-    duration, rate, has_audio = _quick_shape(source, ffprobe)
-    # Only pay for the exact frame count when the cheap shape says this could
-    # already be the canonical 30-second, 30 fps slice.
-    if rate == Fraction(30, 1) and duration is not None and 29.9 <= duration <= 30.1:
-        document = media.probe(source)
-        if document.frame_count == 900 and document.source_fps == Fraction(30, 1):
-            return source, document
-        has_audio = document.has_audio
-    normalized = workspace / "normalized" / "source.mp4"
-    normalized.parent.mkdir(parents=True, exist_ok=True)
-    command = [ffmpeg, "-y", "-i", str(source), "-t", "30", "-vf", "fps=30", "-frames:v", "900", "-c:v", "libx264", "-pix_fmt", "yuv420p"]
-    command.extend(["-af", "apad,atrim=duration=30", "-c:a", "aac"] if has_audio else ["-an"])
-    command.extend(["-movflags", "+faststart", str(normalized)])
-    try:
-        subprocess.run(command, check=True, capture_output=True, timeout=600)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        raise MediaJobError("source could not be normalized to the canonical 30-second slice") from error
-    return normalized, media.probe(normalized)
+        raise MediaJobError("source media could not be inspected") from error
+    except (TypeError, ValueError) as error:
+        raise MediaJobError("source media could not be inspected") from error
+    try:
+        manifest = parse_probe_payload(payload)
+    except (ProbeError, TypeError, ValueError) as error:
+        raise MediaJobError("source media could not be inspected") from error
+
+    canvas = plan_canvas(
+        manifest,
+        max_width=1920,
+        max_height=1080,
+        target_fps=30,
+    )
+    destination = workspace / "normalized" / "source.mp4"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    ensure_free_space(
+        destination.parent,
+        need_bytes=source.stat().st_size * 3,
+    )
+    try:
+        subprocess.run(
+            canonicalize_arguments(
+                manifest,
+                canvas,
+                source=str(source),
+                destination=str(destination),
+                ffmpeg=ffmpeg,
+            ),
+            check=True,
+            capture_output=True,
+            timeout=7200,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise MediaJobError("source could not be canonicalized") from error
+    return (
+        destination,
+        FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe).probe(destination),
+    )
 
 
 def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, Any], job_id_value: str) -> Path:
     ffmpeg, ffprobe = _media_binaries()
     media = FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe)
-    canonical_source, media_document = _canonical_source(source, workspace, media, ffmpeg, ffprobe)
-    blur_regions = scene_blur_regions(settings, media_document.width, media_document.height)
+    canonical_source, media_document = canonicalize_source(workspace, source)
+    blur_regions = scene_blur_regions(
+        settings,
+        media_document.width,
+        media_document.height,
+        frame_count=media_document.frame_count,
+    )
     workspace.mkdir(parents=True, exist_ok=True)
     archive_root, remote_root, snapshot_root = workspace / "archive", workspace / "remote", workspace / "snapshots"
     pipeline_root = workspace / "pipeline"

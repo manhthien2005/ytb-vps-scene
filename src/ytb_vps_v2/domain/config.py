@@ -163,15 +163,21 @@ class RenderConfig:
     profile_revision: str = "default"
     font_size: int = 42
     outline: int = 4
-    mirror_video: bool = True
-    blur_mode: str = "subtitle_band"
+    subtitle_height_ratio: Fraction = Fraction(5, 100)
+    subtitle_font_name: str = "Arial"
 
     def __post_init__(self) -> None:
         _text("Render profile revision", self.profile_revision)
         _integer("Render font size", self.font_size, minimum=1)
         _integer("Render outline", self.outline, minimum=0)
-        _boolean("Render mirror flag", self.mirror_video)
-        _text("Render blur mode", self.blur_mode)
+        _fraction(
+            "Render subtitle height ratio",
+            self.subtitle_height_ratio,
+            minimum=Fraction(0),
+            maximum=Fraction(1),
+            minimum_inclusive=False,
+        )
+        _text("Render subtitle font name", self.subtitle_font_name)
 
 
 @dataclass(frozen=True, slots=True)

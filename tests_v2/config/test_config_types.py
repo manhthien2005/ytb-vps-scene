@@ -27,6 +27,8 @@ class ConfigTypeTests(unittest.TestCase):
         self.assertEqual(config.media.target_fps, 30)
         self.assertEqual(config.ocr.sample_fps, Fraction(2))
         self.assertEqual(config.translation.mode, PipelineMode.CUE_TRANSLATION)
+        self.assertEqual(config.render.subtitle_height_ratio, Fraction(5, 100))
+        self.assertEqual(config.render.subtitle_font_name, "Arial")
         self.assertFalse(config.safety.cleanup_after_upload)
         with self.assertRaises(FrozenInstanceError):
             config.media.target_fps = 25  # type: ignore[misc]
@@ -41,6 +43,8 @@ class ConfigTypeTests(unittest.TestCase):
             lambda: TranslationConfig(prompt_revision=-1),
             lambda: RenderConfig(font_size=0),
             lambda: RenderConfig(outline=-1),
+            lambda: RenderConfig(subtitle_height_ratio=Fraction(0)),
+            lambda: RenderConfig(subtitle_height_ratio=Fraction(101, 100)),
             lambda: RuntimeConfig(ocr_parallelism=0),
             lambda: RuntimeConfig(timeout_seconds=True),
         )
@@ -58,6 +62,7 @@ class ConfigTypeTests(unittest.TestCase):
             lambda: TranslationConfig(model=""),
             lambda: TtsConfig(rate=Fraction(0)),
             lambda: TtsConfig(max_fit_speed=1.35),
+            lambda: RenderConfig(subtitle_font_name=""),
             lambda: PublishConfig(remote_root=" "),
         )
         for factory in invalid_factories:

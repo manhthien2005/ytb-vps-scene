@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import array
 import hashlib
+import math
+import shutil
+import subprocess
 import tempfile
 import unittest
 from fractions import Fraction
@@ -189,7 +193,244 @@ class GraphScriptTests(unittest.TestCase):
 
 
 class RuntimeBudgetTests(unittest.TestCase):
-    def test_default_timeouts_do_not_cancel_an_hour_long_render_or_validation(self) -> None:
+    def test_default_timeouts_do_not_cancel_hour_long_media_work(self) -> None:
         adapter = FfmpegMediaAdapter()
+        self.assertGreaterEqual(adapter.probe_timeout_seconds, 3_600)
         self.assertGreaterEqual(adapter.render_timeout_seconds, 3_600)
         self.assertGreaterEqual(adapter.decode_timeout_seconds, 3_600)
+
+
+def _run_ffmpeg(arguments: list[str]) -> bytes:
+    return subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *arguments],
+        check=True,
+        capture_output=True,
+        timeout=180,
+    ).stdout
+
+
+def _gray_crop(
+    video: Path,
+    *,
+    at_seconds: float,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> bytes:
+    return _run_ffmpeg(
+        [
+            "-ss",
+            str(at_seconds),
+            "-i",
+            str(video),
+            "-vf",
+            f"crop={width}:{height}:{x}:{y},format=gray",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ]
+    )
+
+
+def _edge_energy(frame: bytes, *, width: int, height: int) -> float:
+    horizontal = sum(
+        abs(frame[row * width + column] - frame[row * width + column - 1])
+        for row in range(height)
+        for column in range(1, width)
+    )
+    vertical = sum(
+        abs(frame[row * width + column] - frame[(row - 1) * width + column])
+        for row in range(1, height)
+        for column in range(width)
+    )
+    comparisons = height * (width - 1) + (height - 1) * width
+    return (horizontal + vertical) / comparisons
+
+
+def _band_rms(
+    video: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+) -> float:
+    raw = _run_ffmpeg(
+        [
+            "-ss",
+            str(start_seconds),
+            "-i",
+            str(video),
+            "-t",
+            str(duration_seconds),
+            "-vn",
+            "-af",
+            "bandpass=f=220:width_type=h:width=40",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "48000",
+            "-ac",
+            "1",
+            "-",
+        ]
+    )
+    samples = array.array("h")
+    samples.frombytes(raw)
+    return math.sqrt(
+        sum(sample * sample for sample in samples) / len(samples)
+    ) / 32768
+
+
+@unittest.skipUnless(
+    shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None,
+    "ffmpeg and ffprobe required",
+)
+class RenderIntegrationTests(unittest.TestCase):
+    def test_render_applies_blur_ass_subtitles_and_audio_ducking(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            source = workspace / "source.mp4"
+            voice = workspace / "voice.wav"
+            output = workspace / "output.mp4"
+            _run_ffmpeg(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:size=640x360:rate=30:duration=3",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x100:rate=30:duration=3",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:sample_rate=48000:duration=3",
+                    "-filter_complex",
+                    "[0:v][1:v]overlay=0:0:shortest=1[v]",
+                    "-map",
+                    "[v]",
+                    "-map",
+                    "2:a",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    str(source),
+                ]
+            )
+            _run_ffmpeg(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:sample_rate=48000:duration=2",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(voice),
+                ]
+            )
+
+            adapter = FfmpegMediaAdapter()
+            media = adapter.probe(source)
+            plan = RenderRequest(
+                1,
+                JobId("render-integration"),
+                media.source_digest,
+                media.frame_count,
+                media.width,
+                media.height,
+                TTS_ARTIFACT_PATH,
+                DIGEST,
+                (
+                    Cue(
+                        1,
+                        FrameInterval(30, 60),
+                        BoundingBox(0, 260, 640, 350),
+                        "source",
+                        "Phụ đề tiếng Việt",
+                    ),
+                ),
+                (
+                    BlurRegion(
+                        RegionKind.STATIC,
+                        FrameInterval(0, media.frame_count),
+                        BoundingBox(0, 0, 320, 100),
+                    ),
+                ),
+                PurePosixPath("artifacts/tts/voice.wav"),
+                adapter._digest(voice),
+                (
+                    Part(
+                        1,
+                        1,
+                        FrameInterval(0, media.frame_count),
+                        (0,),
+                    ),
+                ),
+                True,
+            )
+
+            adapter.render(source, voice, plan, output)
+
+            source_mask = _gray_crop(
+                source,
+                at_seconds=1.5,
+                x=0,
+                y=0,
+                width=320,
+                height=100,
+            )
+            output_mask = _gray_crop(
+                output,
+                at_seconds=1.5,
+                x=0,
+                y=0,
+                width=320,
+                height=100,
+            )
+            self.assertLess(
+                _edge_energy(output_mask, width=320, height=100),
+                _edge_energy(source_mask, width=320, height=100) * 0.5,
+            )
+
+            source_subtitle = _gray_crop(
+                source,
+                at_seconds=1.5,
+                x=0,
+                y=260,
+                width=640,
+                height=90,
+            )
+            output_subtitle = _gray_crop(
+                output,
+                at_seconds=1.5,
+                x=0,
+                y=260,
+                width=640,
+                height=90,
+            )
+            self.assertGreater(
+                sum(value > 200 for value in output_subtitle),
+                sum(value > 200 for value in source_subtitle) + 50,
+            )
+
+            ducked = _band_rms(
+                output,
+                start_seconds=0.5,
+                duration_seconds=0.8,
+            )
+            recovered = _band_rms(
+                output,
+                start_seconds=2.6,
+                duration_seconds=0.3,
+            )
+            self.assertLess(ducked, recovered * 0.75)

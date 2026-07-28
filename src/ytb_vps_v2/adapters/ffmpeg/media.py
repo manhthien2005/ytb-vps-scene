@@ -595,7 +595,7 @@ class FfmpegMediaAdapter:
         ffmpeg: str = "ffmpeg",
         ffprobe: str = "ffprobe",
         fixture_timeout_seconds: float = 120.0,
-        probe_timeout_seconds: float = 30.0,
+        probe_timeout_seconds: float = 7200.0,
         render_timeout_seconds: float = 7200.0,
         decode_timeout_seconds: float = 7200.0,
         diagnostic_limit: int = 4096,

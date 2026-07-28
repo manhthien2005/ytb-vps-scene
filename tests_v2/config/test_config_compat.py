@@ -14,6 +14,34 @@ from ytb_vps_v2.interfaces.config_compat import (
 
 
 class ConfigCompatibilityTests(unittest.TestCase):
+    def test_render_subtitle_settings_translate_to_typed_values(self) -> None:
+        result = parse_config(
+            {
+                "render": {
+                    "subtitle_height_ratio": "0.06",
+                    "subtitle_font_name": "Arial",
+                }
+            }
+        )
+
+        self.assertEqual(
+            result.config.render.subtitle_height_ratio,
+            Fraction(3, 50),
+        )
+        self.assertEqual(result.config.render.subtitle_font_name, "Arial")
+
+    def test_disabled_legacy_mirroring_is_accepted_with_a_warning(self) -> None:
+        result = parse_config({"render": {"mirror_video": False}})
+
+        self.assertEqual(
+            tuple(warning.path for warning in result.warnings),
+            ("render.mirror_video",),
+        )
+
+    def test_enabled_legacy_mirroring_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "no longer supported"):
+            parse_config({"render": {"mirror_video": True}})
+
     def test_legacy_keys_translate_to_typed_effective_values(self) -> None:
         raw = {
             "media": {"target_fps": 30, "ffmpeg_threads": 8},
