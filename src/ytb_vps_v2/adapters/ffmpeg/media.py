@@ -1196,6 +1196,7 @@ class FfmpegMediaAdapter:
         target_fps: int,
         destination: Path,
         encoder: str = "libx264",
+        disable_b_frames: bool = False,
     ) -> list[str]:
         if type(plan) is not RenderRequest:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
@@ -1203,6 +1204,10 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Render inputs must be RenderInputs")
         if not isinstance(target_fps, int) or isinstance(target_fps, bool) or target_fps <= 0:
             raise FfmpegMediaError("Render target FPS must be positive")
+        if type(disable_b_frames) is not bool:
+            raise FfmpegMediaError(
+                "Render B-frame policy must be boolean"
+            )
         duration = Fraction(plan.frame_count, target_fps)
         if (
             inputs.source_duration is not None
@@ -1324,6 +1329,10 @@ class FfmpegMediaAdapter:
                 "-x264-params",
                 "colorprim=bt709:transfer=bt709:colormatrix=bt709",
             ]
+        if disable_b_frames:
+            # A zero-reorder chunk timeline survives stream-copy concat
+            # without MP4 edit-list offsets at each output Part boundary.
+            arguments += ["-bf", "0"]
         arguments += [
             "-pix_fmt",
             "yuv420p",
@@ -1357,6 +1366,7 @@ class FfmpegMediaAdapter:
         *,
         target_fps: int = 30,
         encoder: str = "libx264",
+        disable_b_frames: bool = False,
         _anonymous: _AnonymousPosixRender | None = None,
     ) -> MediaDocument:
         if type(plan) is not RenderRequest:
@@ -1443,6 +1453,7 @@ class FfmpegMediaAdapter:
                 target_fps=target_fps,
                 destination=Path(str(output)),
                 encoder=encoder,
+                disable_b_frames=disable_b_frames,
             )
             arguments[arguments.index("-y")] = overwrite_policy
             if anonymous is not None:
@@ -1629,6 +1640,7 @@ class FfmpegMediaAdapter:
                 destination,
                 target_fps=target_fps,
                 encoder=encoder,
+                disable_b_frames=True,
                 _anonymous=anonymous,
             )
         finally:
@@ -1730,8 +1742,14 @@ class FfmpegMediaAdapter:
                     encoding="utf-8",
                     newline="",
                 ) as handle:
+                    handle.write("ffconcat version 1.0\n")
                     for source in sources:
                         handle.write(_concat_line(source))
+                        # Each encoded AAC chunk carries a negative priming
+                        # packet. Seeking each input to zero preserves the
+                        # intended media timeline instead of accumulating that
+                        # priming packet at every concat seam.
+                        handle.write("inpoint 0\n")
                     handle.flush()
                     os.fsync(handle.fileno())
             except OSError as exc:
