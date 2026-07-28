@@ -106,7 +106,12 @@ class CheckpointRestorer:
             )
             manifest = parse_manifest_bytes(raw)
             manifest_prefix = manifest.state_snapshot.key.parent.parent
-            if manifest_entry.key != manifest_prefix / "manifest-v1.json":
+            manifest_name = (
+                "manifest-v1.json"
+                if manifest.version == 1
+                else "manifest-v2.json"
+            )
+            if manifest_entry.key != manifest_prefix / manifest_name:
                 raise RestoreError("Restore manifest key does not match checkpoint layout")
 
             staging = Path(

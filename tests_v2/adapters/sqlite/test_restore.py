@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sqlite3
 import tempfile
@@ -103,6 +104,37 @@ class StagedSqliteRestoreTests(unittest.TestCase):
             self.artifact.relative_path,
         )
         self.assertEqual(layout.artifacts[0].remote, self.manifest.artifacts[0])
+
+    def test_inspects_v2_stable_object_layout(self) -> None:
+        token = hashlib.sha256(
+            self.job_id.value.encode("utf-8")
+        ).hexdigest()[:20]
+        object_prefix = PurePosixPath("objects", token)
+        input_entry = ManifestEntry(
+            object_prefix / "input" / self.archive.source.digest.sha256,
+            self.archive.source.digest,
+        )
+        artifact_entry = ManifestEntry(
+            object_prefix
+            / "workspace"
+            / self.artifact.relative_path
+            / self.artifact.sha256,
+            FileDigest(self.artifact.size_bytes, self.artifact.sha256),
+        )
+        manifest = replace(
+            self.manifest,
+            version=2,
+            input_archive=input_entry,
+            artifacts=(artifact_entry,),
+        )
+
+        layout = inspect_staged_state(self.path, manifest)
+
+        self.assertEqual(layout.input_remote, input_entry)
+        self.assertEqual(
+            layout.artifacts[0].remote,
+            artifact_entry,
+        )
 
     def test_rejects_corruption_future_schema_and_incomplete_integrity_result(self) -> None:
         corrupt = self.base / "corrupt.sqlite"

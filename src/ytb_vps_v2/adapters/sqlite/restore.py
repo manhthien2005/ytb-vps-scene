@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -27,6 +28,13 @@ from ytb_vps_v2.ports.backup import BackupStoreError
 
 class StagedRestoreError(RuntimeError):
     """Raised when staged SQLite state is not an exact restorable checkpoint."""
+
+
+def _object_prefix(job_id: JobId) -> PurePosixPath:
+    token = hashlib.sha256(
+        job_id.value.encode("utf-8")
+    ).hexdigest()[:20]
+    return PurePosixPath("objects", token)
 
 
 def _connection(path: Path, *, readonly: bool) -> sqlite3.Connection:
@@ -158,13 +166,26 @@ def inspect_staged_state(
 
         state_key = manifest.state_snapshot.key
         prefix = state_key.parent.parent
-        if (
-            state_key.name != "job-v2.sqlite"
-            or state_key.parent.name != "state"
-            or manifest.input_archive.key.parent.name != "input"
-            or manifest.input_archive.key.parent.parent != prefix
-        ):
+        if state_key.name != "job-v2.sqlite" or state_key.parent.name != "state":
             raise StagedRestoreError("Checkpoint object layout is invalid")
+        if manifest.version == 1:
+            if (
+                manifest.input_archive.key.parent.name != "input"
+                or manifest.input_archive.key.parent.parent != prefix
+            ):
+                raise StagedRestoreError(
+                    "Checkpoint object layout is invalid"
+                )
+        else:
+            expected_input = (
+                _object_prefix(manifest.job_id)
+                / "input"
+                / input_digest.sha256
+            )
+            if manifest.input_archive.key != expected_input:
+                raise StagedRestoreError(
+                    "Checkpoint object layout is invalid"
+                )
 
         unit_rows = connection.execute(
             "SELECT unit_key, stage, status FROM work_units WHERE job_id=?",
@@ -198,7 +219,17 @@ def inspect_staged_state(
         layout_artifacts: list[RestoreArtifact] = []
         expected_keys: set[str] = set()
         for artifact in stored_artifacts:
-            expected_key = prefix / "workspace" / artifact.relative_path
+            if manifest.version == 1:
+                expected_key = (
+                    prefix / "workspace" / artifact.relative_path
+                )
+            else:
+                expected_key = (
+                    _object_prefix(manifest.job_id)
+                    / "workspace"
+                    / artifact.relative_path
+                    / artifact.sha256
+                )
             expected_keys.add(str(expected_key))
             remote = remote_by_key.get(str(expected_key))
             expected_digest = FileDigest(artifact.size_bytes, artifact.sha256)

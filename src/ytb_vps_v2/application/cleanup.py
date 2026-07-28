@@ -131,7 +131,8 @@ class CleanupGuard:
         ) != canonical_digest:
             reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
         manifest_prefix = proof.manifest.state_snapshot.key.parent.parent
-        if proof.manifest_entry.key != manifest_prefix / "manifest-v1.json":
+        manifest_name = f"manifest-v{proof.manifest.version}.json"
+        if proof.manifest_entry.key != manifest_prefix / manifest_name:
             reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)
         if any(item.method != "sha256-readback" for item in proof.evidence):
             reasons.add(CleanupDenialReason.MISMATCHING_EVIDENCE)

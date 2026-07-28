@@ -464,8 +464,8 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             remote_entry = next(
                 entry
                 for entry in first.final_manifest.artifacts
-                if entry.key.parts[-len(artifact.relative_path.parts) :]
-                == artifact.relative_path.parts
+                if entry.digest.size_bytes == artifact.size_bytes
+                and entry.digest.sha256 == artifact.sha256
             )
             remote_path = self.remote_root.joinpath(*remote_entry.key.parts)
             original = remote_path.read_bytes()
@@ -676,7 +676,7 @@ class _CorruptProofStateOnFirstVerification:
         if (
             self.armed
             and self.proof_prefix is not None
-            and key == self.proof_prefix / "manifest-v1.json"
+            and key == self.proof_prefix / "manifest-v2.json"
         ):
             state_key = key.parent / "state" / "job-v2.sqlite"
             self.root.joinpath(*state_key.parts).write_bytes(b"corrupt proof state")
@@ -1359,7 +1359,9 @@ class OfflineSliceResumeTests(unittest.TestCase):
         finally:
             inspection.close()
 
-    def test_corrupt_final_side_artifact_rotates_to_additive_repair(self) -> None:
+    def test_corrupt_stable_side_artifact_fails_closed_without_overwrite(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -1369,30 +1371,18 @@ class OfflineSliceResumeTests(unittest.TestCase):
         side_entry = next(
             entry
             for entry in first.final_manifest.artifacts
-            if str(entry.key).endswith("artifacts/tts/voice.wav")
+            if entry.key.parts[-2] == "voice.wav"
         )
         side_path = remote.joinpath(*side_entry.key.parts)
         original = side_path.read_bytes()
         side_path.write_bytes(b"corrupt final side artifact")
 
-        repaired = runner.run(request)
+        with self.assertRaises(FreshWorkspaceRequired):
+            runner.run(request)
 
-        self.assertNotEqual(
-            repaired.final_manifest.checkpoint_id,
-            first.final_manifest.checkpoint_id,
-        )
-        self.assertTrue(repaired.final_manifest.checkpoint_id.endswith("-repair-1"))
-        repaired_side_entry = next(
-            entry
-            for entry in repaired.final_manifest.artifacts
-            if str(entry.key).endswith("artifacts/tts/voice.wav")
-        )
-        self.assertEqual(
-            remote.joinpath(*repaired_side_entry.key.parts).read_bytes(),
-            original,
-        )
+        self.assertNotEqual(original, b"corrupt final side artifact")
         self.assertEqual(side_path.read_bytes(), b"corrupt final side artifact")
-        self.assertEqual(len(repaired.final_manifest.artifacts), 11)
+        self.assertEqual(len(state.completed_checkpoints(request.job_id)), 2)
 
     def test_missing_or_corrupt_final_manifest_rotates_to_valid_repair(self) -> None:
         for damage in ("missing", "corrupt"):

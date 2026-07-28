@@ -146,8 +146,10 @@ class CheckpointManifest:
     created_at: str
 
     def __post_init__(self) -> None:
-        if type(self.version) is not int or self.version != 1:
-            raise DomainInvariantError("Checkpoint manifest version must be 1")
+        if type(self.version) is not int or self.version not in {1, 2}:
+            raise DomainInvariantError(
+                "Checkpoint manifest version must be 1 or 2"
+            )
         _text("Checkpoint ID", self.checkpoint_id, 128)
         if type(self.job_id) is not JobId:
             raise DomainInvariantError("Checkpoint job ID must be JobId")
