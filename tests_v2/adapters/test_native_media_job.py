@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from array import array
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -18,10 +18,14 @@ from ytb_vps_v2.adapters.native_media_job import (
 )
 from ytb_vps_v2.adapters.offline.providers import DeterministicWaveTtsProvider
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
-from ytb_vps_v2.application.media_job import MediaJobError, scene_blur_regions
+from ytb_vps_v2.application.media_job import (
+    MediaJobError,
+    MediaOutput,
+    scene_blur_regions,
+)
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
-from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
+from ytb_vps_v2.domain.models import JobId, Part, StageName, WorkStatus
 from ytb_vps_v2.domain.timeline import FrameInterval
 
 
@@ -261,7 +265,24 @@ class NativePipelineConfigurationTests(unittest.TestCase):
 
         def capture_run(_runner: object, request: object) -> object:
             captured.append(request)
-            return SimpleNamespace(workspace_root=request.workspace_root)
+            return SimpleNamespace(
+                workspace_root=request.workspace_root,
+                publication=SimpleNamespace(
+                    parts=(
+                        Part(
+                            1,
+                            1,
+                            FrameInterval(0, 360),
+                            (0,),
+                        ),
+                    ),
+                    part_paths=(
+                        PurePosixPath(
+                            "published/part-01-of-01.mp4"
+                        ),
+                    ),
+                ),
+            )
 
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
@@ -309,6 +330,7 @@ class NativePipelineConfigurationTests(unittest.TestCase):
 
         before, after = captured
         self.assertEqual(before.chunk_seconds, 300)
+        self.assertEqual(before.max_part_seconds, 1800)
         default_fingerprints = {
             item.stage: item.fingerprint
             for item in stage_config_fingerprints(EffectiveConfig())
@@ -543,7 +565,7 @@ class NativePipelineEndToEndTests(unittest.TestCase):
             "CapCutTtsProvider",
             return_value=DeterministicWaveTtsProvider(),
         ):
-            output = run_native_pipeline(
+            outputs = run_native_pipeline(
                 self.source,
                 self.root / "workspace",
                 settings,
@@ -551,6 +573,13 @@ class NativePipelineEndToEndTests(unittest.TestCase):
                 config=config,
             )
 
+        self.assertEqual(len(outputs), 1)
+        self.assertIs(type(outputs[0]), MediaOutput)
+        self.assertEqual(
+            (outputs[0].part_index, outputs[0].part_count),
+            (1, 1),
+        )
+        output = outputs[0].path
         self.assertTrue(output.is_file())
         self.assertAlmostEqual(
             duration(output),
@@ -597,7 +626,7 @@ class NativePipelineEndToEndTests(unittest.TestCase):
                 unit
                 for unit in state.work_units(JobId("native-e2e"))
                 if unit.key.startswith("render:")
-                and unit.key != "render:plan"
+                and unit.key[7:].isdigit()
             )
         finally:
             state.close()

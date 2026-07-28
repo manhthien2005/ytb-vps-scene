@@ -38,6 +38,7 @@ from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.media_job import (
     MediaJobError,
     MediaJobExecutor,
+    MediaOutput,
     scene_render_projection,
 )
 from ytb_vps_v2.application.offline_slice import OfflineSliceRequest, OfflineSliceRunner
@@ -119,7 +120,7 @@ def run_native_pipeline(
     job_id_value: str,
     *,
     config: EffectiveConfig | None = None,
-) -> Path:
+) -> tuple[MediaOutput, ...]:
     ffmpeg, ffprobe = _media_binaries()
     media = FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe)
     canonical_source, media_document = canonicalize_source(workspace, source)
@@ -181,10 +182,22 @@ def run_native_pipeline(
             verification_observed_at=1,
             blur_regions=projection.blur_regions,
             chunk_seconds=effective.media.chunk_seconds,
+            max_part_seconds=effective.render.max_part_seconds,
         ))
     finally:
         state.close()
-    return result.workspace_root / "published" / "part-001.mp4"
+    return tuple(
+        MediaOutput(
+            part.part_index,
+            part.part_count,
+            result.workspace_root.joinpath(*path.parts),
+        )
+        for part, path in zip(
+            result.publication.parts,
+            result.publication.part_paths,
+            strict=True,
+        )
+    )
 
 
 def create_native_media_executor(client: Any) -> MediaJobExecutor:
