@@ -221,12 +221,36 @@ class OfflineSliceRunner:
             if self.files.digest(request.source) != request.verified_input.archive.digest:
                 raise OfflineSliceError("Archived input failed exact digest verification")
             self.state.recover_stale_work(request.at)
-            self.state.create_job(
-                request.job_id,
-                Fingerprint(request.verified_input.source.digest.sha256),
-                request.config_fingerprints,
-                request.at,
+            source_fingerprint = Fingerprint(
+                request.verified_input.source.digest.sha256
             )
+            stored = self.state.stored_config_fingerprints(request.job_id)
+            if stored is None:
+                self.state.create_job(
+                    request.job_id,
+                    source_fingerprint,
+                    request.config_fingerprints,
+                    request.at,
+                )
+            else:
+                self.state.create_job(
+                    request.job_id,
+                    source_fingerprint,
+                    stored,
+                    request.at,
+                )
+                invalidation = plan_invalidation(
+                    stored,
+                    request.config_fingerprints,
+                )
+                if invalidation.affected_stages:
+                    self.state.reconfigure_job(
+                        request.job_id,
+                        stored,
+                        request.config_fingerprints,
+                        invalidation,
+                        request.at,
+                    )
             self.state.record_verified_input(request.job_id, request.verified_input)
             self._ensure_units(request)
             resumed = self._resume_workspace(request)

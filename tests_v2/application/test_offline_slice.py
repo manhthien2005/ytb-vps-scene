@@ -891,6 +891,53 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         return workspace, archive_root, remote, state, runner, request
 
+    def test_render_configuration_change_reconciles_before_resume(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _, _, _, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        first = runner.run(request)
+        changed_config = replace(
+            EffectiveConfig(),
+            render=replace(
+                EffectiveConfig().render,
+                profile_revision="render-v2",
+            ),
+        )
+        changed_fingerprints = stage_config_fingerprints(changed_config)
+        fresh = root / "fresh"
+        fresh.mkdir()
+
+        resumed = runner.run(
+            replace(
+                request,
+                config_fingerprints=changed_fingerprints,
+                fresh_workspace_root=fresh,
+            )
+        )
+
+        self.assertEqual(
+            state.stored_config_fingerprints(request.job_id),
+            changed_fingerprints,
+        )
+        before = {unit.stage: unit.attempts for unit in first.work_units}
+        after = {unit.stage: unit.attempts for unit in resumed.work_units}
+        for stage in (
+            StageName.INGEST,
+            StageName.OCR,
+            StageName.TRACK,
+            StageName.TRANSLATE,
+            StageName.TTS,
+        ):
+            self.assertEqual(after[stage], before[stage])
+        for stage in (
+            StageName.RENDER,
+            StageName.PUBLISH,
+            StageName.BACKUP,
+        ):
+            self.assertEqual(after[stage], before[stage] + 1)
+
     def test_corrupt_primary_invalidates_owner_and_recomputes_only_in_fresh_workspace(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

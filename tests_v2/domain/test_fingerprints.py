@@ -8,10 +8,19 @@ from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain import (
     Fingerprint,
+    RenderFingerprintInputs,
     fingerprint_value,
     stage_config_fingerprints,
 )
-from ytb_vps_v2.domain.models import PipelineMode, StageName
+from ytb_vps_v2.application.invalidation import plan_invalidation
+from ytb_vps_v2.domain.models import (
+    BlurRegion,
+    BoundingBox,
+    PipelineMode,
+    RegionKind,
+    StageName,
+)
+from ytb_vps_v2.domain.timeline import FrameInterval
 
 
 class FingerprintTests(unittest.TestCase):
@@ -88,6 +97,76 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(
             stage_config_fingerprints(baseline),
             stage_config_fingerprints(runtime_changed),
+        )
+
+    def test_render_inputs_change_only_render_and_its_downstream_closure(
+        self,
+    ) -> None:
+        render_inputs = RenderFingerprintInputs(
+            (
+                BlurRegion(
+                    RegionKind.STATIC,
+                    FrameInterval(0, 900),
+                    BoundingBox(0, 700, 1280, 720),
+                ),
+            ),
+            True,
+        )
+        baseline = stage_config_fingerprints(
+            EffectiveConfig(),
+            render_inputs=render_inputs,
+        )
+        changed = stage_config_fingerprints(
+            EffectiveConfig(),
+            render_inputs=replace(
+                render_inputs,
+                blur_regions=(
+                    replace(
+                        render_inputs.blur_regions[0],
+                        box=BoundingBox(0, 680, 1280, 720),
+                    ),
+                ),
+            ),
+        )
+
+        plan = plan_invalidation(baseline, changed)
+
+        self.assertEqual(plan.direct_stages, (StageName.RENDER,))
+        self.assertEqual(
+            plan.affected_stages,
+            (
+                StageName.RENDER,
+                StageName.PUBLISH,
+                StageName.BACKUP,
+            ),
+        )
+
+    def test_render_inputs_are_closed_and_chunk_size_joins_ocr_and_render(
+        self,
+    ) -> None:
+        with self.assertRaises(TypeError):
+            RenderFingerprintInputs(label="ui-only")  # type: ignore[call-arg]
+
+        baseline = EffectiveConfig()
+        changed = replace(
+            baseline,
+            media=replace(baseline.media, chunk_seconds=120),
+        )
+        before = {
+            item.stage: item.fingerprint
+            for item in stage_config_fingerprints(baseline)
+        }
+        after = {
+            item.stage: item.fingerprint
+            for item in stage_config_fingerprints(changed)
+        }
+        self.assertEqual(
+            tuple(
+                stage
+                for stage in StageName
+                if before[stage] != after[stage]
+            ),
+            (StageName.OCR, StageName.RENDER),
         )
 
     def test_unsupported_values_fail_instead_of_using_repr(self) -> None:

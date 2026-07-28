@@ -154,6 +154,156 @@ class SqliteStateStore:
             if stored != expected:
                 raise StateStoreError("Job configuration conflicts with stored snapshot")
 
+    def stored_config_fingerprints(
+        self,
+        job_id: JobId,
+    ) -> tuple[StageConfigFingerprint, ...] | None:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                return None
+            rows = self.connection.execute(
+                "SELECT stage, sha256 FROM config_fingerprints "
+                "WHERE job_id=? ORDER BY stage",
+                (job.value,),
+            ).fetchall()
+            values = {
+                StageName(row["stage"]): Fingerprint(row["sha256"])
+                for row in rows
+            }
+            if len(rows) != len(values) or set(values) != set(StageName):
+                raise StateStoreError(
+                    "Stored configuration snapshot is incomplete"
+                )
+            return tuple(
+                StageConfigFingerprint(stage, values[stage])
+                for stage in StageName
+            )
+        except StateStoreError:
+            raise
+        except (
+            sqlite3.DatabaseError,
+            DomainInvariantError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise StateStoreError(
+                "Unable to read stored configuration snapshot"
+            ) from exc
+
+    def reconfigure_job(
+        self,
+        job_id: JobId,
+        previous: tuple[StageConfigFingerprint, ...],
+        current: tuple[StageConfigFingerprint, ...],
+        plan: InvalidationPlan,
+        at: str,
+    ) -> tuple[str, ...]:
+        job = _job_id(job_id)
+        old = _config_snapshot(previous)
+        new = _config_snapshot(current)
+        if type(plan) is not InvalidationPlan:
+            raise StateStoreError("Invalidation must be InvalidationPlan")
+        direct = tuple(
+            stage
+            for stage in StageName
+            if old[stage] != new[stage]
+        )
+        if direct != plan.direct_stages:
+            raise StateStoreError(
+                "Invalidation does not match configuration change"
+            )
+        timestamp = _text("Reconfiguration timestamp", at, 128)
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = connection.execute(
+                "SELECT stage, sha256 FROM config_fingerprints "
+                "WHERE job_id=?",
+                (job.value,),
+            ).fetchall()
+            try:
+                stored = {
+                    StageName(row["stage"]): Fingerprint(row["sha256"])
+                    for row in rows
+                }
+            except (DomainInvariantError, ValueError, TypeError) as exc:
+                raise StateStoreError(
+                    "Stored configuration snapshot is invalid"
+                ) from exc
+            if len(rows) != len(stored) or set(stored) != set(StageName):
+                raise StateStoreError(
+                    "Stored configuration snapshot is incomplete"
+                )
+            if any(stored[stage] != old[stage] for stage in StageName):
+                raise StateStoreError(
+                    "Stored configuration changed before reconfiguration"
+                )
+
+            affected_rows: tuple[sqlite3.Row, ...] = ()
+            if plan.affected_stages:
+                stages = tuple(
+                    stage.value
+                    for stage in plan.affected_stages
+                )
+                placeholders = ",".join("?" for _ in stages)
+                affected_rows = tuple(
+                    connection.execute(
+                        f"SELECT unit_key FROM work_units WHERE job_id=? "
+                        f"AND stage IN ({placeholders}) AND status<>? "
+                        f"ORDER BY unit_key",
+                        (
+                            job.value,
+                            *stages,
+                            WorkStatus.INVALID.value,
+                        ),
+                    ).fetchall()
+                )
+                connection.execute(
+                    f"UPDATE work_units SET status=?, error_kind=NULL, "
+                    f"error_message=NULL, updated_at=? WHERE job_id=? "
+                    f"AND stage IN ({placeholders}) AND status<>?",
+                    (
+                        WorkStatus.INVALID.value,
+                        timestamp,
+                        job.value,
+                        *stages,
+                        WorkStatus.INVALID.value,
+                    ),
+                )
+                connection.execute(
+                    f"UPDATE artifacts SET is_valid=0 WHERE job_id=? "
+                    f"AND unit_key IN ("
+                    f"SELECT unit_key FROM work_units WHERE job_id=? "
+                    f"AND stage IN ({placeholders})"
+                    f") AND is_valid=1",
+                    (job.value, job.value, *stages),
+                )
+
+            for stage in StageName:
+                cursor = connection.execute(
+                    "UPDATE config_fingerprints SET sha256=? "
+                    "WHERE job_id=? AND stage=?",
+                    (new[stage].sha256, job.value, stage.value),
+                )
+                if cursor.rowcount != 1:
+                    raise StateStoreError(
+                        "Configuration snapshot changed during update"
+                    )
+            connection.execute(
+                "UPDATE jobs SET updated_at=? WHERE job_id=?",
+                (timestamp, job.value),
+            )
+            return tuple(row["unit_key"] for row in affected_rows)
+
     def record_verified_input(
         self,
         job_id: JobId,

@@ -24,6 +24,20 @@ class StateRepository(Protocol):
         at: str,
     ) -> None: ...
 
+    def stored_config_fingerprints(
+        self,
+        job_id: JobId,
+    ) -> tuple[StageConfigFingerprint, ...] | None: ...
+
+    def reconfigure_job(
+        self,
+        job_id: JobId,
+        previous: tuple[StageConfigFingerprint, ...],
+        current: tuple[StageConfigFingerprint, ...],
+        plan: InvalidationPlan,
+        at: str,
+    ) -> tuple[str, ...]: ...
+
     def record_verified_input(
         self, job_id: JobId, evidence: VerifiedInputArchive
     ) -> None: ...

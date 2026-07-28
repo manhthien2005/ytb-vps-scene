@@ -11,6 +11,7 @@ from ytb_vps_v2.domain.backup import (
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import (
     Fingerprint,
+    RenderFingerprintInputs,
     StageConfigFingerprint,
     fingerprint_value,
     stage_config_fingerprints,
@@ -100,6 +101,7 @@ __all__ = [
     "RENDER_CHUNK_PLAN_ARTIFACT_PATH",
     "RenderChunk",
     "RenderChunkPlanDocument",
+    "RenderFingerprintInputs",
     "RenderRequest",
     "RegionKind",
     "RenderPlanDocument",

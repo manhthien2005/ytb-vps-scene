@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
+from ytb_vps_v2.application.invalidation import plan_invalidation
 from ytb_vps_v2.domain.backup import (
     FileDigest,
     ManifestEntry,
@@ -137,6 +139,151 @@ class SqliteWorkUnitTests(unittest.TestCase):
                 changed_config,
                 "t3",
             )
+
+    def test_stored_configuration_and_atomic_reconfiguration_preserve_upstream(
+        self,
+    ) -> None:
+        self.assertIsNone(
+            self.store.stored_config_fingerprints(JobId("missing-job"))
+        )
+        self.assertEqual(
+            self.store.stored_config_fingerprints(self.job_id),
+            self.config,
+        )
+        for stage in (
+            StageName.OCR,
+            StageName.TTS,
+            StageName.RENDER,
+            StageName.PUBLISH,
+            StageName.BACKUP,
+        ):
+            self.store.put_work_unit(
+                self.job_id,
+                WorkUnit(stage.value.lower(), stage),
+                "planned",
+            )
+        changed = stage_config_fingerprints(
+            replace(
+                EffectiveConfig(),
+                render=replace(
+                    EffectiveConfig().render,
+                    profile_revision="render-v2",
+                ),
+            )
+        )
+        invalidation = plan_invalidation(self.config, changed)
+
+        affected = self.store.reconfigure_job(
+            self.job_id,
+            self.config,
+            changed,
+            invalidation,
+            "reconfigured",
+        )
+
+        self.assertEqual(
+            affected,
+            ("backup", "publish", "render"),
+        )
+        self.assertEqual(
+            self.store.stored_config_fingerprints(self.job_id),
+            changed,
+        )
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "ocr").status,
+            WorkStatus.PENDING,
+        )
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "tts").status,
+            WorkStatus.PENDING,
+        )
+        for key in ("render", "publish", "backup"):
+            self.assertIs(
+                self.store.get_work_unit(self.job_id, key).status,
+                WorkStatus.INVALID,
+            )
+
+    def test_stale_reconfiguration_changes_neither_hashes_nor_units(self) -> None:
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("render", StageName.RENDER),
+            "planned",
+        )
+        changed = stage_config_fingerprints(
+            replace(
+                EffectiveConfig(),
+                render=replace(
+                    EffectiveConfig().render,
+                    profile_revision="render-v2",
+                ),
+            )
+        )
+        invalidation = plan_invalidation(self.config, changed)
+
+        with self.assertRaises(StateStoreError):
+            self.store.reconfigure_job(
+                self.job_id,
+                changed,
+                changed,
+                invalidation,
+                "stale",
+            )
+
+        self.assertEqual(
+            self.store.stored_config_fingerprints(self.job_id),
+            self.config,
+        )
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "render").status,
+            WorkStatus.PENDING,
+        )
+
+    def test_reconfiguration_database_failure_rolls_back_hashes_and_units(
+        self,
+    ) -> None:
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit("render", StageName.RENDER),
+            "planned",
+        )
+        changed = stage_config_fingerprints(
+            replace(
+                EffectiveConfig(),
+                render=replace(
+                    EffectiveConfig().render,
+                    profile_revision="render-v2",
+                ),
+            )
+        )
+        invalidation = plan_invalidation(self.config, changed)
+        self.store.connection.executescript(
+            """
+            CREATE TRIGGER fail_render_fingerprint_update
+            BEFORE UPDATE ON config_fingerprints
+            WHEN NEW.stage='RENDER'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected config update failure');
+            END;
+            """
+        )
+
+        with self.assertRaises(StateStoreError):
+            self.store.reconfigure_job(
+                self.job_id,
+                self.config,
+                changed,
+                invalidation,
+                "failed",
+            )
+
+        self.assertEqual(
+            self.store.stored_config_fingerprints(self.job_id),
+            self.config,
+        )
+        self.assertIs(
+            self.store.get_work_unit(self.job_id, "render").status,
+            WorkStatus.PENDING,
+        )
 
     def test_failure_records_retry_and_retry_increments_attempt(self) -> None:
         self.store.put_work_unit(
