@@ -646,33 +646,46 @@ export function createWorkerControlPlaneRepository(
            select j.project_id
            from job_leases l join jobs j on j.id=l.job_id
            where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$9
+             and not exists(
+               select 1 from artifacts a
+               where a.job_id=$2 and a.kind='OUTPUT' and a.status<>'DELETED'
+                 and a.part_count<>$12
+             )
          ), existing as materialized (
-           select id from artifacts
-           where job_id=$2 and kind='OUTPUT' and status<>'DELETED'
-             and id=$1 and drive_file_id=$5 and drive_parent_id=$6
-             and expected_size_bytes=$7 and checksum_sha256=$8
+           select a.id,a.status from artifacts a
+           where a.job_id=$2 and a.kind='OUTPUT'
+             and a.status in ('PENDING','READY')
+             and a.id=$1 and a.drive_file_id=$5 and a.drive_parent_id=$6
+             and a.expected_size_bytes=$7 and a.checksum_sha256=$8
+             and a.part_index=$11 and a.part_count=$12
+             and exists(select 1 from eligible)
          ), superseded as (
-           /* A crashed attempt leaves a PENDING OUTPUT with a different content-derived
-              id; the partial unique index (one live OUTPUT per job) would otherwise
-              block every future reservation forever. A valid lease holder may retire it. */
+           /* A crashed attempt may leave one PENDING identity for this exact
+              Part. The active fence may replace only that Part; READY bytes and
+              other indexes are immutable. */
            update artifacts a set status='DELETED',updated_at=$9
            where a.job_id=$2 and a.kind='OUTPUT' and a.status='PENDING' and a.id<>$1
+             and a.part_index=$11 and a.part_count=$12
              and exists(select 1 from eligible)
              and not exists(select 1 from existing)
            returning a.id
          ), inserted as (
            insert into artifacts(
              id,project_id,job_id,kind,status,drive_file_id,drive_parent_id,
-             display_name,mime_type,expected_size_bytes,checksum_sha256,created_at,updated_at
+             display_name,mime_type,expected_size_bytes,checksum_sha256,
+             part_index,part_count,created_at,updated_at
            )
            select $1,e.project_id,$2,'OUTPUT','PENDING',$5,$6,
-                  $10,'video/mp4',$7,$8,$9,$9
+                  $10,'video/mp4',$7,$8,$11,$12,$9,$9
            from eligible e
            cross join (select count(*) as retired from superseded) s
            where not exists(select 1 from existing)
            on conflict do nothing returning id
          )
-         select 'REPLAY' as outcome from existing
+         select case status
+           when 'PENDING' then 'PENDING_REPLAY'
+           when 'READY' then 'READY_REPLAY'
+         end as outcome from existing
          union all select 'RESERVED' as outcome from inserted limit 1`,
         [
           input.artifactId,
@@ -684,19 +697,33 @@ export function createWorkerControlPlaneRepository(
           input.sizeBytes,
           input.checksumSha256,
           input.now.toISOString(),
-          outputPartFileName(1, 1),
+          outputPartFileName(input.partIndex, input.partCount),
+          input.partIndex,
+          input.partCount,
         ],
       );
       const outcome = result.rows[0]?.outcome;
-      return outcome === "RESERVED" || outcome === "REPLAY" ? outcome : "LEASE_LOST";
+      return (
+        outcome === "RESERVED" ||
+        outcome === "PENDING_REPLAY" ||
+        outcome === "READY_REPLAY"
+      ) ? outcome : "LEASE_LOST";
     },
 
     async completeOutput(input) {
       const replay = await sql.query(
         `select id from artifacts
          where id=$1 and job_id=$2 and kind='OUTPUT' and status='READY'
-           and drive_file_id=$3 and actual_size_bytes=$4`,
-        [input.artifactId, input.jobId, input.driveFileId, input.sizeBytes],
+           and drive_file_id=$3 and actual_size_bytes=$4
+           and part_index=$5 and part_count=$6`,
+        [
+          input.artifactId,
+          input.jobId,
+          input.driveFileId,
+          input.sizeBytes,
+          input.partIndex,
+          input.partCount,
+        ],
       );
       if (replay.rows.length === 1) return "REPLAY";
       const result = await sql.query(
@@ -704,16 +731,32 @@ export function createWorkerControlPlaneRepository(
            select l.job_id,l.worker_id,l.fencing_token
            from job_leases l
            where l.job_id=$2 and l.worker_id=$3 and l.fencing_token=$4 and l.expires_at>$7
-         ), artifact_done as (
+         ), artifact_done as materialized (
            update artifacts a set status='READY',actual_size_bytes=$6,verified_at=$7,updated_at=$7
            from eligible e
            where a.id=$1 and a.job_id=e.job_id and a.kind='OUTPUT' and a.status='PENDING'
              and a.drive_file_id=$5 and a.expected_size_bytes=$6
-           returning a.id
+             and a.part_index=$8 and a.part_count=$9
+           returning a.id,a.part_index,a.part_count
+         ), ready_parts as materialized (
+           select a.part_index,a.part_count
+           from artifacts a
+           where a.job_id=$2 and a.kind='OUTPUT' and a.status='READY'
+             and a.id<>$1
+           union all
+           select part_index,part_count from artifact_done
+         ), finalizable as materialized (
+           select 1 as ready
+           from ready_parts
+           having count(*)=$9
+             and count(distinct part_index)=$9
+             and min(part_index)=1
+             and max(part_index)=$9
+             and bool_and(part_count=$9)
          ), job_done as (
            update jobs j set state='COMPLETED',active_stage=null,progress_percent=100,
              completed_at=$7,updated_at=$7
-           from eligible e, artifact_done a
+           from eligible e, artifact_done a, finalizable f
            /* CANCEL_REQUESTED -> COMPLETED stays allowed by design (a cancel that
               lands after the upload started finishes the safest already-started
               operation), but a job already in a terminal state must never be
@@ -733,8 +776,17 @@ export function createWorkerControlPlaneRepository(
            delete from job_leases l using eligible e, job_done j
            where l.job_id=e.job_id and l.worker_id=e.worker_id
              and l.fencing_token=e.fencing_token returning l.job_id
-         ) select a.id from artifact_done a
-           cross join worker_ready w cross join attempt_done t cross join lease_deleted l`,
+         ), finalized as (
+           select j.id from job_done j
+             cross join worker_ready w
+             cross join attempt_done t
+             cross join lease_deleted l
+         )
+         select case
+           when exists(select 1 from finalized) then 'COMPLETED'
+           else 'PART_COMPLETED'
+         end as outcome
+         from artifact_done`,
         [
           input.artifactId,
           input.jobId,
@@ -743,9 +795,15 @@ export function createWorkerControlPlaneRepository(
           input.driveFileId,
           input.sizeBytes,
           input.now.toISOString(),
+          input.partIndex,
+          input.partCount,
         ],
       );
-      return result.rows.length === 1 ? "COMPLETED" : "LEASE_LOST";
+      const outcome = result.rows[0]?.outcome;
+      return (
+        outcome === "PART_COMPLETED" ||
+        outcome === "COMPLETED"
+      ) ? outcome : "LEASE_LOST";
     },
 
     async expireWorkersAndLeases(now: Date): Promise<void> {

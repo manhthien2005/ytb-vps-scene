@@ -38,6 +38,33 @@ describe("worker control plane repository", () => {
 
   afterEach(async () => db.close());
 
+  it("installs multipart OUTPUT identity migration v12", async () => {
+    const columns = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_name='artifacts'
+         and column_name in ('part_index','part_count')
+       order by column_name`,
+    );
+    expect(columns.rows).toEqual([
+      { column_name: "part_count" },
+      { column_name: "part_index" },
+    ]);
+    const indexes = await db.query<{ indexname: string; indexdef: string }>(
+      `select indexname,indexdef from pg_indexes
+       where tablename='artifacts' and indexname like '%live_output%'
+       order by indexname`,
+    );
+    expect(indexes.rows).toHaveLength(1);
+    expect(indexes.rows[0]?.indexdef).toContain(
+      "(job_id, part_index)",
+    );
+    await expect(
+      db.query(
+        "select version from schema_migrations where version=12",
+      ),
+    ).resolves.toMatchObject({ rows: [{ version: 12 }] });
+  });
+
   async function enrollWorker(suffix: string) {
     const tokenDigest = suffix.repeat(64).slice(0, 64);
     const sessionDigest = (suffix === "a" ? "c" : "d").repeat(64);
@@ -414,7 +441,7 @@ describe("worker control plane repository", () => {
     await expect(repository.claimJob(worker.id, NOW, "bridge-v2")).resolves.toBeNull();
   });
 
-  it("reserves and completes one output only under the active fence", async () => {
+  it("reserves and completes an exact multipart set under one fence", async () => {
     const worker = await enrollWorker("a");
     const projectId = await seedSourceReadyProject();
     const job = await repository.queueProjectJob({
@@ -436,30 +463,105 @@ describe("worker control plane repository", () => {
       fencingToken: 1,
       driveFileId: "drive-output-001",
       driveParentId: "drive-project-001",
+      partIndex: 1,
+      partCount: 2,
       sizeBytes: 1234,
       checksumSha256: "a".repeat(64),
       now: NOW,
     };
     await expect(repository.reserveOutput(reservation)).resolves.toBe("RESERVED");
-    await expect(repository.reserveOutput(reservation)).resolves.toBe("REPLAY");
+    await expect(repository.reserveOutput(reservation)).resolves.toBe("PENDING_REPLAY");
     await expect(repository.completeOutput({
       artifactId: reservation.artifactId,
       jobId: job!.id,
       workerId: worker.id,
       fencingToken: 1,
       driveFileId: "drive-output-001",
+      partIndex: 1,
+      partCount: 2,
+      sizeBytes: 1234,
+      now: NOW,
+    })).resolves.toBe("PART_COMPLETED");
+    await expect(repository.reserveOutput(reservation)).resolves.toBe("READY_REPLAY");
+    await expect(repository.reserveOutput({
+      ...reservation,
+      artifactId: "50000000-0000-4000-8000-000000000099",
+      driveFileId: "drive-output-changed",
+      checksumSha256: "f".repeat(64),
+    })).resolves.toBe("LEASE_LOST");
+
+    const intermediateJob = await db.query(
+      "select state from jobs where id=$1",
+      [job!.id],
+    );
+    expect(intermediateJob.rows[0]).not.toMatchObject({
+      state: "COMPLETED",
+    });
+    const intermediateWorker = await db.query(
+      "select state from workers where id=$1",
+      [worker.id],
+    );
+    expect(intermediateWorker.rows[0]).toMatchObject({ state: "BUSY" });
+    const intermediateAttempts = await db.query(
+      "select ended_at from job_attempts where job_id=$1 and worker_id=$2",
+      [job!.id, worker.id],
+    );
+    expect(intermediateAttempts.rows).toEqual([{ ended_at: null }]);
+    const intermediateLeases = await db.query(
+      "select fencing_token from job_leases where job_id=$1 and worker_id=$2",
+      [job!.id, worker.id],
+    );
+    expect(intermediateLeases.rows).toEqual([{ fencing_token: 1 }]);
+    await expect(repository.reserveOutput({
+      ...reservation,
+      artifactId: "50000000-0000-4000-8000-000000000002",
+      driveFileId: "drive-output-002",
+      partIndex: 2,
+      partCount: 3,
+    })).resolves.toBe("LEASE_LOST");
+
+    const second = {
+      ...reservation,
+      artifactId: "50000000-0000-4000-8000-000000000002",
+      driveFileId: "drive-output-002",
+      partIndex: 2,
+    };
+    await expect(repository.reserveOutput(second)).resolves.toBe("RESERVED");
+    await expect(repository.completeOutput({
+      artifactId: second.artifactId,
+      jobId: job!.id,
+      workerId: worker.id,
+      fencingToken: 1,
+      driveFileId: second.driveFileId,
+      partIndex: 2,
+      partCount: 2,
       sizeBytes: 1234,
       now: NOW,
     })).resolves.toBe("COMPLETED");
     await expect(repository.completeOutput({
-      artifactId: reservation.artifactId,
+      artifactId: second.artifactId,
       jobId: job!.id,
       workerId: worker.id,
       fencingToken: 1,
-      driveFileId: "drive-output-001",
+      driveFileId: second.driveFileId,
+      partIndex: 2,
+      partCount: 2,
       sizeBytes: 1234,
       now: NOW,
     })).resolves.toBe("REPLAY");
+
+    await db.exec(await readFile(new URL("../db/schema.sql", import.meta.url), "utf8"));
+    const preservedParts = await db.query(
+      `select part_index,part_count,status
+       from artifacts
+       where job_id=$1 and kind='OUTPUT'
+       order by part_index`,
+      [job!.id],
+    );
+    expect(preservedParts.rows).toEqual([
+      { part_index: 1, part_count: 2, status: "READY" },
+      { part_index: 2, part_count: 2, status: "READY" },
+    ]);
   });
 
   it("never claims a job whose READY source is gone, leaving no orphaned lease", async () => {
@@ -536,11 +638,19 @@ describe("worker control plane repository", () => {
       fencingToken: 1,
       driveFileId: "drive-output-001",
       driveParentId: "drive-project-001",
+      partIndex: 1,
+      partCount: 2,
       sizeBytes: 1234,
       checksumSha256: "b".repeat(64),
       now: NOW,
     };
     await expect(repository.reserveOutput(staleReservation)).resolves.toBe("RESERVED");
+    await expect(repository.reserveOutput({
+      ...staleReservation,
+      artifactId: "50000000-0000-4000-8000-000000000003",
+      driveFileId: "drive-output-002",
+      partIndex: 2,
+    })).resolves.toBe("RESERVED");
 
     // Retry after a crash re-renders the video: new checksum, new content-derived id.
     await expect(repository.reserveOutput({
@@ -557,6 +667,7 @@ describe("worker control plane repository", () => {
     expect(artifacts.rows).toEqual([
       { id: "50000000-0000-4000-8000-000000000001", status: "DELETED" },
       { id: "50000000-0000-4000-8000-000000000002", status: "PENDING" },
+      { id: "50000000-0000-4000-8000-000000000003", status: "PENDING" },
     ]);
   });
 

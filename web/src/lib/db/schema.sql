@@ -457,8 +457,13 @@ insert into schema_migrations(version) values (8) on conflict (version) do nothi
 
 -- migration v9: one fenced output artifact per media job
 alter table artifacts add column if not exists job_id text references jobs(id);
-create unique index if not exists artifacts_one_live_output_per_job_idx
-  on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 12) then
+    create unique index if not exists artifacts_one_live_output_per_job_idx
+      on artifacts(job_id) where kind='OUTPUT' and status <> 'DELETED';
+  end if;
+end $$;
 insert into schema_migrations(version) values (9) on conflict (version) do nothing;
 
 -- migration v10: durable job settings snapshots, telemetry, progress history,
@@ -740,3 +745,46 @@ create table if not exists youtube_channel_stats (
 );
 
 insert into schema_migrations(version) values (11) on conflict (version) do nothing;
+
+-- migration v12: one independently resumable OUTPUT artifact per media Part
+alter table artifacts add column if not exists part_index integer;
+alter table artifacts add column if not exists part_count integer;
+
+do $$
+begin
+  if not exists(select 1 from schema_migrations where version = 12) then
+    update artifacts
+    set part_index=1,part_count=1
+    where kind='OUTPUT'
+      and (part_index is distinct from 1 or part_count is distinct from 1);
+
+    update artifacts
+    set part_index=null,part_count=null
+    where kind<>'OUTPUT'
+      and (part_index is not null or part_count is not null);
+
+    alter table artifacts
+      drop constraint if exists artifacts_part_identity_check;
+    alter table artifacts
+      add constraint artifacts_part_identity_check check (
+        (
+          kind='OUTPUT'
+          and part_index between 1 and part_count
+          and part_count between 1 and 999
+        )
+        or
+        (
+          kind<>'OUTPUT'
+          and part_index is null
+          and part_count is null
+        )
+      );
+  end if;
+end $$;
+
+drop index if exists artifacts_one_live_output_per_job_idx;
+create unique index if not exists artifacts_one_live_output_per_job_part_idx
+  on artifacts(job_id,part_index)
+  where kind='OUTPUT' and status <> 'DELETED';
+
+insert into schema_migrations(version) values (12) on conflict (version) do nothing;
