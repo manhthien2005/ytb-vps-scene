@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import tempfile
 import unittest
+from dataclasses import replace
+from fractions import Fraction
 from pathlib import Path
 
-from ytb_vps_v2.application.media_job import MediaJobExecutor, MediaJobError, scene_blur_regions
+from ytb_vps_v2.application.invalidation import plan_invalidation
+from ytb_vps_v2.application.media_job import (
+    MediaJobError,
+    MediaJobExecutor,
+    scene_blur_regions,
+    scene_render_projection,
+)
+from ytb_vps_v2.domain.config import EffectiveConfig
+from ytb_vps_v2.domain.fingerprints import (
+    RenderFingerprintInputs,
+    stage_config_fingerprints,
+)
+from ytb_vps_v2.domain.models import StageName
 from ytb_vps_v2.domain.timeline import FrameInterval
 
 
@@ -75,6 +90,144 @@ def assignment(source_sha256: str) -> dict[str, object]:
             "sceneSettings": {"sourceSubtitle": {"x": 0.1, "y": 0.7, "width": 0.8, "height": 0.2}, "logo": {"x": 0.8, "y": 0.05, "width": 0.15, "height": 0.1}, "voice": "vi-VN-HoaiMyNeural", "rate": 1.0},
         },
     }
+
+
+def projection_settings() -> dict[str, object]:
+    return {
+        "version": 3,
+        "voice": "BV074_streaming",
+        "rate": 1.0,
+        "presetDisplayName": "Tin tức",
+        "regions": [
+            {
+                "id": "region-a",
+                "kind": "blur",
+                "label": "Phụ đề gốc",
+                "enabled": True,
+                "origin": "manual",
+                "rectangle": {
+                    "x": 0.1,
+                    "y": 0.7,
+                    "width": 0.8,
+                    "height": 0.2,
+                },
+                "timeRanges": None,
+            },
+        ],
+    }
+
+
+def scene_fingerprints(settings: dict[str, object]):
+    projection = scene_render_projection(
+        settings,
+        1920,
+        1080,
+        frame_count=900,
+    )
+    baseline = EffectiveConfig()
+    effective = replace(
+        baseline,
+        tts=replace(baseline.tts, rate=projection.tts_rate),
+    )
+    return stage_config_fingerprints(
+        effective,
+        render_inputs=RenderFingerprintInputs(
+            projection.blur_regions,
+            output_has_audio=True,
+        ),
+    )
+
+
+class SceneRenderProjectionTests(unittest.TestCase):
+    def test_mask_rectangle_changes_only_render_direct_fingerprint(self) -> None:
+        baseline = projection_settings()
+        changed = copy.deepcopy(baseline)
+        changed["regions"][0]["rectangle"]["x"] = 0.2  # type: ignore[index]
+
+        before = scene_fingerprints(baseline)
+        after = scene_fingerprints(changed)
+
+        self.assertEqual(
+            tuple(
+                previous.stage
+                for previous, current in zip(before, after, strict=True)
+                if previous.fingerprint != current.fingerprint
+            ),
+            (StageName.RENDER,),
+        )
+
+    def test_rate_changes_tts_and_downstream_but_not_ocr_or_translate(self) -> None:
+        baseline = projection_settings()
+        changed = copy.deepcopy(baseline)
+        changed["rate"] = 1.1
+
+        before = scene_fingerprints(baseline)
+        after = scene_fingerprints(changed)
+        invalidation = plan_invalidation(before, after)
+
+        self.assertEqual(invalidation.direct_stages, (StageName.TTS,))
+        self.assertEqual(
+            invalidation.affected_stages,
+            (
+                StageName.TTS,
+                StageName.RENDER,
+                StageName.PUBLISH,
+                StageName.BACKUP,
+            ),
+        )
+
+    def test_editor_metadata_does_not_change_content_fingerprints(self) -> None:
+        baseline = projection_settings()
+        changed = copy.deepcopy(baseline)
+        changed["presetDisplayName"] = "Bản tin buổi tối"
+        changed["regions"][0]["id"] = "replacement-id"  # type: ignore[index]
+        changed["regions"][0]["label"] = "Nhãn mới"  # type: ignore[index]
+        changed["regions"][0]["origin"] = "auto"  # type: ignore[index]
+
+        self.assertEqual(
+            scene_fingerprints(baseline),
+            scene_fingerprints(changed),
+        )
+
+    def test_scene_rate_is_exact_and_legacy_voices_are_compatible(self) -> None:
+        for voice in (
+            "BV074_streaming",
+            "vi-VN-HoaiMyNeural",
+            "vi-VN-NamMinhNeural",
+        ):
+            with self.subTest(voice=voice):
+                settings = projection_settings()
+                settings["voice"] = voice
+                settings["rate"] = "1.1"
+                projection = scene_render_projection(
+                    settings,
+                    1920,
+                    1080,
+                    frame_count=900,
+                )
+                self.assertEqual(projection.tts_rate, Fraction(11, 10))
+
+    def test_scene_rejects_unsupported_voice_and_out_of_range_rate(self) -> None:
+        invalid = (
+            {"voice": "another-voice"},
+            {"rate": 0.79},
+            {"rate": 1.21},
+            {"rate": True},
+        )
+        for changes in invalid:
+            with self.subTest(changes=changes):
+                settings = projection_settings()
+                settings.update(changes)
+                with self.assertRaises(MediaJobError):
+                    scene_render_projection(
+                        settings,
+                        1920,
+                        1080,
+                        frame_count=900,
+                    )
+
+    def test_production_default_chunk_size_remains_five_minutes(self) -> None:
+        self.assertEqual(EffectiveConfig().media.chunk_seconds, 300)
 
 
 class MediaJobTests(unittest.TestCase):

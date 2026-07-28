@@ -4,6 +4,7 @@ import hashlib
 import shutil
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
@@ -121,6 +122,29 @@ _LEGACY_KIND_MAP = {
     "logo": "channelLogo",
     "custom": "blur",
 }
+_CANONICAL_VOICE = "BV074_streaming"
+_VOICE_ALIASES = {
+    "vi-VN-HoaiMyNeural": _CANONICAL_VOICE,
+    "vi-VN-NamMinhNeural": _CANONICAL_VOICE,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SceneRenderProjection:
+    blur_regions: tuple[BlurRegion, ...]
+    tts_rate: Fraction
+
+    def __post_init__(self) -> None:
+        if type(self.blur_regions) is not tuple or any(
+            type(region) is not BlurRegion
+            for region in self.blur_regions
+        ):
+            raise MediaJobError("scene render regions are invalid")
+        if (
+            not isinstance(self.tts_rate, Fraction)
+            or not Fraction(4, 5) <= self.tts_rate <= Fraction(6, 5)
+        ):
+            raise MediaJobError("scene TTS rate must be between 0.8 and 1.2")
 
 
 def _regions_from_settings(
@@ -195,17 +219,31 @@ def _time_intervals(
     return tuple(intervals)
 
 
-def scene_blur_regions(
+def scene_render_projection(
     settings: Mapping[str, Any],
     width: int,
     height: int,
     *,
     frame_count: int,
-) -> tuple[BlurRegion, ...]:
+) -> SceneRenderProjection:
     if not isinstance(settings, Mapping):
         raise MediaJobError("scene settings are invalid")
     if not isinstance(frame_count, int) or isinstance(frame_count, bool) or frame_count < 1:
         raise MediaJobError("scene regions need a positive frame count")
+    voice = settings.get("voice", _CANONICAL_VOICE)
+    if not isinstance(voice, str):
+        raise MediaJobError("scene TTS voice is invalid")
+    if _VOICE_ALIASES.get(voice, voice) != _CANONICAL_VOICE:
+        raise MediaJobError("scene TTS voice is unsupported")
+    rate = settings.get("rate", 1)
+    if isinstance(rate, bool):
+        raise MediaJobError("scene TTS rate is invalid")
+    try:
+        tts_rate = Fraction(str(rate))
+    except (TypeError, ValueError, ZeroDivisionError) as error:
+        raise MediaJobError("scene TTS rate is invalid") from error
+    if not Fraction(4, 5) <= tts_rate <= Fraction(6, 5):
+        raise MediaJobError("scene TTS rate must be between 0.8 and 1.2")
     regions = []
     for index, item in enumerate(_regions_from_settings(settings)):
         if (
@@ -229,7 +267,22 @@ def scene_blur_regions(
                 frame_count=frame_count,
             )
         )
-    return tuple(regions)
+    return SceneRenderProjection(tuple(regions), tts_rate)
+
+
+def scene_blur_regions(
+    settings: Mapping[str, Any],
+    width: int,
+    height: int,
+    *,
+    frame_count: int,
+) -> tuple[BlurRegion, ...]:
+    return scene_render_projection(
+        settings,
+        width,
+        height,
+        frame_count=frame_count,
+    ).blur_regions
 
 
 class MediaJobExecutor:

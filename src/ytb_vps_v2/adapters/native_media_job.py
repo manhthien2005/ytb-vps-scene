@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,10 +35,17 @@ from ytb_vps_v2.adapters.offline.capcut_tts import CapCutTtsProvider
 from ytb_vps_v2.adapters.offline.providers import DeterministicOcrProvider, DeterministicTranslationProvider
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
-from ytb_vps_v2.application.media_job import MediaJobError, MediaJobExecutor, scene_blur_regions
+from ytb_vps_v2.application.media_job import (
+    MediaJobError,
+    MediaJobExecutor,
+    scene_render_projection,
+)
 from ytb_vps_v2.application.offline_slice import OfflineSliceRequest, OfflineSliceRunner
 from ytb_vps_v2.domain.config import EffectiveConfig
-from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
+from ytb_vps_v2.domain.fingerprints import (
+    RenderFingerprintInputs,
+    stage_config_fingerprints,
+)
 from ytb_vps_v2.domain.models import JobId
 
 
@@ -104,15 +112,39 @@ def canonicalize_source(workspace: Path, source: Path) -> tuple[Path, Any]:
     )
 
 
-def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, Any], job_id_value: str) -> Path:
+def run_native_pipeline(
+    source: Path,
+    workspace: Path,
+    settings: Mapping[str, Any],
+    job_id_value: str,
+    *,
+    config: EffectiveConfig | None = None,
+) -> Path:
     ffmpeg, ffprobe = _media_binaries()
     media = FfmpegMediaAdapter(ffmpeg=ffmpeg, ffprobe=ffprobe)
     canonical_source, media_document = canonicalize_source(workspace, source)
-    blur_regions = scene_blur_regions(
+    projection = scene_render_projection(
         settings,
         media_document.width,
         media_document.height,
         frame_count=media_document.frame_count,
+    )
+    baseline = EffectiveConfig() if config is None else config
+    if not isinstance(baseline, EffectiveConfig):
+        raise MediaJobError("native pipeline configuration is invalid")
+    effective = replace(
+        baseline,
+        tts=replace(
+            baseline.tts,
+            rate=projection.tts_rate,
+        ),
+    )
+    fingerprints = stage_config_fingerprints(
+        effective,
+        render_inputs=RenderFingerprintInputs(
+            projection.blur_regions,
+            output_has_audio=True,
+        ),
     )
     workspace.mkdir(parents=True, exist_ok=True)
     archive_root, remote_root, snapshot_root = workspace / "archive", workspace / "remote", workspace / "snapshots"
@@ -134,14 +166,21 @@ def run_native_pipeline(source: Path, workspace: Path, settings: Mapping[str, An
             media,
             DeterministicOcrProvider(),
             DeterministicTranslationProvider(target_language="vi"),
-            CapCutTtsProvider(rate=float(settings.get("rate", 1)), ffmpeg=ffmpeg),
+            CapCutTtsProvider(
+                voice=effective.tts.voice,
+                resource_id=effective.tts.resource_id,
+                rate=float(effective.tts.rate),
+                ffmpeg=ffmpeg,
+            ),
             LocalArtifactWriterFactory(), LocalPartPublisherFactory(), LocalFileDigestVerifier(),
         ).run(OfflineSliceRequest(
             job_id=job_id, source=archived_source, verified_input=archive,
-            config_fingerprints=stage_config_fingerprints(EffectiveConfig()),
+            config_fingerprints=fingerprints,
             workspace_root=pipeline_root, snapshot_dir=snapshot_root, output_has_audio=True,
             at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            verification_observed_at=1, blur_regions=blur_regions,
+            verification_observed_at=1,
+            blur_regions=projection.blur_regions,
+            chunk_seconds=effective.media.chunk_seconds,
         ))
     finally:
         state.close()

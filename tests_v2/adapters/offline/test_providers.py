@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 import wave
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from unittest.mock import patch
@@ -75,6 +76,20 @@ def track() -> TrackDocument:
 
 
 class DeterministicProviderTests(unittest.TestCase):
+    def test_deterministic_ocr_drops_fixture_cues_outside_short_media(self) -> None:
+        short = replace(
+            media(),
+            timeline=Timeline(12),
+            frame_count=360,
+        )
+
+        result = DeterministicOcrProvider().detect(short)
+
+        self.assertEqual(len(result.cues), 1)
+        self.assertTrue(
+            all(cue.interval.end_frame <= short.frame_count for cue in result.cues)
+        )
+
     def test_pipeline_ports_and_adapters_are_exported(self) -> None:
         for name in (
             "AdditiveObjectStore",

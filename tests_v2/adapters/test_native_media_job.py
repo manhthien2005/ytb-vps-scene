@@ -5,7 +5,9 @@ import subprocess
 import tempfile
 import unittest
 from array import array
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests_v2.support.fixtures import build_fixture, ffmpeg_available
@@ -15,7 +17,11 @@ from ytb_vps_v2.adapters.native_media_job import (
     run_native_pipeline,
 )
 from ytb_vps_v2.adapters.offline.providers import DeterministicWaveTtsProvider
+from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.media_job import MediaJobError, scene_blur_regions
+from ytb_vps_v2.domain.config import EffectiveConfig
+from ytb_vps_v2.domain.fingerprints import stage_config_fingerprints
+from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.timeline import FrameInterval
 
 
@@ -249,6 +255,94 @@ class SceneRegionTests(unittest.TestCase):
             )
 
 
+class NativePipelineConfigurationTests(unittest.TestCase):
+    def test_runner_passes_scene_identity_and_default_chunk_size(self) -> None:
+        captured = []
+
+        def capture_run(_runner: object, request: object) -> object:
+            captured.append(request)
+            return SimpleNamespace(workspace_root=request.workspace_root)
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            source = root_path / "source.mp4"
+            source.write_bytes(b"source")
+            settings = copy.deepcopy(V3_SETTINGS)
+            settings["voice"] = "vi-VN-HoaiMyNeural"
+            settings["rate"] = 1.1
+            with (
+                mock.patch.object(
+                    native_media_job,
+                    "canonicalize_source",
+                    return_value=(
+                        source,
+                        SimpleNamespace(
+                            width=320,
+                            height=180,
+                            frame_count=360,
+                        ),
+                    ),
+                ),
+                mock.patch.object(
+                    native_media_job.OfflineSliceRunner,
+                    "run",
+                    autospec=True,
+                    side_effect=capture_run,
+                ),
+                mock.patch.object(native_media_job, "CapCutTtsProvider"),
+            ):
+                run_native_pipeline(
+                    source,
+                    root_path / "workspace-a",
+                    settings,
+                    "native-config-a",
+                )
+
+                changed = copy.deepcopy(settings)
+                changed["regions"][0]["rectangle"]["width"] = 0.9
+                run_native_pipeline(
+                    source,
+                    root_path / "workspace-b",
+                    changed,
+                    "native-config-b",
+                )
+
+        before, after = captured
+        self.assertEqual(before.chunk_seconds, 300)
+        default_fingerprints = {
+            item.stage: item.fingerprint
+            for item in stage_config_fingerprints(EffectiveConfig())
+        }
+        actual_fingerprints = {
+            item.stage: item.fingerprint
+            for item in before.config_fingerprints
+        }
+        self.assertEqual(
+            actual_fingerprints[StageName.OCR],
+            default_fingerprints[StageName.OCR],
+        )
+        self.assertEqual(
+            actual_fingerprints[StageName.TRANSLATE],
+            default_fingerprints[StageName.TRANSLATE],
+        )
+        self.assertNotEqual(
+            actual_fingerprints[StageName.TTS],
+            default_fingerprints[StageName.TTS],
+        )
+        self.assertEqual(
+            tuple(
+                old.stage
+                for old, new in zip(
+                    before.config_fingerprints,
+                    after.config_fingerprints,
+                    strict=True,
+                )
+                if old.fingerprint != new.fingerprint
+            ),
+            (StageName.RENDER,),
+        )
+
+
 @unittest.skipUnless(ffmpeg_available(), "ffmpeg required")
 class CanonicalizeSourceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -316,13 +410,13 @@ class NativePipelineEndToEndTests(unittest.TestCase):
                 "lavfi",
                 "-i",
                 (
-                    "testsrc2=size=320x180:rate=30:duration=30,"
+                    "testsrc2=size=320x180:rate=30:duration=12,"
                     "noise=alls=40:allf=t+u"
                 ),
                 "-f",
                 "lavfi",
                 "-i",
-                "sine=frequency=440:sample_rate=48000:duration=30",
+                "sine=frequency=440:sample_rate=48000:duration=12",
                 "-map",
                 "0:v",
                 "-map",
@@ -427,6 +521,11 @@ class NativePipelineEndToEndTests(unittest.TestCase):
         return sum(differences) / len(differences)
 
     def test_native_pipeline_keeps_timeline_audio_and_timed_masks(self) -> None:
+        default = EffectiveConfig()
+        config = replace(
+            default,
+            media=replace(default.media, chunk_seconds=4),
+        )
         settings = copy.deepcopy(V3_SETTINGS)
         settings["regions"][0]["rectangle"] = {
             "x": 0.0,
@@ -449,13 +548,18 @@ class NativePipelineEndToEndTests(unittest.TestCase):
                 self.root / "workspace",
                 settings,
                 "native-e2e",
+                config=config,
             )
 
         self.assertTrue(output.is_file())
-        self.assertAlmostEqual(duration(output), duration(self.source), delta=0.2)
+        self.assertAlmostEqual(
+            duration(output),
+            duration(self.source),
+            delta=1 / 30,
+        )
         for energy in self.audio_energy(
             output,
-            ((0, 10), (10, 20), (20, 30)),
+            ((0, 4), (4, 8), (8, 12)),
         ):
             self.assertGreater(energy, 0.005)
         source_during = self.horizontal_detail(
@@ -485,3 +589,34 @@ class NativePipelineEndToEndTests(unittest.TestCase):
         retained_during = output_during / source_during
         retained_after = output_after / source_after
         self.assertGreater(retained_after, retained_during * 2)
+        state = SqliteStateStore(
+            self.root / "workspace" / "state" / "job-v2.sqlite"
+        )
+        try:
+            chunks = tuple(
+                unit
+                for unit in state.work_units(JobId("native-e2e"))
+                if unit.key.startswith("render:")
+                and unit.key != "render:plan"
+            )
+        finally:
+            state.close()
+        self.assertEqual(
+            tuple(unit.key for unit in chunks),
+            ("render:000000", "render:000001", "render:000002"),
+        )
+        self.assertTrue(
+            all(unit.status is WorkStatus.SUCCEEDED for unit in chunks)
+        )
+        for index in range(3):
+            self.assertTrue(
+                (
+                    self.root
+                    / "workspace"
+                    / "pipeline"
+                    / "artifacts"
+                    / "render"
+                    / "chunks"
+                    / f"chunk-{index:06d}.mp4"
+                ).is_file()
+            )
