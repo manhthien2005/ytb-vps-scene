@@ -41,7 +41,10 @@ for this workflow.
 
 1. Create a Neon Free project. Put `DATABASE_URL` only in Vercel Production and
    run `npm run db:migrate` from `web`. Run it a second time to confirm the
-   additive migration is idempotent.
+   additive migration is idempotent. Production repeats the same command on
+   every deploy through the build command in `web/vercel.json`; Vercel ships
+   code but never schema, and a deploy whose migration was forgotten fails at
+   the first authenticated page load, not at build time.
 2. Create one Google Cloud project, enable Google Drive API, and create a Web
    application OAuth client. Request only
    `https://www.googleapis.com/auth/drive.file`; broader scopes are unsupported.

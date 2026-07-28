@@ -4,10 +4,11 @@ import { createGoogleDriveFilesAdapter } from "@/lib/adapters/google/drive-files
 import { createGoogleOAuthAdapter } from "@/lib/adapters/google/oauth";
 import { beginDriveConnection } from "@/lib/application/drive-connection";
 import { parseServerEnv } from "@/lib/config/env";
+import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
 import { readStrictJson, requireAdmin, requireMutationOrigin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
     const oauth = createGoogleOAuthAdapter({
       clientId: env.googleOAuthClientId,
       clientSecret: env.googleOAuthClientSecret,
+      scopes: [DRIVE_FILE_SCOPE],
     });
     const result = await beginDriveConnection({
       redirectUri: `${env.appOrigin}/api/v1/drive/callback`,
@@ -41,7 +43,7 @@ export async function POST(request: NextRequest) {
       repository,
       oauth,
       files: createGoogleDriveFilesAdapter(),
-      cipher: createCredentialCipher(env.driveTokenKeyV1),
+      cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
     });
     return NextResponse.json(
       { authorizationUrl: result.authorizationUrl },

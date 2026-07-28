@@ -20,16 +20,44 @@ from ytb_vps_v2.domain.models import JobId
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
+V1_BYTES = (
+    b'{"artifacts":[{"key":"artifacts/a.json","sha256":"cccccccccccccccc'
+    b'cccccccccccccccccccccccccccccccccccccccccccccccc","size_bytes":3},'
+    b'{"key":"artifacts/z.json","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    b'bbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":4}],"checkpoint_id":'
+    b'"checkpoint-001","created_at":"2026-07-16T21:20:00+07:00",'
+    b'"input_archive":{"key":"inputs/aa/source.mp4","sha256":"aaaaaaaaaaaaaa'
+    b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5},'
+    b'"job_id":"job-001","source":{"name":"source.mp4","sha256":"aaaaaaaaaaaa'
+    b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5},'
+    b'"state_snapshot":{"key":"state/job-v2.sqlite","sha256":"bbbbbbbbbbbbbb'
+    b'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":9},'
+    b'"version":1}\n'
+)
+V2_BYTES = (
+    b'{"artifacts":[{"key":"artifacts/a.json","sha256":"cccccccccccccccc'
+    b'cccccccccccccccccccccccccccccccccccccccccccccccc","size_bytes":3},'
+    b'{"key":"artifacts/z.json","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    b'bbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":4}],"checkpoint_id":'
+    b'"checkpoint-001","created_at":"2026-07-16T21:20:00+07:00",'
+    b'"input_archive":{"key":"inputs/aa/source.mp4","sha256":"aaaaaaaaaaaaaa'
+    b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5},'
+    b'"job_id":"job-001","source":{"name":"source.mp4","sha256":"aaaaaaaaaaaa'
+    b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size_bytes":5},'
+    b'"state_snapshot":{"key":"state/job-v2.sqlite","sha256":"bbbbbbbbbbbbbb'
+    b'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":9},'
+    b'"version":2}\n'
+)
 
 
 def entry(key: str, size: int, sha256: str) -> ManifestEntry:
     return ManifestEntry(PurePosixPath(key), FileDigest(size, sha256))
 
 
-def manifest() -> CheckpointManifest:
+def manifest(version: int = 1) -> CheckpointManifest:
     source = SourceIdentity("source.mp4", FileDigest(5, SHA_A))
     return CheckpointManifest(
-        version=1,
+        version=version,
         checkpoint_id="checkpoint-001",
         job_id=JobId("job-001"),
         source=source,
@@ -129,17 +157,19 @@ class BackupValueTests(unittest.TestCase):
 
     def test_rejects_wrong_manifest_version_and_nested_types(self) -> None:
         base = manifest()
-        with self.assertRaises(DomainInvariantError):
-            CheckpointManifest(
-                2,
-                base.checkpoint_id,
-                base.job_id,
-                base.source,
-                base.input_archive,
-                base.state_snapshot,
-                base.artifacts,
-                base.created_at,
-            )
+        for version in (0, 3, True):
+            with self.subTest(version=version):
+                with self.assertRaises(DomainInvariantError):
+                    CheckpointManifest(
+                        version,
+                        base.checkpoint_id,
+                        base.job_id,
+                        base.source,
+                        base.input_archive,
+                        base.state_snapshot,
+                        base.artifacts,
+                        base.created_at,
+                    )
         with self.assertRaises(DomainInvariantError):
             CheckpointManifest(
                 1,
@@ -154,6 +184,20 @@ class BackupValueTests(unittest.TestCase):
 
 
 class ManifestSerializationTests(unittest.TestCase):
+    def test_versions_one_and_two_have_pinned_canonical_bytes(self) -> None:
+        self.assertEqual(canonical_manifest_bytes(manifest(1)), V1_BYTES)
+        self.assertEqual(canonical_manifest_bytes(manifest(2)), V2_BYTES)
+        self.assertEqual(parse_manifest_bytes(V1_BYTES).version, 1)
+        self.assertEqual(parse_manifest_bytes(V2_BYTES).version, 2)
+        self.assertEqual(
+            canonical_manifest_bytes(parse_manifest_bytes(V1_BYTES)),
+            V1_BYTES,
+        )
+        self.assertEqual(
+            canonical_manifest_bytes(parse_manifest_bytes(V2_BYTES)),
+            V2_BYTES,
+        )
+
     def test_round_trip_is_canonical_utf8_with_one_trailing_newline(self) -> None:
         expected = manifest()
 

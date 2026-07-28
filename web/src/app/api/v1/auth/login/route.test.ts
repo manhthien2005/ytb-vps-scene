@@ -138,6 +138,7 @@ describe("POST /api/v1/auth/login", () => {
     Object.assign(process.env, {
       NODE_ENV: "production",
       APP_ORIGIN: "https://example.vercel.app",
+      YOUTUBE_TOKEN_KEY_V1: "A".repeat(43),
     });
     const response = await POST(request("https://example.vercel.app", "correct private key"));
     const cookie = response.headers.get("set-cookie");

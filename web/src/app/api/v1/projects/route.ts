@@ -6,7 +6,7 @@ import { createDriveAccessProvider } from "@/lib/application/drive-access";
 import { createProjectService, type ProjectService } from "@/lib/application/projects";
 import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
 import { AppError } from "@/lib/domain/errors";
-import type { Project } from "@/lib/domain/drive";
+import { DRIVE_FILE_SCOPE, type Project } from "@/lib/domain/drive";
 import {
   HttpError,
   readStrictJson,
@@ -14,7 +14,7 @@ import {
   requireMutationOrigin,
 } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -61,11 +61,12 @@ function projectService(env: ServerEnv): ProjectService {
   const oauth = createGoogleOAuthAdapter({
     clientId: env.googleOAuthClientId,
     clientSecret: env.googleOAuthClientSecret,
+    scopes: [DRIVE_FILE_SCOPE],
   });
   const access = createDriveAccessProvider({
     repository,
     oauth,
-    cipher: createCredentialCipher(env.driveTokenKeyV1),
+    cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
   });
   return createProjectService({
     repository,

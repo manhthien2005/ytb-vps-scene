@@ -114,6 +114,33 @@ class CleanupGuardTests(unittest.TestCase):
         self.assertFalse(hasattr(self.guard, "delete"))
         self.assertFalse(hasattr(self.guard, "remove"))
 
+    def test_manifest_v2_uses_its_matching_canonical_evidence_name(self) -> None:
+        manifest = replace(self.manifest, version=2)
+        raw = canonical_manifest_bytes(manifest)
+        manifest_entry = ManifestEntry(
+            PurePosixPath(
+                "checkpoints/job-1/cp-1/manifest-v2.json"
+            ),
+            FileDigest(
+                len(raw),
+                hashlib.sha256(raw).hexdigest(),
+            ),
+        )
+        evidence = tuple(
+            replace(item, entry=manifest_entry)
+            if item.entry == self.manifest_entry
+            else item
+            for item in self.evidence
+        )
+        proof = replace(
+            self.proof,
+            manifest=manifest,
+            manifest_entry=manifest_entry,
+            evidence=evidence,
+        )
+
+        self.assertTrue(self._assess(proof).allowed)
+
     def test_missing_or_mismatching_manifest_state_and_artifact_evidence_denies(self) -> None:
         protected = (
             self.manifest_entry,

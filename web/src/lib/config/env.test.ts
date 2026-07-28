@@ -10,6 +10,7 @@ const cp2Valid = {
   GOOGLE_OAUTH_CLIENT_ID: "example-client-id",
   GOOGLE_OAUTH_CLIENT_SECRET: "example-client-secret",
   DRIVE_TOKEN_KEY_V1: "A".repeat(43),
+  YOUTUBE_TOKEN_KEY_V1: "A".repeat(43),
   NEON_STORAGE_LIMIT_BYTES: "536870912",
   DRIVE_UPLOAD_MAX_BYTES: "10737418240",
   FREE_TIER_SOFT_PERCENT: "90",
@@ -98,5 +99,21 @@ describe("parseServerEnv", () => {
     ["WORKER_PIPELINE_BRIDGE_VERSION", "contains spaces"],
   ])("rejects unsafe %s", (name, value) => {
     expect(() => parseServerEnv({ ...cp2Valid, [name]: value })).toThrow();
+  });
+
+  it("requires YOUTUBE_TOKEN_KEY_V1 to encode exactly 32 bytes", () => {
+    expect(() => parseServerEnv({ ...cp2Valid, YOUTUBE_TOKEN_KEY_V1: "short" })).toThrow();
+    expect(parseServerEnv(cp2Valid).youtubeTokenKeyV1).toBe(cp2Valid.YOUTUBE_TOKEN_KEY_V1);
+  });
+
+  it("rejects missing YOUTUBE_TOKEN_KEY_V1 in production", () => {
+    const { YOUTUBE_TOKEN_KEY_V1, ...missingYoutubeKey } = cp2Valid;
+    expect(() => parseServerEnv(missingYoutubeKey)).toThrow();
+  });
+
+  it("accepts missing YOUTUBE_TOKEN_KEY_V1 in development with default", () => {
+    const { YOUTUBE_TOKEN_KEY_V1, ...missingYoutubeKey } = { ...cp2Valid, NODE_ENV: "development" };
+    const env = parseServerEnv(missingYoutubeKey);
+    expect(env.youtubeTokenKeyV1).toBe("E".repeat(43));
   });
 });

@@ -5,7 +5,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
 from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
-from ytb_vps_v2.domain.models import Part
+from ytb_vps_v2.domain.models import Part, RenderChunk
 from ytb_vps_v2.domain.pipeline import (
     MediaDocument,
     OcrDocument,
@@ -80,6 +80,22 @@ class MediaPipeline(Protocol):
         self,
         source: Path,
         tts_wav: Path,
+        plan: RenderRequest,
+        destination: Path,
+    ) -> MediaDocument: ...
+
+    def render_chunk(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        chunk: RenderChunk,
+        destination: Path,
+    ) -> MediaDocument: ...
+
+    def concatenate_render_chunks(
+        self,
+        chunks: tuple[Path, ...],
         plan: RenderRequest,
         destination: Path,
     ) -> MediaDocument: ...

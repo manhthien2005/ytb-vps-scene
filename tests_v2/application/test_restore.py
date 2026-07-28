@@ -12,11 +12,16 @@ from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity, digest_
 from ytb_vps_v2.adapters.filesystem import integrity as integrity_module
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
+from ytb_vps_v2.adapters.sqlite.schema import SCHEMA_VERSION
 from ytb_vps_v2.application import restore as restore_module
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
 from ytb_vps_v2.application.restore import CheckpointRestorer, RestoreError
 from ytb_vps_v2.domain.config import EffectiveConfig
-from ytb_vps_v2.domain.backup import canonical_manifest_bytes
+from ytb_vps_v2.domain.backup import (
+    CheckpointManifest,
+    ManifestEntry,
+    canonical_manifest_bytes,
+)
 from ytb_vps_v2.domain.fingerprints import Fingerprint, stage_config_fingerprints
 from ytb_vps_v2.domain.models import Artifact, JobId, StageName, WorkUnit
 from ytb_vps_v2.ports.backup import BackupStoreError
@@ -106,6 +111,66 @@ class CheckpointRestorerTests(unittest.TestCase):
     def _temporary_restore_paths(self) -> tuple[Path, ...]:
         return tuple(self.restore_parent.glob(".*.restore-*"))
 
+    def _publish_v1_fixture(
+        self,
+    ) -> tuple[CheckpointManifest, ManifestEntry]:
+        prefix = PurePosixPath("checkpoints/legacy-job/legacy-cp")
+        input_entry = ManifestEntry(
+            prefix / "input" / self.archive.source.name,
+            self.archive.source.digest,
+        )
+        artifact_entry = ManifestEntry(
+            prefix / "workspace" / self.artifact.relative_path,
+            digest_file(
+                self.workspace.joinpath(*self.artifact.relative_path.parts)
+            ),
+        )
+        snapshot_dir = self.snapshot_root / "legacy-v1"
+        snapshot_dir.mkdir()
+        snapshot_path = snapshot_dir / "job-v2.sqlite"
+        state_entry = self.state.create_snapshot(
+            snapshot_path,
+            prefix / "state" / "job-v2.sqlite",
+        )
+        self.store.put(
+            self.archive_root.joinpath(*self.archive.archive.key.parts),
+            input_entry.key,
+            input_entry.digest,
+        )
+        self.store.put(
+            self.workspace.joinpath(*self.artifact.relative_path.parts),
+            artifact_entry.key,
+            artifact_entry.digest,
+        )
+        self.store.put(
+            snapshot_path,
+            state_entry.key,
+            state_entry.digest,
+        )
+        manifest = CheckpointManifest(
+            1,
+            "legacy-cp",
+            self.job_id,
+            self.archive.source,
+            input_entry,
+            state_entry,
+            (artifact_entry,),
+            "legacy-time",
+        )
+        raw = canonical_manifest_bytes(manifest)
+        manifest_path = snapshot_dir / "manifest-v1.json"
+        manifest_path.write_bytes(raw)
+        manifest_entry = ManifestEntry(
+            prefix / "manifest-v1.json",
+            digest_file(manifest_path),
+        )
+        self.store.put(
+            manifest_path,
+            manifest_entry.key,
+            manifest_entry.digest,
+        )
+        return manifest, manifest_entry
+
     def test_restores_real_checkpoint_into_absent_target(self) -> None:
         target = self.restore_parent / "job-restored"
 
@@ -119,7 +184,7 @@ class CheckpointRestorerTests(unittest.TestCase):
         self.assertEqual(result.job_id, self.job_id)
         self.assertEqual(result.checkpoint_id, self.manifest.checkpoint_id)
         self.assertEqual(result.artifact_count, 1)
-        self.assertEqual(result.schema_version, 2)
+        self.assertEqual(result.schema_version, SCHEMA_VERSION)
         self.assertIsNone(result.migrated_from)
         self.assertEqual(
             (target / "archive").joinpath(*self.archive.archive.key.parts).read_bytes(),
@@ -131,6 +196,35 @@ class CheckpointRestorerTests(unittest.TestCase):
         )
         self.assertTrue((target / "job-v2.sqlite").is_file())
         self.assertEqual(self._temporary_restore_paths(), ())
+
+    def test_restores_real_v1_checkpoint_into_the_same_local_layout(
+        self,
+    ) -> None:
+        manifest, manifest_entry = self._publish_v1_fixture()
+        target = self.restore_parent / "job-restored-v1"
+
+        result = self.restorer.restore(
+            manifest_entry,
+            target,
+            self.restore_parent,
+            100,
+        )
+
+        self.assertEqual(result.checkpoint_id, manifest.checkpoint_id)
+        self.assertEqual(
+            (target / "archive").joinpath(
+                *self.archive.archive.key.parts
+            ).read_bytes(),
+            self.source.read_bytes(),
+        )
+        self.assertEqual(
+            (target / "workspace").joinpath(
+                *self.artifact.relative_path.parts
+            ).read_bytes(),
+            self.workspace.joinpath(
+                *self.artifact.relative_path.parts
+            ).read_bytes(),
+        )
 
     def test_existing_target_is_untouched(self) -> None:
         target = self.restore_parent / "active-job"

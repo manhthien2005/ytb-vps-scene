@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { issueOAuthState } from "@/lib/security/oauth-state";
 import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control-plane";
 import { FakeGoogleDriveFiles, FakeGoogleDriveOAuth } from "@/test/fakes/fake-google-drive";
@@ -35,7 +35,7 @@ function dependencies(repository = new FakeDriveControlPlaneRepository(() => NOW
     repository,
     oauth: new FakeGoogleDriveOAuth(),
     files: new FakeGoogleDriveFiles(),
-    cipher: createCredentialCipher(TOKEN_KEY),
+    cipher: createCredentialCipher(TOKEN_KEY, DRIVE_CIPHER_PROFILE),
   };
 }
 
@@ -348,6 +348,7 @@ describe("disconnectDrive", () => {
     const oauth = createGoogleOAuthAdapter({
       clientId: "google-client-id.apps.googleusercontent.com",
       clientSecret: "private-client-secret",
+      scopes: [DRIVE_FILE_SCOPE],
       fetcher,
     });
 

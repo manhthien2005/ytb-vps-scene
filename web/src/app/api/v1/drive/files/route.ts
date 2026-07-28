@@ -8,10 +8,11 @@ import {
   type DriveWorkspaceService,
 } from "@/lib/application/drive-workspace";
 import { parseServerEnv, type ServerEnv } from "@/lib/config/env";
+import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError, publicErrorBody } from "@/lib/domain/errors";
 import { requireAdmin } from "@/lib/http/requests";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { redactSecrets } from "@/lib/security/redact";
 
 export const runtime = "nodejs";
@@ -37,11 +38,12 @@ function workspaceService(env: ServerEnv): DriveWorkspaceService {
   const oauth = createGoogleOAuthAdapter({
     clientId: env.googleOAuthClientId,
     clientSecret: env.googleOAuthClientSecret,
+    scopes: [DRIVE_FILE_SCOPE],
   });
   const access = createDriveAccessProvider({
     repository,
     oauth,
-    cipher: createCredentialCipher(env.driveTokenKeyV1),
+    cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
   });
   return createDriveWorkspaceService({
     repository,

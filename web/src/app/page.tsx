@@ -7,12 +7,12 @@ import { createDriveAccessProvider } from "@/lib/application/drive-access";
 import { createFreeTierHealthService } from "@/lib/application/free-tier-health";
 import { currentAdmin } from "@/lib/auth/current-admin";
 import { parseServerEnv } from "@/lib/config/env";
-import type { Project } from "@/lib/domain/drive";
+import { DRIVE_FILE_SCOPE, type Project } from "@/lib/domain/drive";
 import type { UsageSnapshot } from "@/lib/ports/drive";
 import { createNeonControlPlaneRepository } from "@/lib/repositories/neon-control-plane";
 import { createNeonDriveControlPlaneRepository } from "@/lib/repositories/neon-drive-control-plane";
 import { createNeonWorkerControlPlaneRepository } from "@/lib/repositories/neon-worker-control-plane";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 
 export const dynamic = "force-dynamic";
 
@@ -63,11 +63,12 @@ export default async function HomePage() {
   const oauth = createGoogleOAuthAdapter({
     clientId: env.googleOAuthClientId,
     clientSecret: env.googleOAuthClientSecret,
+    scopes: [DRIVE_FILE_SCOPE],
   });
   const access = createDriveAccessProvider({
     repository,
     oauth,
-    cipher: createCredentialCipher(env.driveTokenKeyV1),
+    cipher: createCredentialCipher(env.driveTokenKeyV1, DRIVE_CIPHER_PROFILE),
   });
   const healthService = createFreeTierHealthService({
     repository,

@@ -17,7 +17,10 @@ vi.mock("@/lib/repositories/neon-drive-control-plane", () => ({
 vi.mock("@/lib/application/drive-access", () => ({ createDriveAccessProvider: () => ({ kind: "access" }) }));
 vi.mock("@/lib/adapters/google/oauth", () => ({ createGoogleOAuthAdapter: () => ({ kind: "oauth" }) }));
 vi.mock("@/lib/adapters/google/drive-files", () => ({ createGoogleDriveFilesAdapter: () => ({ kind: "files" }) }));
-vi.mock("@/lib/security/credential-cipher", () => ({ createCredentialCipher: () => ({ kind: "cipher" }) }));
+vi.mock("@/lib/security/credential-cipher", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/security/credential-cipher")>()),
+  createCredentialCipher: () => ({ kind: "cipher" }),
+}));
 
 import { POST } from "./route";
 

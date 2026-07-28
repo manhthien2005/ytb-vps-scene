@@ -11,6 +11,7 @@ from ytb_vps_v2.domain.backup import (
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import (
     Fingerprint,
+    RenderFingerprintInputs,
     StageConfigFingerprint,
     fingerprint_value,
     stage_config_fingerprints,
@@ -25,6 +26,7 @@ from ytb_vps_v2.domain.models import (
     JobId,
     Part,
     PipelineMode,
+    RenderChunk,
     RegionKind,
     StageName,
     WorkStatus,
@@ -37,6 +39,8 @@ from ytb_vps_v2.domain.pipeline import (
     OcrDocument,
     PipelineDocument,
     PublicationDocument,
+    RENDER_CHUNK_PLAN_ARTIFACT_PATH,
+    RenderChunkPlanDocument,
     RenderRequest,
     RenderPlanDocument,
     TrackDocument,
@@ -47,10 +51,15 @@ from ytb_vps_v2.domain.pipeline import (
     parse_media_document_bytes,
     parse_ocr_document_bytes,
     parse_publication_document_bytes,
+    parse_render_chunk_plan_document_bytes,
     parse_render_plan_document_bytes,
     parse_track_document_bytes,
     parse_translation_document_bytes,
     parse_tts_document_bytes,
+)
+from ytb_vps_v2.domain.render_chunks import (
+    plan_render_chunks,
+    single_part_for_chunks,
 )
 from ytb_vps_v2.domain.restore import (
     CleanupDecision,
@@ -89,6 +98,10 @@ __all__ = [
     "PipelineMode",
     "PipelineDocument",
     "PublicationDocument",
+    "RENDER_CHUNK_PLAN_ARTIFACT_PATH",
+    "RenderChunk",
+    "RenderChunkPlanDocument",
+    "RenderFingerprintInputs",
     "RenderRequest",
     "RegionKind",
     "RenderPlanDocument",
@@ -119,9 +132,12 @@ __all__ = [
     "parse_media_document_bytes",
     "parse_ocr_document_bytes",
     "parse_publication_document_bytes",
+    "parse_render_chunk_plan_document_bytes",
     "parse_render_plan_document_bytes",
     "parse_track_document_bytes",
     "parse_translation_document_bytes",
     "parse_tts_document_bytes",
+    "plan_render_chunks",
+    "single_part_for_chunks",
     "to_fraction",
 ]

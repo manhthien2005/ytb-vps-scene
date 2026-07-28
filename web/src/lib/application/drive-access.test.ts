@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { DRIVE_FILE_SCOPE } from "@/lib/domain/drive";
 import { AppError } from "@/lib/domain/errors";
-import { createCredentialCipher } from "@/lib/security/credential-cipher";
+import { createCredentialCipher, DRIVE_CIPHER_PROFILE } from "@/lib/security/credential-cipher";
 import { FakeDriveControlPlaneRepository } from "@/test/fakes/fake-drive-control-plane";
 import { FakeGoogleDriveOAuth } from "@/test/fakes/fake-google-drive";
 import { createDriveAccessProvider } from "./drive-access";
@@ -15,7 +15,7 @@ function sha256(value: string): string {
 
 async function connected() {
   const repository = new FakeDriveControlPlaneRepository();
-  const cipher = createCredentialCipher(TOKEN_KEY);
+  const cipher = createCredentialCipher(TOKEN_KEY, DRIVE_CIPHER_PROFILE);
   const oauth = new FakeGoogleDriveOAuth();
   await repository.saveConnectedCredential({
     status: "CONNECTED",

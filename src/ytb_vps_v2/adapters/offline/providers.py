@@ -41,19 +41,35 @@ class DeterministicOcrProvider:
     def detect(self, media: MediaDocument) -> OcrDocument:
         if type(media) is not MediaDocument:
             raise ProviderError("OCR input must be a MediaDocument")
-        cues = (
-            Cue(
-                1,
-                FrameInterval(90, 240),
-                BoundingBox(32, 126, 288, 154),
-                "OFFLINE CUE ONE",
-            ),
-            Cue(
-                2,
-                FrameInterval(450, 660),
-                BoundingBox(48, 120, 272, 150),
-                "OFFLINE CUE TWO",
-            ),
+        fixture_cues = (
+            (
+                Cue(
+                    1,
+                    FrameInterval(90, 240),
+                    BoundingBox(32, 126, 288, 154),
+                    "OFFLINE CUE ONE",
+                ),
+                Cue(
+                    2,
+                    FrameInterval(450, 660),
+                    BoundingBox(48, 120, 272, 150),
+                    "OFFLINE CUE TWO",
+                ),
+            )
+            if media.frame_count >= 660
+            else (
+                Cue(
+                    1,
+                    FrameInterval(30, 75),
+                    BoundingBox(32, 126, 288, 154),
+                    "OFFLINE CUE ONE",
+                ),
+            )
+        )
+        cues = tuple(
+            cue
+            for cue in fixture_cues
+            if cue.interval.end_frame <= media.frame_count
         )
         return OcrDocument(
             media.schema_version,

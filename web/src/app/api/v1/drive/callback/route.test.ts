@@ -21,7 +21,8 @@ vi.mock("@/lib/adapters/google/oauth", () => ({
 vi.mock("@/lib/adapters/google/drive-files", () => ({
   createGoogleDriveFilesAdapter: () => ({ kind: "files" }),
 }));
-vi.mock("@/lib/security/credential-cipher", () => ({
+vi.mock("@/lib/security/credential-cipher", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/security/credential-cipher")>()),
   createCredentialCipher: () => ({ kind: "cipher" }),
 }));
 

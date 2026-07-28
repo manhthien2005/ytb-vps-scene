@@ -23,7 +23,7 @@ from ytb_vps_v2.adapters.offline.providers import (
     DeterministicWaveTtsProvider,
 )
 from ytb_vps_v2.domain.backup import FileDigest
-from ytb_vps_v2.domain.models import JobId, Part
+from ytb_vps_v2.domain.models import JobId, Part, RenderChunk
 from ytb_vps_v2.domain.pipeline import (
     OCR_ARTIFACT_PATH,
     TTS_ARTIFACT_PATH,
@@ -340,9 +340,119 @@ class FfmpegFailureTests(unittest.TestCase):
             "RenderRequest",
         )
         self.assertEqual(
+            FfmpegMediaAdapter.render_chunk.__annotations__["plan"],
+            "RenderRequest",
+        )
+        self.assertEqual(
             FfmpegMediaAdapter.validate_render.__annotations__["expected"],
             "RenderRequest",
         )
+
+    def test_audio_duration_probe_parses_exact_decimal(self) -> None:
+        voice = self.root / "voice.wav"
+        voice.write_bytes(b"voice")
+        adapter = FfmpegMediaAdapter()
+
+        with mock.patch.object(adapter, "require_tools"), mock.patch.object(
+            adapter,
+            "_run",
+            return_value=b'{"format":{"duration":"5.250000"}}',
+        ):
+            duration = adapter._probe_audio_duration(voice)
+
+        self.assertEqual(duration, Fraction(21, 4))
+
+    def test_audio_duration_probe_rejects_malformed_or_non_positive_output(
+        self,
+    ) -> None:
+        voice = self.root / "voice.wav"
+        voice.write_bytes(b"voice")
+        adapter = FfmpegMediaAdapter()
+        invalid = (
+            b"{not-json",
+            b"{}",
+            b'{"format":[]}',
+            b'{"format":{"duration":"N/A"}}',
+            b'{"format":{"duration":"0"}}',
+            b'{"format":{"duration":[]}}',
+        )
+
+        for payload in invalid:
+            with self.subTest(payload=payload), mock.patch.object(
+                adapter,
+                "require_tools",
+            ), mock.patch.object(
+                adapter,
+                "_run",
+                return_value=payload,
+            ):
+                with self.assertRaises(FfmpegMediaError):
+                    adapter._probe_audio_duration(voice)
+
+    def test_render_chunk_omits_tts_that_does_not_overlap(self) -> None:
+        source = self.root / "source.mp4"
+        voice = self.root / "voice.wav"
+        source.write_bytes(b"source")
+        voice.write_bytes(b"voice")
+        adapter = FfmpegMediaAdapter()
+        plan = RenderRequest(
+            1,
+            JobId("chunk-test"),
+            digest(b"source"),
+            900,
+            1280,
+            720,
+            TTS_ARTIFACT_PATH,
+            digest(b"dependency"),
+            (),
+            (),
+            PurePosixPath("artifacts/tts/voice.wav"),
+            digest(b"voice"),
+            (Part(1, 1, FrameInterval(0, 900), (0, 1, 2)),),
+            True,
+        )
+        source_media = mock.Mock(
+            source_digest=plan.media_digest,
+            frame_count=plan.frame_count,
+            width=plan.width,
+            height=plan.height,
+            has_audio=False,
+        )
+        rendered = object()
+
+        with mock.patch.object(
+            adapter,
+            "probe",
+            return_value=source_media,
+        ), mock.patch.object(
+            adapter,
+            "_probe_audio_duration",
+            return_value=Fraction(10),
+        ), mock.patch.object(
+            adapter,
+            "_render_prevalidated",
+            return_value=rendered,
+        ) as prevalidated:
+            result = adapter.render_chunk(
+                source,
+                voice,
+                plan,
+                RenderChunk(1, FrameInterval(300, 600)),
+                self.root / "chunk.mp4",
+            )
+
+        self.assertIs(result, rendered)
+        local, prepared = (
+            prevalidated.call_args.args[0],
+            prevalidated.call_args.args[1],
+        )
+        self.assertEqual(local.frame_count, 300)
+        self.assertEqual(prepared.source_start, Fraction(10))
+        self.assertEqual(prepared.source_duration, Fraction(10))
+        self.assertEqual(prepared.voice_paths, ())
+        self.assertEqual(prepared.voice_starts, ())
+        self.assertEqual(prepared.voice_trim_starts, ())
+        self.assertFalse(prepared.source_has_audio)
 
     def test_require_tools_reports_all_missing_executables(self) -> None:
         adapter = FfmpegMediaAdapter(
@@ -750,15 +860,44 @@ class FfmpegRenderValidationTests(unittest.TestCase):
             stem="silent-source-tts",
         )
         destination = self.root / "render-silent-source.mp4"
+        filter_graphs: list[str] = []
+        subtitle_documents: list[str] = []
+        run = self.adapter._run
 
-        rendered = self.adapter.render(
-            self.silent_source,
-            tts_wav,
-            plan,
-            destination,
-        )
+        def capture_render_assets(
+            arguments: list[str],
+            **kwargs: object,
+        ) -> bytes:
+            if "-filter_complex_script" in arguments:
+                script = Path(
+                    arguments[arguments.index("-filter_complex_script") + 1]
+                )
+                filter_graphs.append(script.read_text(encoding="utf-8"))
+                subtitle_documents.extend(
+                    path.read_text(encoding="utf-8")
+                    for path in script.parent.glob("*.ass")
+                )
+            return run(arguments, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(
+            self.adapter,
+            "_run",
+            side_effect=capture_render_assets,
+        ):
+            rendered = self.adapter.render(
+                self.silent_source,
+                tts_wav,
+                plan,
+                destination,
+            )
 
         self.assert_render_identity(rendered, has_audio=True)
+        self.assertEqual(len(filter_graphs), 1)
+        self.assertIn("subtitles=", filter_graphs[0])
+        self.assertNotIn("[0:a]", filter_graphs[0])
+        self.assertTrue(
+            any("vi:OFFLINE CUE ONE" in document for document in subtitle_documents)
+        )
 
     def test_output_audio_policy_can_explicitly_disable_audio(self) -> None:
         tts_wav, plan = self.make_plan(

@@ -9,7 +9,7 @@ from fractions import Fraction
 
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.models import StageName
+from ytb_vps_v2.domain.models import BlurRegion, StageName
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -34,6 +34,25 @@ class StageConfigFingerprint:
             raise DomainInvariantError("Fingerprint stage must be StageName")
         if not isinstance(self.fingerprint, Fingerprint):
             raise DomainInvariantError("Stage fingerprint must be Fingerprint")
+
+
+@dataclass(frozen=True, slots=True)
+class RenderFingerprintInputs:
+    blur_regions: tuple[BlurRegion, ...] = ()
+    output_has_audio: bool = True
+
+    def __post_init__(self) -> None:
+        if type(self.blur_regions) is not tuple or any(
+            type(item) is not BlurRegion
+            for item in self.blur_regions
+        ):
+            raise DomainInvariantError(
+                "Render fingerprint masks are invalid"
+            )
+        if type(self.output_has_audio) is not bool:
+            raise DomainInvariantError(
+                "Render fingerprint audio policy is invalid"
+            )
 
 
 def _canonical(value: object) -> object:
@@ -80,18 +99,40 @@ def fingerprint_value(value: object) -> Fingerprint:
     return Fingerprint(hashlib.sha256(payload).hexdigest())
 
 
-def stage_config_projection(config: EffectiveConfig, stage: StageName) -> object:
+def stage_config_projection(
+    config: EffectiveConfig,
+    stage: StageName,
+    *,
+    render_inputs: RenderFingerprintInputs | None = None,
+) -> object:
     if not isinstance(config, EffectiveConfig):
         raise DomainInvariantError("Stage configuration requires EffectiveConfig")
     if not isinstance(stage, StageName):
         raise DomainInvariantError("Stage configuration requires StageName")
+    render = (
+        RenderFingerprintInputs()
+        if render_inputs is None
+        else render_inputs
+    )
+    if type(render) is not RenderFingerprintInputs:
+        raise DomainInvariantError(
+            "Stage configuration render inputs are invalid"
+        )
     return {
-        StageName.INGEST: config.media,
+        StageName.INGEST: (
+            config.media.target_fps,
+            config.media.max_width,
+            config.media.max_height,
+        ),
         StageName.OCR: (config.media.chunk_seconds, config.ocr),
         StageName.TRACK: config.tracking,
         StageName.TRANSLATE: config.translation,
         StageName.TTS: config.tts,
-        StageName.RENDER: config.render,
+        StageName.RENDER: (
+            config.media.chunk_seconds,
+            config.render,
+            render,
+        ),
         StageName.PUBLISH: config.publish,
         StageName.BACKUP: (),
     }[stage]
@@ -99,10 +140,21 @@ def stage_config_projection(config: EffectiveConfig, stage: StageName) -> object
 
 def stage_config_fingerprints(
     config: EffectiveConfig,
+    *,
+    render_inputs: RenderFingerprintInputs | None = None,
 ) -> tuple[StageConfigFingerprint, ...]:
     if not isinstance(config, EffectiveConfig):
         raise DomainInvariantError("Stage fingerprints require EffectiveConfig")
     return tuple(
-        StageConfigFingerprint(stage, fingerprint_value(stage_config_projection(config, stage)))
+        StageConfigFingerprint(
+            stage,
+            fingerprint_value(
+                stage_config_projection(
+                    config,
+                    stage,
+                    render_inputs=render_inputs,
+                )
+            ),
+        )
         for stage in StageName
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
@@ -12,7 +13,7 @@ from ytb_vps_v2.adapters.filesystem.integrity import LocalFileIntegrity
 from ytb_vps_v2.adapters.sqlite.schema import StateStoreError
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.application.checkpoints import CheckpointError, CheckpointPublisher
-from ytb_vps_v2.domain.backup import FileDigest, ManifestEntry
+from ytb_vps_v2.domain.backup import CheckpointManifest, FileDigest, ManifestEntry
 from ytb_vps_v2.domain.config import EffectiveConfig
 from ytb_vps_v2.domain.fingerprints import Fingerprint, stage_config_fingerprints
 from ytb_vps_v2.domain.models import Artifact, JobId, StageName, WorkUnit
@@ -28,6 +29,7 @@ class RecordingStore:
         self.delegate = delegate
         self.fail_name = fail_name
         self.puts: list[PurePosixPath] = []
+        self.verifies: list[PurePosixPath] = []
 
     def put(
         self, source: Path, key: PurePosixPath, expected: FileDigest
@@ -41,6 +43,7 @@ class RecordingStore:
         return self.delegate.read_bytes(key, max_bytes)
 
     def verify(self, key, expected, observed_at, method):
+        self.verifies.append(key)
         return self.delegate.verify(key, expected, observed_at, method)
 
 
@@ -112,6 +115,7 @@ class CheckpointPublisherTests(unittest.TestCase):
         self,
         checkpoint_id: str = "checkpoint/unsafe",
         verification_observed_at: int | None = None,
+        reuse: CheckpointManifest | None = None,
     ):
         return self.publisher.publish(
             self.job_id,
@@ -120,7 +124,38 @@ class CheckpointPublisherTests(unittest.TestCase):
             self.snapshot_root,
             "2026-07-16T22:00:00+07:00",
             verification_observed_at=verification_observed_at,
+            reuse=reuse,
         )
+
+    def _commit_chunk(self, index: int, raw: bytes) -> Artifact:
+        relative_path = PurePosixPath(
+            f"artifacts/render/chunks/chunk-{index:06d}.mp4"
+        )
+        path = self.workspace.joinpath(*relative_path.parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        digest = digest_file(path)
+        artifact = Artifact(
+            f"render-chunk-{index:06d}",
+            relative_path,
+            digest.size_bytes,
+            digest.sha256,
+            StageName.RENDER,
+        )
+        key = f"render:{index:06d}"
+        self.state.put_work_unit(
+            self.job_id,
+            WorkUnit(key, StageName.RENDER),
+            "planned",
+        )
+        self.state.start_work_unit(self.job_id, key, "started")
+        self.state.commit_artifact(
+            self.job_id,
+            key,
+            artifact,
+            "committed",
+        )
+        return artifact
 
     def test_publishes_verified_data_then_canonical_manifest_and_records_completion(self) -> None:
         manifest = self._publish()
@@ -128,7 +163,7 @@ class CheckpointPublisherTests(unittest.TestCase):
         self.assertEqual(manifest.job_id, self.job_id)
         self.assertEqual(manifest.source, self.archive.source)
         self.assertEqual(len(manifest.artifacts), 1)
-        self.assertEqual(self.recording_store.puts[-1].name, "manifest-v1.json")
+        self.assertEqual(self.recording_store.puts[-1].name, "manifest-v2.json")
         self.assertTrue(all("job/" not in str(key) for key in self.recording_store.puts))
         records = self.state.completed_checkpoints(self.job_id)
         self.assertEqual(len(records), 1)
@@ -140,6 +175,83 @@ class CheckpointPublisherTests(unittest.TestCase):
         ):
             path = self.remote_root.joinpath(*item.key.parts)
             self.assertEqual(digest_file(path), item.digest)
+
+    def test_v2_stable_keys_reuse_verified_chunks_without_duplicate_puts(
+        self,
+    ) -> None:
+        chunk_zero = self._commit_chunk(0, b"chunk-zero")
+        first = self._publish(
+            "render-chunk-000000-token",
+            verification_observed_at=100,
+        )
+        chunk_one = self._commit_chunk(1, b"chunk-one")
+        self.recording_store.verifies.clear()
+        second = self._publish(
+            "render-chunk-000001-token",
+            verification_observed_at=101,
+            reuse=first,
+        )
+
+        token = hashlib.sha256(self.job_id.value.encode("utf-8")).hexdigest()[:20]
+        expected_input = (
+            PurePosixPath("objects")
+            / token
+            / "input"
+            / self.archive.source.digest.sha256
+        )
+        self.assertEqual(first.version, 2)
+        self.assertEqual(second.version, 2)
+        self.assertEqual(first.input_archive.key, expected_input)
+        by_suffix = {
+            entry.key.name: entry
+            for entry in second.artifacts
+        }
+        zero_entry = by_suffix[chunk_zero.sha256]
+        one_entry = by_suffix[chunk_one.sha256]
+        self.assertEqual(
+            self.recording_store.puts.count(zero_entry.key),
+            1,
+        )
+        self.assertEqual(
+            self.recording_store.puts.count(one_entry.key),
+            1,
+        )
+        self.assertEqual(
+            self.recording_store.puts.count(expected_input),
+            1,
+        )
+        self.assertNotEqual(
+            first.state_snapshot.key,
+            second.state_snapshot.key,
+        )
+        records = {
+            item.checkpoint_id: item
+            for item in self.state.completed_checkpoints(self.job_id)
+        }
+        self.assertNotEqual(
+            records[first.checkpoint_id].manifest.key,
+            records[second.checkpoint_id].manifest.key,
+        )
+        self.assertIn(zero_entry, second.artifacts)
+        self.assertIn(one_entry, second.artifacts)
+        self.assertIn(zero_entry.key, self.recording_store.verifies)
+        self.assertEqual(
+            self.publisher.latest_verified_v2(
+                self.job_id,
+                "render-chunk-",
+                102,
+            ),
+            second,
+        )
+        self.remote_root.joinpath(*one_entry.key.parts).write_bytes(b"corrupt")
+        self.assertEqual(
+            self.publisher.latest_verified_v2(
+                self.job_id,
+                "render-chunk-",
+                103,
+            ),
+            first,
+        )
 
     def test_completed_publish_is_idempotent_and_rejects_corrupt_manifest_readback(self) -> None:
         first = self._publish("cp-idempotent")
@@ -173,7 +285,7 @@ class CheckpointPublisherTests(unittest.TestCase):
             self._publish("cp-mutated")
 
         self.assertEqual(self.state.completed_checkpoints(self.job_id), ())
-        self.assertEqual(tuple(self.remote_root.rglob("manifest-v1.json")), ())
+        self.assertEqual(tuple(self.remote_root.rglob("manifest-v2.json")), ())
 
     def test_data_store_failure_is_retryable_and_manifest_remains_last(self) -> None:
         failing = RecordingStore(self.local_store, fail_name="workspace")
@@ -191,7 +303,7 @@ class CheckpointPublisherTests(unittest.TestCase):
             )
 
         self.assertEqual(self.state.completed_checkpoints(self.job_id), ())
-        self.assertEqual(tuple(self.remote_root.rglob("manifest-v1.json")), ())
+        self.assertEqual(tuple(self.remote_root.rglob("manifest-v2.json")), ())
         retry = CheckpointPublisher(
             self.state, self.local_store, self.archive_root, self.files
         )
@@ -205,7 +317,7 @@ class CheckpointPublisherTests(unittest.TestCase):
         self.assertEqual(manifest.checkpoint_id, "cp-data-failure")
 
     def test_manifest_store_and_state_record_failures_are_retryable(self) -> None:
-        failing = RecordingStore(self.local_store, fail_name="manifest-v1.json")
+        failing = RecordingStore(self.local_store, fail_name="manifest-v2.json")
         with self.assertRaises(CheckpointError):
             CheckpointPublisher(
                 self.state, failing, self.archive_root, self.files
@@ -217,7 +329,7 @@ class CheckpointPublisherTests(unittest.TestCase):
                 "same-time",
             )
         self.assertEqual(self.state.completed_checkpoints(self.job_id), ())
-        self.assertEqual(tuple(self.remote_root.rglob("manifest-v1.json")), ())
+        self.assertEqual(tuple(self.remote_root.rglob("manifest-v2.json")), ())
 
         with mock.patch.object(
             self.state,
@@ -272,7 +384,7 @@ class CheckpointPublisherTests(unittest.TestCase):
             with self.assertRaises(CheckpointError):
                 self._publish("cp-snapshot-failure")
         self.assertEqual(self.state.completed_checkpoints(self.job_id), ())
-        self.assertEqual(tuple(self.remote_root.rglob("manifest-v1.json")), ())
+        self.assertEqual(tuple(self.remote_root.rglob("manifest-v2.json")), ())
 
 
 if __name__ == "__main__":

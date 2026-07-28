@@ -380,6 +380,134 @@ class SqliteArtifactTests(unittest.TestCase):
             ),
         )
 
+    def test_unit_invalidation_preserves_sibling_chunk_and_recommits_one_artifact(
+        self,
+    ) -> None:
+        self._running("tts", StageName.TTS)
+        self.store.commit_artifact(
+            self.job_id,
+            "tts",
+            self._artifact("tts-control", StageName.TTS),
+            "committed",
+        )
+        self.store.put_work_unit(
+            self.job_id,
+            WorkUnit(
+                "render:plan",
+                StageName.RENDER,
+                dependencies=("tts",),
+            ),
+            "planned",
+        )
+        self.store.start_work_unit(self.job_id, "render:plan", "started")
+        self.store.commit_artifact(
+            self.job_id,
+            "render:plan",
+            self._artifact("plan-control", StageName.RENDER),
+            "committed",
+        )
+        for unit in (
+            WorkUnit(
+                "render:000000",
+                StageName.RENDER,
+                dependencies=("render:plan",),
+            ),
+            WorkUnit(
+                "render:000001",
+                StageName.RENDER,
+                dependencies=("render:plan",),
+            ),
+            WorkUnit(
+                "render",
+                StageName.RENDER,
+                dependencies=("render:000000", "render:000001"),
+            ),
+            WorkUnit(
+                "publish",
+                StageName.PUBLISH,
+                dependencies=("render",),
+            ),
+        ):
+            self.store.put_work_unit(self.job_id, unit, "planned")
+
+        chunk_zero = self._artifact("chunk-zero", StageName.RENDER)
+        chunk_one = self._artifact("chunk-one", StageName.RENDER)
+        for key, artifact in (
+            ("render:000000", chunk_zero),
+            ("render:000001", chunk_one),
+        ):
+            self.store.start_work_unit(self.job_id, key, "started")
+            self.store.commit_artifact(
+                self.job_id,
+                key,
+                artifact,
+                "committed",
+            )
+
+        changed = self.store.invalidate_work_units(
+            self.job_id,
+            ("render:000001",),
+            "invalidated",
+        )
+
+        self.assertEqual(
+            changed,
+            ("render", "render:000001", "publish"),
+        )
+        self.assertIs(
+            self.store.get_work_unit(
+                self.job_id,
+                "render:000000",
+            ).status,
+            WorkStatus.SUCCEEDED,
+        )
+        self.assertIs(
+            self.store.get_work_unit(
+                self.job_id,
+                "render:plan",
+            ).status,
+            WorkStatus.SUCCEEDED,
+        )
+        self.assertEqual(
+            self.store.artifacts_for_unit(
+                self.job_id,
+                "render:000000",
+            ),
+            (chunk_zero,),
+        )
+
+        replacement = replace(
+            chunk_one,
+            size_bytes=84,
+            sha256="d" * 64,
+        )
+        self.store.start_work_unit(
+            self.job_id,
+            "render:000001",
+            "restarted",
+        )
+        self.store.commit_artifact(
+            self.job_id,
+            "render:000001",
+            replacement,
+            "recommitted",
+        )
+
+        self.assertEqual(
+            self.store.artifacts_for_unit(
+                self.job_id,
+                "render:000000",
+            ),
+            (chunk_zero,),
+        )
+        self.assertEqual(
+            self.store.artifacts_for_unit(
+                self.job_id,
+                "render:000001",
+            ),
+            (replacement,),
+        )
+
     def test_invalidated_canonical_artifact_can_be_recommitted_atomically(self) -> None:
         self._running("ocr:canonical", StageName.OCR)
         original = self._artifact(

@@ -16,7 +16,7 @@ from ytb_vps_v2.domain.backup import (
 )
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.fingerprints import Fingerprint, StageConfigFingerprint
-from ytb_vps_v2.domain.invalidation import InvalidationPlan
+from ytb_vps_v2.domain.invalidation import InvalidationPlan, STAGE_ORDER
 from ytb_vps_v2.domain.models import (
     Artifact,
     JobId,
@@ -153,6 +153,156 @@ class SqliteStateStore:
             expected = {stage: value.sha256 for stage, value in snapshot.items()}
             if stored != expected:
                 raise StateStoreError("Job configuration conflicts with stored snapshot")
+
+    def stored_config_fingerprints(
+        self,
+        job_id: JobId,
+    ) -> tuple[StageConfigFingerprint, ...] | None:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                return None
+            rows = self.connection.execute(
+                "SELECT stage, sha256 FROM config_fingerprints "
+                "WHERE job_id=? ORDER BY stage",
+                (job.value,),
+            ).fetchall()
+            values = {
+                StageName(row["stage"]): Fingerprint(row["sha256"])
+                for row in rows
+            }
+            if len(rows) != len(values) or set(values) != set(StageName):
+                raise StateStoreError(
+                    "Stored configuration snapshot is incomplete"
+                )
+            return tuple(
+                StageConfigFingerprint(stage, values[stage])
+                for stage in StageName
+            )
+        except StateStoreError:
+            raise
+        except (
+            sqlite3.DatabaseError,
+            DomainInvariantError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise StateStoreError(
+                "Unable to read stored configuration snapshot"
+            ) from exc
+
+    def reconfigure_job(
+        self,
+        job_id: JobId,
+        previous: tuple[StageConfigFingerprint, ...],
+        current: tuple[StageConfigFingerprint, ...],
+        plan: InvalidationPlan,
+        at: str,
+    ) -> tuple[str, ...]:
+        job = _job_id(job_id)
+        old = _config_snapshot(previous)
+        new = _config_snapshot(current)
+        if type(plan) is not InvalidationPlan:
+            raise StateStoreError("Invalidation must be InvalidationPlan")
+        direct = tuple(
+            stage
+            for stage in StageName
+            if old[stage] != new[stage]
+        )
+        if direct != plan.direct_stages:
+            raise StateStoreError(
+                "Invalidation does not match configuration change"
+            )
+        timestamp = _text("Reconfiguration timestamp", at, 128)
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = connection.execute(
+                "SELECT stage, sha256 FROM config_fingerprints "
+                "WHERE job_id=?",
+                (job.value,),
+            ).fetchall()
+            try:
+                stored = {
+                    StageName(row["stage"]): Fingerprint(row["sha256"])
+                    for row in rows
+                }
+            except (DomainInvariantError, ValueError, TypeError) as exc:
+                raise StateStoreError(
+                    "Stored configuration snapshot is invalid"
+                ) from exc
+            if len(rows) != len(stored) or set(stored) != set(StageName):
+                raise StateStoreError(
+                    "Stored configuration snapshot is incomplete"
+                )
+            if any(stored[stage] != old[stage] for stage in StageName):
+                raise StateStoreError(
+                    "Stored configuration changed before reconfiguration"
+                )
+
+            affected_rows: tuple[sqlite3.Row, ...] = ()
+            if plan.affected_stages:
+                stages = tuple(
+                    stage.value
+                    for stage in plan.affected_stages
+                )
+                placeholders = ",".join("?" for _ in stages)
+                affected_rows = tuple(
+                    connection.execute(
+                        f"SELECT unit_key FROM work_units WHERE job_id=? "
+                        f"AND stage IN ({placeholders}) AND status<>? "
+                        f"ORDER BY unit_key",
+                        (
+                            job.value,
+                            *stages,
+                            WorkStatus.INVALID.value,
+                        ),
+                    ).fetchall()
+                )
+                connection.execute(
+                    f"UPDATE work_units SET status=?, error_kind=NULL, "
+                    f"error_message=NULL, updated_at=? WHERE job_id=? "
+                    f"AND stage IN ({placeholders}) AND status<>?",
+                    (
+                        WorkStatus.INVALID.value,
+                        timestamp,
+                        job.value,
+                        *stages,
+                        WorkStatus.INVALID.value,
+                    ),
+                )
+                connection.execute(
+                    f"UPDATE artifacts SET is_valid=0 WHERE job_id=? "
+                    f"AND unit_key IN ("
+                    f"SELECT unit_key FROM work_units WHERE job_id=? "
+                    f"AND stage IN ({placeholders})"
+                    f") AND is_valid=1",
+                    (job.value, job.value, *stages),
+                )
+
+            for stage in StageName:
+                cursor = connection.execute(
+                    "UPDATE config_fingerprints SET sha256=? "
+                    "WHERE job_id=? AND stage=?",
+                    (new[stage].sha256, job.value, stage.value),
+                )
+                if cursor.rowcount != 1:
+                    raise StateStoreError(
+                        "Configuration snapshot changed during update"
+                    )
+            connection.execute(
+                "UPDATE jobs SET updated_at=? WHERE job_id=?",
+                (timestamp, job.value),
+            )
+            return tuple(row["unit_key"] for row in affected_rows)
 
     def record_verified_input(
         self,
@@ -356,20 +506,66 @@ class SqliteStateStore:
                         timestamp,
                     ),
                 )
+                if unit.dependencies:
+                    placeholders = ",".join("?" for _ in unit.dependencies)
+                    rows = connection.execute(
+                        f"SELECT unit_key FROM work_units WHERE job_id=? "
+                        f"AND unit_key IN ({placeholders}) ORDER BY unit_key",
+                        (job.value, *unit.dependencies),
+                    ).fetchall()
+                    if tuple(row["unit_key"] for row in rows) != unit.dependencies:
+                        raise StateStoreError(
+                            "Work unit dependency does not exist for this job"
+                        )
+                    connection.executemany(
+                        "INSERT INTO work_unit_dependencies("
+                        "job_id, unit_key, depends_on_key"
+                        ") VALUES (?, ?, ?)",
+                        (
+                            (job.value, unit.key, dependency)
+                            for dependency in unit.dependencies
+                        ),
+                    )
                 return
+            dependencies = self._dependencies_for_unit(
+                connection,
+                job.value,
+                unit.key,
+            )
             if (
                 existing["stage"] != unit.stage.value
                 or existing["status"] != unit.status.value
                 or existing["attempts"] != unit.attempts
+                or dependencies != unit.dependencies
             ):
                 raise StateStoreError("Work unit conflicts with stored state")
 
-    def _unit_from_row(self, row: sqlite3.Row) -> WorkUnit:
+    def _dependencies_for_unit(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        unit_key: str,
+    ) -> tuple[str, ...]:
+        return tuple(
+            row["depends_on_key"]
+            for row in connection.execute(
+                "SELECT depends_on_key FROM work_unit_dependencies "
+                "WHERE job_id=? AND unit_key=? ORDER BY depends_on_key",
+                (job_id, unit_key),
+            ).fetchall()
+        )
+
+    def _unit_from_row(
+        self,
+        row: sqlite3.Row,
+        dependencies: tuple[str, ...],
+    ) -> WorkUnit:
         return WorkUnit(
             row["unit_key"],
             StageName(row["stage"]),
             WorkStatus(row["status"]),
             row["attempts"],
+            dependencies,
         )
 
     def get_work_unit(self, job_id: JobId, unit_key: str) -> WorkUnit:
@@ -387,7 +583,168 @@ class SqliteStateStore:
             raise StateStoreError("Unable to read work unit") from exc
         if row is None:
             raise StateStoreError(f"Work unit does not exist: {key}")
-        return self._unit_from_row(row)
+        dependencies = self._dependencies_for_unit(
+            self.connection,
+            job.value,
+            key,
+        )
+        return self._unit_from_row(row, dependencies)
+
+    def work_units(self, job_id: JobId) -> tuple[WorkUnit, ...]:
+        job = _job_id(job_id)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = self.connection.execute(
+                "SELECT unit_key, stage, status, attempts FROM work_units "
+                "WHERE job_id=? ORDER BY unit_key",
+                (job.value,),
+            ).fetchall()
+            return tuple(
+                self._unit_from_row(
+                    row,
+                    self._dependencies_for_unit(
+                        self.connection,
+                        job.value,
+                        row["unit_key"],
+                    ),
+                )
+                for row in rows
+            )
+        except StateStoreError:
+            raise
+        except (sqlite3.DatabaseError, DomainInvariantError, ValueError) as exc:
+            raise StateStoreError("Unable to read work units") from exc
+
+    def replace_work_unit_dependencies(
+        self,
+        job_id: JobId,
+        unit_key: str,
+        expected: tuple[str, ...],
+        current: tuple[str, ...],
+        at: str,
+    ) -> None:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        timestamp = _text("Work unit timestamp", at, 128)
+        for name, values in (
+            ("Expected dependencies", expected),
+            ("Current dependencies", current),
+        ):
+            if (
+                type(values) is not tuple
+                or any(
+                    type(value) is not str
+                    or not value
+                    or value != value.strip()
+                    or len(value) > 512
+                    for value in values
+                )
+                or tuple(sorted(set(values))) != values
+            ):
+                raise StateStoreError(
+                    f"{name} must be ordered unique work-unit keys"
+                )
+        if key in current:
+            raise StateStoreError("Work unit cannot depend on itself")
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT stage, status, attempts FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            if row is None:
+                raise StateStoreError(f"Work unit does not exist: {key}")
+            if row["status"] not in {
+                WorkStatus.PENDING.value,
+                WorkStatus.FAILED.value,
+                WorkStatus.INVALID.value,
+            }:
+                raise StateStoreError(
+                    "Work-unit dependencies cannot change in its current state"
+                )
+            stored = self._dependencies_for_unit(
+                connection,
+                job.value,
+                key,
+            )
+            if stored != expected:
+                raise StateStoreError(
+                    "Work-unit dependency compare-and-swap failed"
+                )
+            if current:
+                placeholders = ",".join("?" for _ in current)
+                dependencies = connection.execute(
+                    f"SELECT unit_key FROM work_units WHERE job_id=? "
+                    f"AND unit_key IN ({placeholders}) ORDER BY unit_key",
+                    (job.value, *current),
+                ).fetchall()
+                if (
+                    tuple(item["unit_key"] for item in dependencies)
+                    != current
+                ):
+                    raise StateStoreError(
+                        "Work unit dependency does not exist for this job"
+                    )
+
+            unit_rows = connection.execute(
+                "SELECT unit_key FROM work_units WHERE job_id=? "
+                "ORDER BY unit_key",
+                (job.value,),
+            ).fetchall()
+            graph = {
+                item["unit_key"]: self._dependencies_for_unit(
+                    connection,
+                    job.value,
+                    item["unit_key"],
+                )
+                for item in unit_rows
+            }
+            graph[key] = current
+            visiting: set[str] = set()
+            visited: set[str] = set()
+
+            def visit(node: str) -> None:
+                if node in visiting:
+                    raise StateStoreError(
+                        "Work-unit dependency graph contains a cycle"
+                    )
+                if node in visited:
+                    return
+                visiting.add(node)
+                for dependency in graph[node]:
+                    visit(dependency)
+                visiting.remove(node)
+                visited.add(node)
+
+            for node in graph:
+                visit(node)
+
+            connection.execute(
+                "DELETE FROM work_unit_dependencies "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            )
+            connection.executemany(
+                "INSERT INTO work_unit_dependencies("
+                "job_id, unit_key, depends_on_key"
+                ") VALUES (?, ?, ?)",
+                (
+                    (job.value, key, dependency)
+                    for dependency in current
+                ),
+            )
+            connection.execute(
+                "UPDATE work_units SET updated_at=? "
+                "WHERE job_id=? AND unit_key=?",
+                (timestamp, job.value, key),
+            )
 
     def start_work_unit(self, job_id: JobId, unit_key: str, at: str) -> WorkUnit:
         job = _job_id(job_id)
@@ -410,6 +767,20 @@ class SqliteStateStore:
                     raise StateTransitionError(
                         f"Work unit requires durable input before start: {key}"
                     )
+            blocked = connection.execute(
+                "SELECT d.depends_on_key "
+                "FROM work_unit_dependencies d "
+                "JOIN work_units u "
+                "ON u.job_id=d.job_id AND u.unit_key=d.depends_on_key "
+                "WHERE d.job_id=? AND d.unit_key=? AND u.status<>? "
+                "LIMIT 1",
+                (job.value, key, WorkStatus.SUCCEEDED.value),
+            ).fetchone()
+            if blocked is not None:
+                raise StateTransitionError(
+                    f"Work unit dependency has not succeeded: "
+                    f"{blocked['depends_on_key']}"
+                )
             cursor = connection.execute(
                 "UPDATE work_units SET status=?, attempts=attempts+1, "
                 "error_kind=NULL, error_message=NULL, updated_at=? "
@@ -431,7 +802,10 @@ class SqliteStateStore:
                 "WHERE job_id=? AND unit_key=?",
                 (job.value, key),
             ).fetchone()
-            return self._unit_from_row(row)
+            return self._unit_from_row(
+                row,
+                self._dependencies_for_unit(connection, job.value, key),
+            )
 
     def fail_work_unit(
         self,
@@ -473,11 +847,14 @@ class SqliteStateStore:
                 ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (job.value, key, row["stage"], row["attempts"], kind, message, timestamp),
             )
-            return WorkUnit(
-                key,
-                StageName(row["stage"]),
-                WorkStatus.FAILED,
-                row["attempts"],
+            failed = connection.execute(
+                "SELECT unit_key, stage, status, attempts FROM work_units "
+                "WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone()
+            return self._unit_from_row(
+                failed,
+                self._dependencies_for_unit(connection, job.value, key),
             )
 
     def recover_stale_work(self, at: str) -> tuple[tuple[JobId, str], ...]:
@@ -572,9 +949,9 @@ class SqliteStateStore:
                 )
             invalid_identities = connection.execute(
                 "SELECT name, relative_path FROM artifacts "
-                "WHERE job_id=? AND owner_stage=? AND is_valid=0 "
+                "WHERE job_id=? AND unit_key=? AND is_valid=0 "
                 "ORDER BY name",
-                (job.value, row["stage"]),
+                (job.value, key),
             ).fetchall()
             invalid_identity_set = {
                 (item["name"], item["relative_path"])
@@ -595,7 +972,7 @@ class SqliteStateStore:
                     "UPDATE artifacts SET size_bytes=?, sha256=?, "
                     "dependencies_json=?, is_valid=1, committed_at=? "
                     "WHERE job_id=? AND name=? AND relative_path=? "
-                    "AND owner_stage=? AND is_valid=0",
+                    "AND owner_stage=? AND unit_key=? AND is_valid=0",
                     (
                         artifact.size_bytes,
                         artifact.sha256,
@@ -605,14 +982,15 @@ class SqliteStateStore:
                         artifact.name,
                         str(artifact.relative_path),
                         artifact.owner.value,
+                        key,
                     ),
                 )
                 if recommitted.rowcount == 0:
                     connection.execute(
                         "INSERT INTO artifacts("
                         "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
-                        "dependencies_json, is_valid, committed_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                        "unit_key, dependencies_json, is_valid, committed_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
                         (
                             job.value,
                             artifact.name,
@@ -620,6 +998,7 @@ class SqliteStateStore:
                             artifact.size_bytes,
                             artifact.sha256,
                             artifact.owner.value,
+                            key,
                             dependencies_json,
                             timestamp,
                         ),
@@ -641,6 +1020,37 @@ class SqliteStateStore:
                     f"Work unit changed before artifact commit: {key}"
                 )
 
+    def _artifact_from_row(self, row: sqlite3.Row) -> Artifact:
+        raw_dependencies = row["dependencies_json"]
+        decoded = json.loads(raw_dependencies)
+        if type(decoded) is not list or any(
+            type(item) is not str
+            or not item
+            or item != item.strip()
+            for item in decoded
+        ):
+            raise StateStoreError(
+                "Stored artifact dependencies must be a JSON string array"
+            )
+        dependencies = tuple(decoded)
+        canonical = json.dumps(
+            dependencies,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if raw_dependencies != canonical:
+            raise StateStoreError(
+                "Stored artifact dependencies are not canonical JSON"
+            )
+        return Artifact(
+            row["name"],
+            PurePosixPath(row["relative_path"]),
+            row["size_bytes"],
+            row["sha256"],
+            StageName(row["owner_stage"]),
+            dependencies,
+        )
+
     def valid_artifacts(self, job_id: JobId) -> tuple[Artifact, ...]:
         job = _job_id(job_id)
         if self.connection is None:
@@ -652,44 +1062,145 @@ class SqliteStateStore:
                 "WHERE job_id=? AND is_valid=1 ORDER BY name",
                 (job.value,),
             ).fetchall()
-            artifacts: list[Artifact] = []
-            for row in rows:
-                raw_dependencies = row["dependencies_json"]
-                decoded = json.loads(raw_dependencies)
-                if type(decoded) is not list or any(
-                    type(item) is not str
-                    or not item
-                    or item != item.strip()
-                    for item in decoded
-                ):
-                    raise StateStoreError(
-                        "Stored artifact dependencies must be a JSON string array"
-                    )
-                dependencies = tuple(decoded)
-                canonical = json.dumps(
-                    dependencies,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                )
-                if raw_dependencies != canonical:
-                    raise StateStoreError(
-                        "Stored artifact dependencies are not canonical JSON"
-                    )
-                artifacts.append(
-                    Artifact(
-                        row["name"],
-                        PurePosixPath(row["relative_path"]),
-                        row["size_bytes"],
-                        row["sha256"],
-                        StageName(row["owner_stage"]),
-                        dependencies,
-                    )
-                )
-            return tuple(artifacts)
+            return tuple(self._artifact_from_row(row) for row in rows)
         except StateStoreError:
             raise
         except (sqlite3.DatabaseError, ValueError, TypeError) as exc:
             raise StateStoreError("Unable to read valid artifacts") from exc
+
+    def artifacts_for_unit(
+        self,
+        job_id: JobId,
+        unit_key: str,
+    ) -> tuple[Artifact, ...]:
+        job = _job_id(job_id)
+        key = _text("Work unit key", unit_key)
+        if self.connection is None:
+            raise StateStoreError("State store is closed")
+        try:
+            if self.connection.execute(
+                "SELECT 1 FROM work_units WHERE job_id=? AND unit_key=?",
+                (job.value, key),
+            ).fetchone() is None:
+                raise StateStoreError(f"Work unit does not exist: {key}")
+            rows = self.connection.execute(
+                "SELECT name, relative_path, size_bytes, sha256, owner_stage, "
+                "dependencies_json FROM artifacts "
+                "WHERE job_id=? AND unit_key=? AND is_valid=1 ORDER BY name",
+                (job.value, key),
+            ).fetchall()
+            return tuple(self._artifact_from_row(row) for row in rows)
+        except StateStoreError:
+            raise
+        except (
+            sqlite3.DatabaseError,
+            DomainInvariantError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            raise StateStoreError("Unable to read work-unit artifacts") from exc
+
+    def invalidate_work_units(
+        self,
+        job_id: JobId,
+        unit_keys: tuple[str, ...],
+        at: str,
+    ) -> tuple[str, ...]:
+        job = _job_id(job_id)
+        if type(unit_keys) is not tuple:
+            raise StateStoreError("Invalidated work-unit keys must be a tuple")
+        requested = tuple(
+            _text("Invalidated work-unit key", item)
+            for item in unit_keys
+        )
+        if tuple(sorted(set(requested))) != requested:
+            raise StateStoreError(
+                "Invalidated work-unit keys must be ordered and unique"
+            )
+        timestamp = _text("Invalidation timestamp", at, 128)
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM jobs WHERE job_id=?",
+                (job.value,),
+            ).fetchone() is None:
+                raise StateStoreError(f"Job does not exist: {job.value}")
+            rows = connection.execute(
+                "SELECT unit_key, stage, status, attempts FROM work_units "
+                "WHERE job_id=? ORDER BY unit_key",
+                (job.value,),
+            ).fetchall()
+            units = tuple(
+                self._unit_from_row(
+                    row,
+                    self._dependencies_for_unit(
+                        connection,
+                        job.value,
+                        row["unit_key"],
+                    ),
+                )
+                for row in rows
+            )
+            known = {unit.key for unit in units}
+            missing = tuple(key for key in requested if key not in known)
+            if missing:
+                raise StateStoreError(
+                    f"Work unit does not exist: {missing[0]}"
+                )
+
+            affected = set(requested)
+            changed = True
+            while changed:
+                before = len(affected)
+                affected.update(
+                    unit.key
+                    for unit in units
+                    if any(
+                        dependency in affected
+                        for dependency in unit.dependencies
+                    )
+                )
+                changed = len(affected) != before
+
+            if not affected:
+                return ()
+            changed_units = tuple(
+                unit
+                for unit in units
+                if unit.key in affected
+                and unit.status is not WorkStatus.INVALID
+            )
+            placeholders = ",".join("?" for _ in affected)
+            connection.execute(
+                f"UPDATE work_units SET status=?, error_kind=NULL, "
+                f"error_message=NULL, updated_at=? WHERE job_id=? "
+                f"AND unit_key IN ({placeholders}) AND status<>?",
+                (
+                    WorkStatus.INVALID.value,
+                    timestamp,
+                    job.value,
+                    *sorted(affected),
+                    WorkStatus.INVALID.value,
+                ),
+            )
+            connection.execute(
+                f"UPDATE artifacts SET is_valid=0 WHERE job_id=? "
+                f"AND unit_key IN ({placeholders}) AND is_valid=1",
+                (job.value, *sorted(affected)),
+            )
+            stage_order = {
+                stage: index
+                for index, stage in enumerate(STAGE_ORDER)
+            }
+            return tuple(
+                unit.key
+                for unit in sorted(
+                    changed_units,
+                    key=lambda item: (
+                        stage_order[item.stage],
+                        item.key,
+                    ),
+                )
+            )
 
     def apply_invalidation(
         self,
@@ -731,7 +1242,10 @@ class SqliteStateStore:
             )
             connection.execute(
                 f"UPDATE artifacts SET is_valid=0 WHERE job_id=? "
-                f"AND owner_stage IN ({placeholders}) AND is_valid=1",
-                (job.value, *stages),
+                f"AND unit_key IN ("
+                f"SELECT unit_key FROM work_units WHERE job_id=? "
+                f"AND stage IN ({placeholders})"
+                f") AND is_valid=1",
+                (job.value, job.value, *stages),
             )
             return tuple(row["unit_key"] for row in rows)

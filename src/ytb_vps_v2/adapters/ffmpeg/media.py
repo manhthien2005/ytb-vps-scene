@@ -14,15 +14,108 @@ from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from ytb_vps_v2.adapters.ffmpeg.audio_graph import (
+    AudioMixPolicy,
+    VoiceSegment,
+    build_audio_graph,
+)
+from ytb_vps_v2.adapters.ffmpeg.filter_graph import MaskRegion, build_video_graph
+from ytb_vps_v2.adapters.ffmpeg.subtitles_ass import (
+    SubtitleRectangle,
+    SubtitleStyle,
+    build_ass_document,
+)
+from ytb_vps_v2.application.render_chunks import chunk_local_request
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
-from ytb_vps_v2.domain.models import JobId
+from ytb_vps_v2.domain.models import JobId, RenderChunk
 from ytb_vps_v2.domain.pipeline import MediaDocument, RenderRequest
 from ytb_vps_v2.domain.timeline import Timeline
 
 
 class FfmpegMediaError(RuntimeError):
     """Raised when FFmpeg media work cannot be completed or verified."""
+
+
+def _input_timestamp(value: Fraction) -> str:
+    whole, remainder = divmod(value.numerator, value.denominator)
+    if remainder == 0:
+        return f"{whole}.000"
+    scale = 1_000_000_000
+    decimals, rounding = divmod(
+        remainder * scale,
+        value.denominator,
+    )
+    if rounding * 2 >= value.denominator:
+        decimals += 1
+    if decimals == scale:
+        whole += 1
+        decimals = 0
+    digits = f"{decimals:09d}".rstrip("0").ljust(3, "0")
+    return f"{whole}.{digits}"
+
+
+def _concat_line(path: Path) -> str:
+    try:
+        resolved = path.resolve(strict=True).as_posix()
+    except OSError as exc:
+        raise FfmpegMediaError(
+            "Render chunk path could not be resolved"
+        ) from exc
+    escaped = resolved.replace("'", "'\\''")
+    return f"file '{escaped}'\n"
+
+
+@dataclass(frozen=True, slots=True)
+class RenderInputs:
+    source: Path
+    subtitle_path: Path | None
+    voice_paths: tuple[Path, ...]
+    voice_starts: tuple[Fraction, ...]
+    source_has_audio: bool = True
+    source_start: Fraction = Fraction(0)
+    source_duration: Fraction | None = None
+    voice_trim_starts: tuple[Fraction, ...] = ()
+
+    def __post_init__(self) -> None:
+        if len(self.voice_paths) != len(self.voice_starts):
+            raise FfmpegMediaError("Each voice input needs exactly one start time")
+        if (
+            type(self.source_start) is not Fraction
+            or self.source_start < 0
+        ):
+            raise FfmpegMediaError(
+                "Source seek must be a non-negative Fraction"
+            )
+        if (
+            self.source_duration is not None
+            and (
+                type(self.source_duration) is not Fraction
+                or self.source_duration <= 0
+            )
+        ):
+            raise FfmpegMediaError(
+                "Source duration must be a positive Fraction"
+            )
+        if type(self.voice_trim_starts) is not tuple or any(
+            type(value) is not Fraction or value < 0
+            for value in self.voice_trim_starts
+        ):
+            raise FfmpegMediaError(
+                "Voice trim starts must be non-negative Fractions"
+            )
+        if (
+            self.voice_trim_starts
+            and len(self.voice_trim_starts) != len(self.voice_paths)
+        ) or (
+            self.source_duration is not None
+            and len(self.voice_trim_starts) != len(self.voice_paths)
+        ):
+            raise FfmpegMediaError(
+                "Each bounded voice input needs one trim start"
+            )
+        if not isinstance(self.source_has_audio, bool):
+            raise FfmpegMediaError("Source audio presence must be a bool")
 
 
 @dataclass(slots=True)
@@ -569,9 +662,9 @@ class FfmpegMediaAdapter:
         ffmpeg: str = "ffmpeg",
         ffprobe: str = "ffprobe",
         fixture_timeout_seconds: float = 120.0,
-        probe_timeout_seconds: float = 30.0,
-        render_timeout_seconds: float = 120.0,
-        decode_timeout_seconds: float = 120.0,
+        probe_timeout_seconds: float = 7200.0,
+        render_timeout_seconds: float = 7200.0,
+        decode_timeout_seconds: float = 7200.0,
         diagnostic_limit: int = 4096,
         probe_output_limit: int = 65536,
     ) -> None:
@@ -722,6 +815,15 @@ class FfmpegMediaAdapter:
             raise FfmpegMediaError("Media destination parent must exist")
         return destination
 
+    @classmethod
+    def _preflight_render_destination(
+        cls,
+        destination: Path,
+    ) -> _AnonymousPosixRender | None:
+        if os.name == "nt":
+            return None
+        return _AnonymousPosixRender.create(cls._destination(destination))
+
     def create_fixture(self, destination: Path, with_audio: bool) -> None:
         if type(with_audio) is not bool:
             raise FfmpegMediaError("Fixture audio policy must be boolean")
@@ -852,6 +954,59 @@ class FfmpegMediaAdapter:
         if result <= 0:
             raise FfmpegMediaError(f"ffprobe {name} must be positive")
         return result
+
+    def _probe_audio_duration(self, source: Path) -> Fraction:
+        self.require_tools()
+        if (
+            not isinstance(source, Path)
+            or not source.is_file()
+            or source.is_symlink()
+        ):
+            raise FfmpegMediaError(
+                "Audio duration source must be a regular file"
+            )
+        raw = self._run(
+            [
+                self.ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=self.probe_timeout_seconds,
+            stdout_limit=self.probe_output_limit,
+        )
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise FfmpegMediaError(
+                "ffprobe audio duration returned invalid JSON"
+            ) from exc
+        if type(payload) is not dict or type(payload.get("format")) is not dict:
+            raise FfmpegMediaError(
+                "ffprobe audio duration JSON has an invalid shape"
+            )
+        value = payload["format"].get("duration")
+        if (
+            value is None
+            or isinstance(value, bool)
+            or isinstance(value, (dict, list))
+        ):
+            raise FfmpegMediaError("ffprobe audio duration is invalid")
+        try:
+            duration = Fraction(str(value))
+        except (ValueError, ZeroDivisionError) as exc:
+            raise FfmpegMediaError(
+                "ffprobe audio duration is invalid"
+            ) from exc
+        if duration <= 0:
+            raise FfmpegMediaError(
+                "ffprobe audio duration must be positive"
+            )
+        return duration
 
     def probe(
         self,
@@ -984,37 +1139,292 @@ class FfmpegMediaAdapter:
             and media.height == plan.height
         )
 
-    def render(
+    @staticmethod
+    def _mask_regions(plan: RenderRequest, target_fps: int) -> list[MaskRegion]:
+        regions: list[MaskRegion] = []
+        for region in plan.blur_regions:
+            covers_everything = (
+                region.interval.start_frame == 0
+                and region.interval.end_frame >= plan.frame_count
+            )
+            intervals = () if covers_everything else (
+                (
+                    Fraction(region.interval.start_frame, target_fps),
+                    Fraction(region.interval.end_frame, target_fps),
+                ),
+            )
+            regions.append(
+                MaskRegion(
+                    box=region.box,
+                    glyph_height=max(
+                        1,
+                        (region.box.ymax - region.box.ymin) // 2,
+                    ),
+                    intervals=intervals,
+                    always_on=covers_everything,
+                )
+            )
+        return regions
+
+    @staticmethod
+    def _externalize_filter_graph(
+        arguments: list[str],
+        script_path: Path,
+    ) -> list[str]:
+        if arguments.count("-filter_complex") != 1:
+            raise FfmpegMediaError("Render needs exactly one inline filter graph")
+        index = arguments.index("-filter_complex")
+        graph = arguments[index + 1]
+        try:
+            script_path.write_text(graph, encoding="utf-8", newline="")
+        except OSError as exc:
+            raise FfmpegMediaError("Render filter script could not be written") from exc
+        externalized = list(arguments)
+        externalized[index:index + 2] = [
+            "-filter_complex_script",
+            str(script_path),
+        ]
+        return externalized
+
+    def render_arguments(
         self,
-        source: Path,
-        tts_wav: Path,
         plan: RenderRequest,
+        inputs: RenderInputs,
+        *,
+        canvas_width: int,
+        canvas_height: int,
+        target_fps: int,
         destination: Path,
+        encoder: str = "libx264",
+    ) -> list[str]:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if not isinstance(inputs, RenderInputs):
+            raise FfmpegMediaError("Render inputs must be RenderInputs")
+        if not isinstance(target_fps, int) or isinstance(target_fps, bool) or target_fps <= 0:
+            raise FfmpegMediaError("Render target FPS must be positive")
+        duration = Fraction(plan.frame_count, target_fps)
+        if (
+            inputs.source_duration is not None
+            and inputs.source_duration != duration
+        ):
+            raise FfmpegMediaError(
+                "Bounded source duration must match the render plan"
+            )
+
+        arguments = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+        ]
+        if inputs.source_start > 0 or inputs.source_duration is not None:
+            arguments += [
+                "-ss",
+                _input_timestamp(inputs.source_start),
+            ]
+        if inputs.source_duration is not None:
+            arguments += [
+                "-t",
+                _input_timestamp(inputs.source_duration),
+            ]
+        arguments += ["-i", str(inputs.source)]
+        if plan.output_has_audio:
+            for index, path in enumerate(inputs.voice_paths):
+                if inputs.voice_trim_starts:
+                    arguments += [
+                        "-ss",
+                        _input_timestamp(
+                            inputs.voice_trim_starts[index]
+                        ),
+                    ]
+                if inputs.source_duration is not None:
+                    arguments += [
+                        "-t",
+                        _input_timestamp(inputs.source_duration),
+                    ]
+                arguments += ["-i", str(path)]
+
+        video = build_video_graph(
+            self._mask_regions(plan, target_fps),
+            width=canvas_width,
+            height=canvas_height,
+            subtitle_path=(
+                None
+                if inputs.subtitle_path is None
+                else str(inputs.subtitle_path)
+            ),
+        )
+        graphs = [video]
+        if plan.output_has_audio:
+            segments = tuple(
+                VoiceSegment(index + 1, start)
+                for index, start in enumerate(inputs.voice_starts)
+            )
+            graphs.append(
+                build_audio_graph(
+                    segments,
+                    source_input_index=0 if inputs.source_has_audio else None,
+                    duration_seconds=duration,
+                    policy=AudioMixPolicy(),
+                )
+            )
+
+        arguments += [
+            "-filter_complex",
+            ";".join(graphs),
+            "-map",
+            "[vout]",
+        ]
+        if plan.output_has_audio:
+            arguments += [
+                "-map",
+                "[aout]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+            ]
+        else:
+            arguments.append("-an")
+
+        arguments += [
+            "-frames:v",
+            str(plan.frame_count),
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(target_fps),
+            "-c:v",
+            encoder,
+        ]
+        if encoder == "h264_nvenc":
+            arguments += [
+                "-preset",
+                "p5",
+                "-rc",
+                "vbr",
+                "-cq",
+                "21",
+                "-b:v",
+                "0",
+            ]
+        else:
+            arguments += [
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            ]
+        arguments += [
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-metadata",
+            "creation_time=2000-01-01T00:00:00Z",
+            "-metadata",
+            "encoder=ytb-vps-v2",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+        return arguments
+
+    def _render_prevalidated(
+        self,
+        plan: RenderRequest,
+        inputs: RenderInputs,
+        destination: Path,
+        *,
+        target_fps: int = 30,
+        encoder: str = "libx264",
+        _anonymous: _AnonymousPosixRender | None = None,
     ) -> MediaDocument:
         if type(plan) is not RenderRequest:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if type(inputs) is not RenderInputs:
+            raise FfmpegMediaError("Render inputs must be RenderInputs")
         anonymous: _AnonymousPosixRender | None = None
         named: _OwnedRenderStaging | None = None
+        render_assets: tempfile.TemporaryDirectory[str] | None = None
         final_output: Path
         if os.name != "nt":
-            final_output = self._destination(destination)
-            anonymous = _AnonymousPosixRender.create(final_output)
+            if _anonymous is None:
+                final_output = self._destination(destination)
+                anonymous = _AnonymousPosixRender.create(final_output)
+            else:
+                if _anonymous.destination != destination:
+                    raise FfmpegMediaError(
+                        "Preflight render destination does not match"
+                    )
+                final_output = destination
+                anonymous = _anonymous
         try:
-            source_media = self.probe(source)
-            if not self._matches_plan(source_media, plan):
-                raise FfmpegMediaError(
-                    "Render source does not match the typed render plan"
-                )
-            if (
-                not isinstance(tts_wav, Path)
-                or not tts_wav.is_file()
-                or tts_wav.is_symlink()
+            render_assets = tempfile.TemporaryDirectory(
+                prefix="ytb-vps-render-",
+            )
+            asset_root = Path(render_assets.name)
+            prepared_subtitle = inputs.subtitle_path
+            if prepared_subtitle is not None:
+                if (
+                    not isinstance(prepared_subtitle, Path)
+                    or not prepared_subtitle.is_file()
+                    or prepared_subtitle.is_symlink()
+                ):
+                    raise FfmpegMediaError(
+                        "Render subtitle input must be a regular file"
+                    )
+            elif any(
+                cue.target_text is not None and cue.target_text.strip()
+                for cue in plan.cues
             ):
-                raise FfmpegMediaError("Render TTS input must be a regular file")
-            if self._digest(tts_wav) != plan.tts_audio_digest:
-                raise FfmpegMediaError(
-                    "Render TTS input does not match the typed render plan"
+                prepared_subtitle = asset_root / "subtitles.ass"
+                document = build_ass_document(
+                    plan.cues,
+                    canvas_width=plan.width,
+                    canvas_height=plan.height,
+                    target_fps=target_fps,
+                    rectangle=SubtitleRectangle(
+                        Fraction(5, 100),
+                        Fraction(78, 100),
+                        Fraction(90, 100),
+                        Fraction(16, 100),
+                    ),
+                    style=SubtitleStyle(),
                 )
+                try:
+                    prepared_subtitle.write_text(
+                        document,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                except OSError as exc:
+                    raise FfmpegMediaError(
+                        "Render subtitle document could not be written"
+                    ) from exc
+            prepared_inputs = replace(
+                inputs,
+                subtitle_path=prepared_subtitle,
+            )
             if anonymous is None:
                 final_output = self._destination(destination)
                 named = _OwnedRenderStaging.create(final_output)
@@ -1025,90 +1435,22 @@ class FfmpegMediaAdapter:
                 output = anonymous.fd_path
                 pass_fds = (anonymous.render_fd,)
                 overwrite_policy = "-y"
-            arguments = [
-                self.ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                overwrite_policy,
-                "-i",
-                str(source),
-            ]
-            if plan.output_has_audio:
-                arguments.extend(["-i", str(tts_wav)])
-            arguments.extend(
-                [
-                    "-map",
-                    "0:v:0",
-                    "-vf",
-                    f"fps=30,scale={plan.width}:{plan.height}:flags=bicubic,format=yuv420p",
-                    "-frames:v",
-                    "900",
-                    "-fps_mode",
-                    "cfr",
-                    "-r",
-                    "30",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-threads:v",
-                    "1",
-                    "-g",
-                    "60",
-                    "-keyint_min",
-                    "60",
-                    "-sc_threshold",
-                    "0",
-                    "-x264-params",
-                    "threads=1:lookahead_threads=1:sliced_threads=0",
-                ]
+            arguments = self.render_arguments(
+                plan,
+                prepared_inputs,
+                canvas_width=plan.width,
+                canvas_height=plan.height,
+                target_fps=target_fps,
+                destination=Path(str(output)),
+                encoder=encoder,
             )
-            if plan.output_has_audio:
-                arguments.extend(
-                    [
-                        "-map",
-                        "1:a:0",
-                        "-af",
-                        "apad=whole_dur=30",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "96k",
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "1",
-                        "-threads:a",
-                        "1",
-                    ]
-                )
-            else:
-                arguments.append("-an")
-            arguments.extend(
-                [
-                    "-map_metadata",
-                    "-1",
-                    "-map_chapters",
-                    "-1",
-                    "-metadata",
-                    "creation_time=2000-01-01T00:00:00Z",
-                    "-metadata",
-                    "encoder=ytb-vps-v2",
-                    "-t",
-                    "30",
-                    "-movflags",
-                    "+faststart",
-                ]
-            )
+            arguments[arguments.index("-y")] = overwrite_policy
             if anonymous is not None:
-                arguments.extend(["-f", "mp4"])
-            arguments.append(str(output))
+                arguments[-1:] = ["-f", "mp4", str(output)]
+            arguments = self._externalize_filter_graph(
+                arguments,
+                asset_root / "filter_complex.txt",
+            )
             self._run(
                 arguments,
                 timeout=self.render_timeout_seconds,
@@ -1117,7 +1459,315 @@ class FfmpegMediaAdapter:
             )
             if anonymous is None:
                 if named is None:
-                    raise FfmpegMediaError("Windows render staging is unavailable")
+                    raise FfmpegMediaError(
+                        "Windows render staging is unavailable"
+                    )
+                named.claim_output()
+                pinned = named.pin(final_output)
+                try:
+                    validated = self.validate_render(
+                        output,
+                        plan,
+                        **(
+                            {"target_fps": target_fps}
+                            if target_fps != 30
+                            else {}
+                        ),
+                    )
+                    pinned.verify(validated.source_digest)
+                    pinned.publish()
+                finally:
+                    pinned.close()
+            else:
+                validated = self.validate_render(
+                    output,
+                    plan,
+                    pass_fds=pass_fds,
+                    logical_name=final_output.name,
+                    **(
+                        {"target_fps": target_fps}
+                        if target_fps != 30
+                        else {}
+                    ),
+                )
+                anonymous.verify(validated.source_digest)
+                anonymous.publish()
+            return replace(
+                validated,
+                source_path=PurePosixPath("inputs") / final_output.name,
+            )
+        finally:
+            if render_assets is not None:
+                render_assets.cleanup()
+            if anonymous is not None:
+                anonymous.cleanup()
+            elif named is not None:
+                named.cleanup()
+
+    @staticmethod
+    def _verify_tts_input(
+        tts_wav: Path,
+    ) -> None:
+        if (
+            not isinstance(tts_wav, Path)
+            or not tts_wav.is_file()
+            or tts_wav.is_symlink()
+        ):
+            raise FfmpegMediaError("Render TTS input must be a regular file")
+
+    def render(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        destination: Path,
+        *,
+        subtitle_path: Path | None = None,
+        target_fps: int = 30,
+        encoder: str = "libx264",
+    ) -> MediaDocument:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        anonymous = self._preflight_render_destination(destination)
+        try:
+            source_media = self.probe(source)
+            if not self._matches_plan(source_media, plan):
+                raise FfmpegMediaError(
+                    "Render source does not match the typed render plan"
+                )
+            self._verify_tts_input(tts_wav)
+            if self._digest(tts_wav) != plan.tts_audio_digest:
+                raise FfmpegMediaError(
+                    "Render TTS input does not match the typed render plan"
+                )
+            return self._render_prevalidated(
+                plan,
+                RenderInputs(
+                    source=source,
+                    subtitle_path=subtitle_path,
+                    voice_paths=(
+                        (tts_wav,) if plan.output_has_audio else ()
+                    ),
+                    voice_starts=(
+                        (Fraction(0),) if plan.output_has_audio else ()
+                    ),
+                    source_has_audio=source_media.has_audio,
+                ),
+                destination,
+                target_fps=target_fps,
+                encoder=encoder,
+                _anonymous=anonymous,
+            )
+        finally:
+            if anonymous is not None:
+                anonymous.cleanup()
+
+    def render_chunk(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        chunk: RenderChunk,
+        destination: Path,
+        *,
+        subtitle_path: Path | None = None,
+        target_fps: int = 30,
+        encoder: str = "libx264",
+    ) -> MediaDocument:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if type(chunk) is not RenderChunk:
+            raise FfmpegMediaError("Render chunk must be a RenderChunk")
+        if (
+            type(target_fps) is not int
+            or target_fps <= 0
+        ):
+            raise FfmpegMediaError("Render target FPS must be positive")
+        anonymous = self._preflight_render_destination(destination)
+        try:
+            source_media = self.probe(source)
+            if not self._matches_plan(source_media, plan):
+                raise FfmpegMediaError(
+                    "Render source does not match the typed render plan"
+                )
+            self._verify_tts_input(tts_wav)
+            if self._digest(tts_wav) != plan.tts_audio_digest:
+                raise FfmpegMediaError(
+                    "Render TTS input does not match the typed render plan"
+                )
+            try:
+                local = chunk_local_request(plan, chunk)
+            except DomainInvariantError as exc:
+                raise FfmpegMediaError("Render chunk is invalid") from exc
+            start = Fraction(chunk.interval.start_frame, target_fps)
+            duration = Fraction(
+                chunk.interval.frame_count,
+                target_fps,
+            )
+            voice_paths: tuple[Path, ...] = ()
+            voice_starts: tuple[Fraction, ...] = ()
+            voice_trim_starts: tuple[Fraction, ...] = ()
+            if (
+                plan.output_has_audio
+                and self._probe_audio_duration(tts_wav) > start
+            ):
+                voice_paths = (tts_wav,)
+                voice_starts = (Fraction(0),)
+                voice_trim_starts = (start,)
+            return self._render_prevalidated(
+                local,
+                RenderInputs(
+                    source=source,
+                    subtitle_path=subtitle_path,
+                    voice_paths=voice_paths,
+                    voice_starts=voice_starts,
+                    source_has_audio=source_media.has_audio,
+                    source_start=start,
+                    source_duration=duration,
+                    voice_trim_starts=voice_trim_starts,
+                ),
+                destination,
+                target_fps=target_fps,
+                encoder=encoder,
+                _anonymous=anonymous,
+            )
+        finally:
+            if anonymous is not None:
+                anonymous.cleanup()
+
+    def _concat_sources(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+    ) -> tuple[Path, ...]:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Concat plan must be a RenderRequest")
+        if type(chunks) is not tuple or not chunks:
+            raise FfmpegMediaError(
+                "Concat chunks must be a non-empty tuple"
+            )
+        expected_count = sum(
+            len(part.chunk_indexes)
+            for part in plan.parts
+        )
+        if len(chunks) != expected_count:
+            raise FfmpegMediaError(
+                "Concat chunk count does not match the render plan"
+            )
+        resolved: list[Path] = []
+        for chunk in chunks:
+            if (
+                not isinstance(chunk, Path)
+                or not chunk.is_file()
+                or chunk.is_symlink()
+            ):
+                raise FfmpegMediaError(
+                    "Concat chunk must be a regular non-symlink file"
+                )
+            try:
+                resolved.append(chunk.resolve(strict=True))
+            except OSError as exc:
+                raise FfmpegMediaError(
+                    "Concat chunk could not be resolved"
+                ) from exc
+        if len(set(resolved)) != len(resolved):
+            raise FfmpegMediaError("Concat chunk paths must be unique")
+        return tuple(resolved)
+
+    def _concat_arguments(
+        self,
+        manifest: Path,
+        destination: Path,
+    ) -> list[str]:
+        return [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(manifest),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-metadata",
+            "creation_time=2000-01-01T00:00:00Z",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+
+    def concatenate_render_chunks(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+        destination: Path,
+    ) -> MediaDocument:
+        sources = self._concat_sources(chunks, plan)
+        anonymous = self._preflight_render_destination(destination)
+        named: _OwnedRenderStaging | None = None
+        concat_assets: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            concat_assets = tempfile.TemporaryDirectory(
+                prefix="ytb-vps-concat-",
+            )
+            manifest = Path(concat_assets.name) / "chunks.txt"
+            try:
+                with manifest.open(
+                    "x",
+                    encoding="utf-8",
+                    newline="",
+                ) as handle:
+                    for source in sources:
+                        handle.write(_concat_line(source))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                raise FfmpegMediaError(
+                    "Concat manifest could not be written"
+                ) from exc
+
+            if anonymous is None:
+                final_output = self._destination(destination)
+                named = _OwnedRenderStaging.create(final_output)
+                output = named.output
+                pass_fds: tuple[int, ...] = ()
+                overwrite_policy = "-n"
+            else:
+                final_output = destination
+                output = anonymous.fd_path
+                pass_fds = (anonymous.render_fd,)
+                overwrite_policy = "-y"
+            arguments = self._concat_arguments(
+                manifest,
+                Path(str(output)),
+            )
+            arguments[arguments.index("-y")] = overwrite_policy
+            if anonymous is not None:
+                arguments[-1:] = ["-f", "mp4", str(output)]
+            self._run(
+                arguments,
+                timeout=self.render_timeout_seconds,
+                stdout_limit=self.diagnostic_limit,
+                pass_fds=pass_fds,
+            )
+            if anonymous is None:
+                if named is None:
+                    raise FfmpegMediaError(
+                        "Windows concat staging is unavailable"
+                    )
                 named.claim_output()
                 pinned = named.pin(final_output)
                 try:
@@ -1140,6 +1790,8 @@ class FfmpegMediaAdapter:
                 source_path=PurePosixPath("inputs") / final_output.name,
             )
         finally:
+            if concat_assets is not None:
+                concat_assets.cleanup()
             if anonymous is not None:
                 anonymous.cleanup()
             elif named is not None:
@@ -1152,9 +1804,16 @@ class FfmpegMediaAdapter:
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument:
         if type(expected) is not RenderRequest:
             raise FfmpegMediaError("Expected render identity must be a RenderRequest")
+        if (
+            not isinstance(target_fps, int)
+            or isinstance(target_fps, bool)
+            or target_fps <= 0
+        ):
+            raise FfmpegMediaError("Render target FPS must be positive")
         if pass_fds:
             if (
                 len(pass_fds) != 1
@@ -1187,12 +1846,12 @@ class FfmpegMediaAdapter:
             pass_fds=pass_fds,
             logical_name=logical_name,
         )
-        expected_duration = Fraction(expected.frame_count, 30)
+        expected_duration = Fraction(expected.frame_count, target_fps)
         if actual.width != expected.width or actual.height != expected.height:
             raise FfmpegMediaError("Rendered media dimensions do not match the plan")
-        if actual.source_fps != Fraction(30):
+        if actual.source_fps != Fraction(target_fps):
             raise FfmpegMediaError("Rendered media frame rate is not canonical")
-        if abs(actual.duration_seconds - expected_duration) > Fraction(1, 30):
+        if abs(actual.duration_seconds - expected_duration) > Fraction(1, target_fps):
             raise FfmpegMediaError("Rendered media duration differs by more than one frame")
         if actual.frame_count != expected.frame_count:
             raise FfmpegMediaError("Rendered media frame count does not match the plan")

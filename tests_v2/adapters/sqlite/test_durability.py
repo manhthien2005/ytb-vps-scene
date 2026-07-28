@@ -59,15 +59,21 @@ class SqliteDurabilityStateTests(unittest.TestCase):
             "created",
         )
 
-    def test_schema_v2_tables_exist_and_real_v1_database_migrates(self) -> None:
+    def test_current_tables_exist_and_real_v1_database_migrates(self) -> None:
         tables = {
             row[0]
             for row in self.store.connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        self.assertEqual(SCHEMA_VERSION, 2)
-        self.assertTrue({"input_archives", "checkpoint_snapshots"}.issubset(tables))
+        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertTrue(
+            {
+                "input_archives",
+                "checkpoint_snapshots",
+                "work_unit_dependencies",
+            }.issubset(tables)
+        )
 
         legacy_path = self.base / "legacy" / "job-v2.sqlite"
         legacy_path.parent.mkdir()
@@ -82,7 +88,10 @@ class SqliteDurabilityStateTests(unittest.TestCase):
 
         migrated = connect_database(legacy_path)
         self.addCleanup(migrated.close)
-        self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(
+            migrated.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         self.assertEqual(
             migrated.execute("SELECT job_id FROM jobs").fetchone()[0],
             "preserved",
@@ -197,7 +206,10 @@ class SqliteBackupSnapshotTests(unittest.TestCase):
         snapshot = sqlite3.connect(self.destination)
         self.addCleanup(snapshot.close)
         self.assertEqual(snapshot.execute("PRAGMA integrity_check").fetchone()[0], "ok")
-        self.assertEqual(snapshot.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(
+            snapshot.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         self.assertEqual(snapshot.execute("SELECT job_id FROM jobs").fetchone()[0], "job-1")
         self.assertEqual(tuple(self.snapshot_dir.glob("*.part")), ())
 

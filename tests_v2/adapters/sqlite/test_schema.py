@@ -6,11 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from ytb_vps_v2.adapters.sqlite import schema as schema_module
 from ytb_vps_v2.adapters.sqlite.schema import (
     SCHEMA_VERSION,
     StateStoreError,
     connect_database,
 )
+from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
+from ytb_vps_v2.domain.models import JobId, WorkStatus
 
 
 class SqliteSchemaTests(unittest.TestCase):
@@ -29,7 +32,7 @@ class SqliteSchemaTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(SCHEMA_VERSION, 3)
         self.assertEqual(
             connection.execute("PRAGMA user_version").fetchone()[0],
             SCHEMA_VERSION,
@@ -49,8 +52,14 @@ class SqliteSchemaTests(unittest.TestCase):
                 "retry_events",
                 "input_archives",
                 "checkpoint_snapshots",
+                "work_unit_dependencies",
             }.issubset(tables)
         )
+        artifact_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(artifacts)")
+        }
+        self.assertIn("unit_key", artifact_columns)
 
     def test_reopen_is_idempotent_and_preserves_rows(self) -> None:
         first = connect_database(self.path)
@@ -72,7 +81,7 @@ class SqliteSchemaTests(unittest.TestCase):
 
     def test_future_schema_version_fails_explicitly(self) -> None:
         connection = connect_database(self.path)
-        connection.execute("PRAGMA user_version=3")
+        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
         connection.close()
 
         with self.assertRaisesRegex(StateStoreError, "newer schema version"):
@@ -99,6 +108,139 @@ class SqliteSchemaTests(unittest.TestCase):
 
         with self.assertRaises(sqlite3.ProgrammingError):
             memory_connection.execute("SELECT 1")
+
+    def test_schema_v2_migrates_unit_ownership_without_changing_state(
+        self,
+    ) -> None:
+        connection = sqlite3.connect(self.path, isolation_level=None)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(schema_module._MIGRATION_1)
+        connection.executescript(schema_module._MIGRATION_2)
+        connection.execute(
+            "INSERT INTO jobs(job_id, source_sha256, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("job-1", "a" * 64, "t0", "t2"),
+        )
+        connection.execute(
+            "INSERT INTO work_units("
+            "job_id, unit_key, stage, status, attempts, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            ("job-1", "render", "RENDER", "SUCCEEDED", 2, "t2"),
+        )
+        connection.execute(
+            "INSERT INTO artifacts("
+            "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
+            "dependencies_json, is_valid, committed_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job-1",
+                "render-plan",
+                "artifacts/render/render-plan.json",
+                42,
+                "b" * 64,
+                "RENDER",
+                '["tts"]',
+                1,
+                "t2",
+            ),
+        )
+        connection.close()
+
+        store = SqliteStateStore(self.path)
+        self.addCleanup(store.close)
+
+        self.assertEqual(
+            store.connection.execute("PRAGMA user_version").fetchone()[0],
+            3,
+        )
+        unit = store.get_work_unit(JobId("job-1"), "render")
+        self.assertIs(unit.status, WorkStatus.SUCCEEDED)
+        self.assertEqual(unit.attempts, 2)
+        row = store.connection.execute(
+            "SELECT name, size_bytes, sha256, owner_stage, unit_key, "
+            "dependencies_json, is_valid, committed_at "
+            "FROM artifacts WHERE job_id=?",
+            ("job-1",),
+        ).fetchone()
+        self.assertEqual(
+            tuple(row),
+            (
+                "render-plan",
+                42,
+                "b" * 64,
+                "RENDER",
+                "render",
+                '["tts"]',
+                1,
+                "t2",
+            ),
+        )
+
+    def test_schema_v3_migration_failure_rolls_back_the_entire_rebuild(
+        self,
+    ) -> None:
+        connection = sqlite3.connect(self.path, isolation_level=None)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(schema_module._MIGRATION_1)
+        connection.executescript(schema_module._MIGRATION_2)
+        connection.execute(
+            "INSERT INTO jobs(job_id, source_sha256, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("job-1", "a" * 64, "t0", "t1"),
+        )
+        connection.execute(
+            "INSERT INTO work_units("
+            "job_id, unit_key, stage, status, attempts, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            ("job-1", "render:legacy", "RENDER", "SUCCEEDED", 1, "t1"),
+        )
+        connection.execute(
+            "INSERT INTO artifacts("
+            "job_id, name, relative_path, size_bytes, sha256, owner_stage, "
+            "dependencies_json, is_valid, committed_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job-1",
+                "legacy-render",
+                "artifacts/render/legacy.mp4",
+                42,
+                "b" * 64,
+                "RENDER",
+                "[]",
+                1,
+                "t1",
+            ),
+        )
+        connection.close()
+
+        with self.assertRaises(StateStoreError):
+            connect_database(self.path)
+
+        inspected = sqlite3.connect(self.path)
+        self.addCleanup(inspected.close)
+        self.assertEqual(
+            inspected.execute("PRAGMA user_version").fetchone()[0],
+            2,
+        )
+        self.assertNotIn(
+            "unit_key",
+            {
+                row[1]
+                for row in inspected.execute("PRAGMA table_info(artifacts)")
+            },
+        )
+        self.assertEqual(
+            inspected.execute(
+                "SELECT name, sha256 FROM artifacts"
+            ).fetchone(),
+            ("legacy-render", "b" * 64),
+        )
+        self.assertIsNone(
+            inspected.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='artifacts_v2'"
+            ).fetchone()
+        )
 
 
 if __name__ == "__main__":

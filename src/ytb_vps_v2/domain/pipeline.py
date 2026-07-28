@@ -10,25 +10,29 @@ from typing import TypeAlias
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
+from ytb_vps_v2.domain.fingerprints import Fingerprint
 from ytb_vps_v2.domain.models import (
     BlurRegion,
     BoundingBox,
     Cue,
     JobId,
     Part,
+    RenderChunk,
     RegionKind,
 )
+from ytb_vps_v2.domain.render_chunks import single_part_for_chunks
 from ytb_vps_v2.domain.timeline import FrameInterval, Timeline
 
 
 SCHEMA_VERSION = 1
-OFFLINE_FRAME_COUNT = 900
-OFFLINE_DURATION_SECONDS = Fraction(30)
 MEDIA_ARTIFACT_PATH = PurePosixPath("artifacts/ingest/media.json")
 OCR_ARTIFACT_PATH = PurePosixPath("artifacts/ocr/ocr.json")
 TRACK_ARTIFACT_PATH = PurePosixPath("artifacts/track/track.json")
 TRANSLATION_ARTIFACT_PATH = PurePosixPath("artifacts/translate/translation.json")
 TTS_ARTIFACT_PATH = PurePosixPath("artifacts/tts/tts.json")
+RENDER_CHUNK_PLAN_ARTIFACT_PATH = PurePosixPath(
+    "artifacts/render/chunk-plan.json"
+)
 RENDER_PLAN_ARTIFACT_PATH = PurePosixPath("artifacts/render/render-plan.json")
 PUBLICATION_ARTIFACT_PATH = PurePosixPath("artifacts/publish/publication.json")
 CHECKPOINT_ARTIFACT_PATH = PurePosixPath("artifacts/backup/checkpoint.json")
@@ -102,10 +106,6 @@ def _dimensions(frame_count: object, width: object, height: object) -> None:
     _require_int("Frame count", frame_count, minimum=1)
     _require_int("Media width", width, minimum=1)
     _require_int("Media height", height, minimum=1)
-    if frame_count != OFFLINE_FRAME_COUNT:
-        raise DomainInvariantError(
-            f"Offline document frame count must be {OFFLINE_FRAME_COUNT}"
-        )
 
 
 def _base(
@@ -261,12 +261,17 @@ class MediaDocument:
         _require_int("Media timeline target FPS", self.timeline.target_fps)
         _dimensions(self.frame_count, self.width, self.height)
         _require_exact("Media audio flag", self.has_audio, bool)
-        if self.duration_seconds != OFFLINE_DURATION_SECONDS:
-            raise DomainInvariantError("Offline media duration must be exactly 30 seconds")
+        # The canonical timeline is the only clock in the system: every Cue,
+        # BlurRegion and Part frame index lives on it. Pinning duration to
+        # frames/target_fps is what stops audio drifting from video over an hour.
         if self.source_fps <= 0:
             raise DomainInvariantError("Media source FPS must be positive")
-        if self.timeline.target_fps != 30:
-            raise DomainInvariantError("Offline media timeline must use 30 FPS")
+        if self.timeline.target_fps <= 0:
+            raise DomainInvariantError("Media timeline FPS must be positive")
+        if self.duration_seconds != Fraction(self.frame_count, self.timeline.target_fps):
+            raise DomainInvariantError(
+                "Media duration must equal frame count divided by the timeline FPS"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +415,47 @@ class TtsDocument:
         )
         _artifact_path("TTS audio path", self.audio_path)
         _digest("TTS audio digest", self.audio_digest)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderChunkPlanDocument:
+    schema_version: int
+    job_id: JobId
+    media_digest: FileDigest
+    frame_count: int
+    width: int
+    height: int
+    dependency_path: PurePosixPath
+    dependency_digest: FileDigest
+    render_fingerprint: Fingerprint
+    chunks: tuple[RenderChunk, ...]
+    parts: tuple[Part, ...]
+    output_has_audio: bool
+
+    def __post_init__(self) -> None:
+        _base(
+            self.schema_version,
+            self.job_id,
+            self.media_digest,
+            self.frame_count,
+            self.width,
+            self.height,
+            self.dependency_path,
+            self.dependency_digest,
+            TTS_ARTIFACT_PATH,
+        )
+        if type(self.render_fingerprint) is not Fingerprint:
+            raise DomainInvariantError("Chunk plan needs a render fingerprint")
+        expected = single_part_for_chunks(self.frame_count, self.chunks)
+        if self.parts != (expected,):
+            raise DomainInvariantError(
+                "Chunk plan Part must cover every render chunk"
+            )
+        _require_exact(
+            "Chunk-plan audio flag",
+            self.output_has_audio,
+            bool,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +639,7 @@ PipelineDocument: TypeAlias = (
     | TrackDocument
     | TranslationDocument
     | TtsDocument
+    | RenderChunkPlanDocument
     | RenderPlanDocument
     | PublicationDocument
     | CheckpointDocument
@@ -606,6 +653,7 @@ PIPELINE_ARTIFACT_PATHS = MappingProxyType(
         TrackDocument: TRACK_ARTIFACT_PATH,
         TranslationDocument: TRANSLATION_ARTIFACT_PATH,
         TtsDocument: TTS_ARTIFACT_PATH,
+        RenderChunkPlanDocument: RENDER_CHUNK_PLAN_ARTIFACT_PATH,
         RenderPlanDocument: RENDER_PLAN_ARTIFACT_PATH,
         PublicationDocument: PUBLICATION_ARTIFACT_PATH,
         CheckpointDocument: CHECKPOINT_ARTIFACT_PATH,
@@ -664,6 +712,13 @@ def _part_dict(value: Part) -> dict[str, object]:
     }
 
 
+def _render_chunk_dict(value: RenderChunk) -> dict[str, object]:
+    return {
+        "index": value.index,
+        "interval": _interval_dict(value.interval),
+    }
+
+
 def _base_dict(document: object, document_type: str) -> dict[str, object]:
     return {
         "dependency_digest": _digest_dict(document.dependency_digest),  # type: ignore[attr-defined]
@@ -713,6 +768,17 @@ def _document_dict(document: object) -> dict[str, object]:
             audio_digest=_digest_dict(document.audio_digest),
             audio_path=str(document.audio_path),
             cues=[_cue_dict(item) for item in document.cues],
+        )
+    if type(document) is RenderChunkPlanDocument:
+        return dict(
+            _base_dict(document, "render_chunk_plan"),
+            chunks=[
+                _render_chunk_dict(item)
+                for item in document.chunks
+            ],
+            output_has_audio=document.output_has_audio,
+            parts=[_part_dict(item) for item in document.parts],
+            render_fingerprint=document.render_fingerprint.sha256,
         )
     if type(document) is RenderPlanDocument:
         return dict(
@@ -766,6 +832,7 @@ _INTERVAL_FIELDS = {"end_frame", "start_frame"}
 _BOX_FIELDS = {"xmax", "xmin", "ymax", "ymin"}
 _CUE_FIELDS = {"box", "cue_index", "interval", "source_text", "target_text"}
 _BLUR_FIELDS = {"box", "interval", "kind"}
+_RENDER_CHUNK_FIELDS = {"index", "interval"}
 _PART_FIELDS = {"chunk_indexes", "interval", "part_count", "part_index"}
 _BASE_FIELDS = {
     "dependency_digest",
@@ -903,6 +970,14 @@ def _part_from(value: object) -> Part:
         item["part_count"],  # type: ignore[arg-type]
         _interval_from(item["interval"]),
         tuple(indexes),  # type: ignore[arg-type]
+    )
+
+
+def _render_chunk_from(value: object) -> RenderChunk:
+    item = _closed_dict("Render chunk", value, _RENDER_CHUNK_FIELDS)
+    return RenderChunk(
+        item["index"],  # type: ignore[arg-type]
+        _interval_from(item["interval"]),
     )
 
 
@@ -1091,6 +1166,36 @@ def parse_tts_document_bytes(
     )
     result = _finish(encoded, document)
     _verify_upstream(result, upstream, TranslationDocument)
+    return result  # type: ignore[return-value]
+
+
+def parse_render_chunk_plan_document_bytes(
+    raw: bytes,
+    upstream: TtsDocument | None = None,
+) -> RenderChunkPlanDocument:
+    fields = _BASE_FIELDS | {
+        "chunks",
+        "output_has_audio",
+        "parts",
+        "render_fingerprint",
+    }
+    encoded, root = _decode(
+        raw,
+        document_type="render_chunk_plan",
+        fields=fields,
+    )
+    document = RenderChunkPlanDocument(
+        *_base_from(root),
+        Fingerprint(root["render_fingerprint"]),  # type: ignore[arg-type]
+        tuple(
+            _render_chunk_from(item)
+            for item in _array("Render chunks", root["chunks"])
+        ),
+        tuple(_part_from(item) for item in _array("Parts", root["parts"])),
+        root["output_has_audio"],  # type: ignore[arg-type]
+    )
+    result = _finish(encoded, document)
+    _verify_upstream(result, upstream, TtsDocument)
     return result  # type: ignore[return-value]
 
 

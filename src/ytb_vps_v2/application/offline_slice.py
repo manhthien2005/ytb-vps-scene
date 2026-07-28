@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-import tempfile
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, TypeAlias, TypeVar
 
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
+from ytb_vps_v2.application.chunked_render import (
+    ChunkedRenderCoordinator,
+    PreparedRender,
+)
 from ytb_vps_v2.application.invalidation import plan_invalidation
 from ytb_vps_v2.domain.backup import (
     CheckpointManifest,
@@ -35,6 +38,7 @@ from ytb_vps_v2.domain.pipeline import (
     OCR_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
     PUBLICATION_ARTIFACT_PATH,
+    RENDER_CHUNK_PLAN_ARTIFACT_PATH,
     RENDER_PLAN_ARTIFACT_PATH,
     TTS_ARTIFACT_PATH,
     CheckpointDocument,
@@ -119,7 +123,6 @@ _SIDE_NAMES = {
     StageName.RENDER: "rendered-video",
     StageName.PUBLISH: "published-part-001",
 }
-_PART = Part(1, 1, FrameInterval(0, 900), (0,))
 _VERIFY_METHOD = "sha256-readback"
 _MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 
@@ -141,6 +144,7 @@ class OfflineSliceRequest:
     # User-authored static masks from the scene editor.  These are intentionally
     # immutable for one run and are combined with OCR-derived dynamic masks.
     blur_regions: tuple[BlurRegion, ...] = ()
+    chunk_seconds: int = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,12 +158,6 @@ class OfflineSliceResult:
     proof_manifest: CheckpointManifest
     final_manifest: CheckpointManifest
     final_checkpoint: CheckpointRecord
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedRender:
-    request: RenderRequest
-    temporary_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,12 +219,36 @@ class OfflineSliceRunner:
             if self.files.digest(request.source) != request.verified_input.archive.digest:
                 raise OfflineSliceError("Archived input failed exact digest verification")
             self.state.recover_stale_work(request.at)
-            self.state.create_job(
-                request.job_id,
-                Fingerprint(request.verified_input.source.digest.sha256),
-                request.config_fingerprints,
-                request.at,
+            source_fingerprint = Fingerprint(
+                request.verified_input.source.digest.sha256
             )
+            stored = self.state.stored_config_fingerprints(request.job_id)
+            if stored is None:
+                self.state.create_job(
+                    request.job_id,
+                    source_fingerprint,
+                    request.config_fingerprints,
+                    request.at,
+                )
+            else:
+                self.state.create_job(
+                    request.job_id,
+                    source_fingerprint,
+                    stored,
+                    request.at,
+                )
+                invalidation = plan_invalidation(
+                    stored,
+                    request.config_fingerprints,
+                )
+                if invalidation.affected_stages:
+                    self.state.reconfigure_job(
+                        request.job_id,
+                        stored,
+                        request.config_fingerprints,
+                        invalidation,
+                        request.at,
+                    )
             self.state.record_verified_input(request.job_id, request.verified_input)
             self._ensure_units(request)
             resumed = self._resume_workspace(request)
@@ -243,7 +265,13 @@ class OfflineSliceRunner:
                             f"Succeeded stage lacks verified canonical output: {stage.value}"
                         )
                     continue
-                self.state.start_work_unit(request.job_id, unit.key, request.at)
+                delayed_start = stage is StageName.RENDER
+                if not delayed_start:
+                    self.state.start_work_unit(
+                        request.job_id,
+                        unit.key,
+                        request.at,
+                    )
                 self._hit(stage, InterruptionPoint.BEFORE_PROVIDER)
                 prepared: PreparedStage | None = None
                 try:
@@ -255,6 +283,12 @@ class OfflineSliceRunner:
                         writer,
                         resumed.proof_repair_token,
                     )
+                    if delayed_start:
+                        self.state.start_work_unit(
+                            request.job_id,
+                            unit.key,
+                            request.at,
+                        )
                     self._hit(stage, InterruptionPoint.AFTER_PROVIDER)
                     self._hit(stage, InterruptionPoint.BEFORE_FILESYSTEM_PUBLICATION)
                     document = self._publish_prepared(
@@ -408,6 +442,13 @@ class OfflineSliceRunner:
         if type(request.output_has_audio) is not bool:
             raise OfflineSliceError("Output audio policy must be boolean")
         if (
+            type(request.chunk_seconds) is not int
+            or request.chunk_seconds < 1
+        ):
+            raise OfflineSliceError(
+                "Render chunk seconds must be a positive integer"
+            )
+        if (
             type(request.verification_observed_at) is not int
             or request.verification_observed_at < 0
         ):
@@ -428,7 +469,9 @@ class OfflineSliceRunner:
             raise OfflineSliceError("Proof and final checkpoints must be distinct")
 
     def _ensure_units(self, request: OfflineSliceRequest) -> None:
+        previous: str | None = None
         for stage, key in zip(STAGE_ORDER, _UNIT_KEYS, strict=True):
+            dependencies = () if previous is None else (previous,)
             try:
                 unit = self.state.get_work_unit(request.job_id, key)
             except RuntimeError as exc:
@@ -436,12 +479,31 @@ class OfflineSliceRunner:
                     raise
                 self.state.put_work_unit(
                     request.job_id,
-                    WorkUnit(key, stage),
+                    WorkUnit(
+                        key,
+                        stage,
+                        dependencies=dependencies,
+                    ),
                     request.at,
                 )
             else:
-                if unit.stage is not stage:
+                dynamic_render = (
+                    stage is StageName.RENDER
+                    and unit.dependencies
+                    and all(
+                        re.fullmatch(r"render:\d{6}", item)
+                        for item in unit.dependencies
+                    )
+                )
+                if (
+                    unit.stage is not stage
+                    or (
+                        unit.dependencies != dependencies
+                        and not dynamic_render
+                    )
+                ):
                     raise OfflineSliceError("Stored work-unit graph is inconsistent")
+            previous = key
 
     def _hit(self, stage: StageName, point: InterruptionPoint) -> None:
         if self.interruption is not None:
@@ -709,14 +771,19 @@ class OfflineSliceRunner:
             stage: tuple(item for item in artifacts if item.owner is stage)
             for stage in STAGE_ORDER
         }
+        by_unit = {
+            key: self.state.artifacts_for_unit(request.job_id, key)
+            for key in _UNIT_KEYS
+        }
         writer = self.artifact_writers(request.workspace_root)
         documents: dict[StageName, PipelineDocument] = {}
         damaged: StageName | None = None
+        exact_damaged_unit: str | None = None
         upstream: PipelineDocument | None = None
         primary_by_stage: dict[StageName, Artifact] = {}
         for index, stage in enumerate(STAGE_ORDER):
             unit = self.state.get_work_unit(request.job_id, _UNIT_KEYS[index])
-            values = by_owner[stage]
+            values = by_unit[_UNIT_KEYS[index]]
             if unit.status is not WorkStatus.SUCCEEDED:
                 if values:
                     raise OfflineSliceError("Non-succeeded work owns a valid artifact")
@@ -751,6 +818,67 @@ class OfflineSliceRunner:
             upstream = document
 
         if damaged is None:
+            for unit in self.state.work_units(request.job_id):
+                match = re.fullmatch(
+                    r"render:(plan|[0-9]{6})",
+                    unit.key,
+                )
+                if (
+                    match is None
+                    or unit.status is not WorkStatus.SUCCEEDED
+                ):
+                    continue
+                auxiliary = self.state.artifacts_for_unit(
+                    request.job_id,
+                    unit.key,
+                )
+                canonical = len(auxiliary) == 1
+                if canonical:
+                    artifact = auxiliary[0]
+                    if match.group(1) == "plan":
+                        canonical = (
+                            artifact.name == "render-chunk-plan"
+                            and artifact.relative_path
+                            == RENDER_CHUNK_PLAN_ARTIFACT_PATH
+                            and artifact.owner is StageName.RENDER
+                            and artifact.dependencies == ("tts-document",)
+                        )
+                    else:
+                        index = int(match.group(1))
+                        canonical = (
+                            artifact.name
+                            == f"render-chunk-{index:06d}"
+                            and artifact.relative_path
+                            == PurePosixPath(
+                                "artifacts/render/chunks/"
+                                f"chunk-{index:06d}.mp4"
+                            )
+                            and artifact.owner is StageName.RENDER
+                            and artifact.dependencies
+                            == ("render-chunk-plan",)
+                        )
+                if canonical:
+                    try:
+                        writer.verify(
+                            auxiliary[0].relative_path,
+                            FileDigest(
+                                auxiliary[0].size_bytes,
+                                auxiliary[0].sha256,
+                            ),
+                        )
+                    except (OSError, RuntimeError):
+                        canonical = False
+                if not canonical:
+                    self.state.invalidate_work_units(
+                        request.job_id,
+                        (unit.key,),
+                        request.at,
+                    )
+                    damaged = StageName.RENDER
+                    exact_damaged_unit = unit.key
+                    break
+
+        if damaged is None:
             for stage, key in zip(STAGE_ORDER, _UNIT_KEYS, strict=True):
                 if self.state.get_work_unit(request.job_id, key).status is WorkStatus.INVALID:
                     damaged = stage
@@ -758,12 +886,12 @@ class OfflineSliceRunner:
         if damaged is None:
             return ResumeState(request.workspace_root, documents, None)
 
-        invalidation = plan_invalidation(
-            request.config_fingerprints,
-            request.config_fingerprints,
-            changed_artifact_owners=(damaged,),
-        )
-        self.state.apply_invalidation(request.job_id, invalidation, request.at)
+        if exact_damaged_unit is None:
+            self.state.invalidate_work_units(
+                request.job_id,
+                (damaged.value.lower(),),
+                request.at,
+            )
         proof_repair_token = None
         if damaged is StageName.BACKUP:
             primary = primary_by_stage.get(StageName.BACKUP)
@@ -787,15 +915,23 @@ class OfflineSliceRunner:
             )
         fresh_writer = self.artifact_writers(fresh)
         damaged_index = STAGE_ORDER.index(damaged)
-        for index in range(damaged_index):
-            for artifact in by_owner[STAGE_ORDER[index]]:
-                expected = FileDigest(artifact.size_bytes, artifact.sha256)
-                source = request.workspace_root.joinpath(*artifact.relative_path.parts)
-                if self.files.digest(source) != expected:
-                    raise FreshWorkspaceRequired("Verified upstream artifact changed")
-                copied = fresh_writer.write_file(artifact.relative_path, source)
-                if copied.digest != expected:
-                    raise FreshWorkspaceRequired("Upstream artifact copy changed")
+        for artifact in self.state.valid_artifacts(request.job_id):
+            expected = FileDigest(artifact.size_bytes, artifact.sha256)
+            source = request.workspace_root.joinpath(
+                *artifact.relative_path.parts
+            )
+            if self.files.digest(source) != expected:
+                raise FreshWorkspaceRequired(
+                    "Verified upstream artifact changed"
+                )
+            copied = fresh_writer.write_file(
+                artifact.relative_path,
+                source,
+            )
+            if copied.digest != expected:
+                raise FreshWorkspaceRequired(
+                    "Upstream artifact copy changed"
+                )
         return ResumeState(
             fresh,
             {
@@ -884,10 +1020,7 @@ class OfflineSliceRunner:
             )
         if stage is StageName.TRACK:
             ocr = self._document(documents, StageName.OCR, OcrDocument)
-            configured_regions = tuple(
-                BlurRegion(region.kind, FrameInterval(0, ocr.frame_count), region.box)
-                for region in request.blur_regions
-            )
+            configured_regions = request.blur_regions
             return TrackDocument(
                 ocr.schema_version,
                 ocr.job_id,
@@ -927,25 +1060,41 @@ class OfflineSliceRunner:
                 track.blur_regions,
                 tts.audio_path,
                 tts.audio_digest,
-                (_PART,),
+                (
+                    Part(
+                        1,
+                        1,
+                        FrameInterval(0, tts.frame_count),
+                        (0,),
+                    ),
+                ),
                 request.output_has_audio,
             )
-            temporary = tempfile.NamedTemporaryFile(
-                prefix="offline-render-",
-                suffix=".mp4",
-                dir=request.snapshot_dir,
-                delete=False,
+            render_fingerprint = next(
+                item.fingerprint
+                for item in request.config_fingerprints
+                if item.stage is StageName.RENDER
             )
-            temporary_path = Path(temporary.name)
-            temporary.close()
-            temporary_path.unlink()
-            self.media.render(
-                request.source,
-                workspace.joinpath(*tts.audio_path.parts),
-                render_request,
-                temporary_path,
+            return ChunkedRenderCoordinator(
+                self.state,
+                self.checkpoints,
+                self.media,
+                self.files,
+            ).prepare(
+                job_id=request.job_id,
+                source=request.source,
+                tts_wav=workspace.joinpath(*tts.audio_path.parts),
+                request=render_request,
+                render_fingerprint=render_fingerprint,
+                chunk_seconds=request.chunk_seconds,
+                workspace=workspace,
+                snapshot_dir=request.snapshot_dir,
+                writer=writer,
+                at=request.at,
+                verification_observed_at=(
+                    request.verification_observed_at
+                ),
             )
-            return PreparedRender(render_request, temporary_path)
         if stage is StageName.PUBLISH:
             plan = self._document(documents, StageName.RENDER, RenderPlanDocument)
             source = workspace.joinpath(*plan.rendered_path.parts)
@@ -1068,8 +1217,15 @@ class OfflineSliceRunner:
                 rendered_entry.digest,
             )
         if stage is StageName.PUBLISH and type(prepared) is PreparedPublish:
-            part_entry = publisher.publish(prepared.source, _PART)
             plan = prepared.plan
+            if len(plan.parts) != 1:
+                raise OfflineSliceError(
+                    "Offline publication requires exactly one Part"
+                )
+            part_entry = publisher.publish(
+                prepared.source,
+                plan.parts[0],
+            )
             return PublicationDocument(
                 plan.schema_version,
                 plan.job_id,

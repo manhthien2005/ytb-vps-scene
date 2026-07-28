@@ -11,12 +11,14 @@ from pathlib import PurePosixPath
 
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
+from ytb_vps_v2.domain.fingerprints import Fingerprint
 from ytb_vps_v2.domain.models import (
     BlurRegion,
     BoundingBox,
     Cue,
     JobId,
     Part,
+    RenderChunk,
     RegionKind,
 )
 from ytb_vps_v2.domain.pipeline import (
@@ -24,6 +26,7 @@ from ytb_vps_v2.domain.pipeline import (
     MediaDocument,
     OcrDocument,
     PublicationDocument,
+    RenderChunkPlanDocument,
     RenderPlanDocument,
     TrackDocument,
     TranslationDocument,
@@ -33,6 +36,7 @@ from ytb_vps_v2.domain.pipeline import (
     parse_media_document_bytes,
     parse_ocr_document_bytes,
     parse_publication_document_bytes,
+    parse_render_chunk_plan_document_bytes,
     parse_render_plan_document_bytes,
     parse_track_document_bytes,
     parse_translation_document_bytes,
@@ -48,6 +52,9 @@ OCR_ARTIFACT_PATH = PurePosixPath("artifacts/ocr/ocr.json")
 TRACK_ARTIFACT_PATH = PurePosixPath("artifacts/track/track.json")
 TRANSLATION_ARTIFACT_PATH = PurePosixPath("artifacts/translate/translation.json")
 TTS_ARTIFACT_PATH = PurePosixPath("artifacts/tts/tts.json")
+RENDER_CHUNK_PLAN_ARTIFACT_PATH = PurePosixPath(
+    "artifacts/render/chunk-plan.json"
+)
 RENDER_PLAN_ARTIFACT_PATH = PurePosixPath("artifacts/render/render-plan.json")
 PUBLICATION_ARTIFACT_PATH = PurePosixPath("artifacts/publish/publication.json")
 
@@ -163,6 +170,29 @@ def render_plan() -> RenderPlanDocument:
     )
 
 
+def render_chunk_plan() -> RenderChunkPlanDocument:
+    upstream = replace(tts(), frame_count=601)
+    chunks = (
+        RenderChunk(0, FrameInterval(0, 300)),
+        RenderChunk(1, FrameInterval(300, 600)),
+        RenderChunk(2, FrameInterval(600, 601)),
+    )
+    return RenderChunkPlanDocument(
+        1,
+        upstream.job_id,
+        upstream.media_digest,
+        upstream.frame_count,
+        upstream.width,
+        upstream.height,
+        TTS_ARTIFACT_PATH,
+        document_digest(upstream),
+        Fingerprint("c" * 64),
+        chunks,
+        (Part(1, 1, FrameInterval(0, 601), (0, 1, 2)),),
+        True,
+    )
+
+
 def publication() -> PublicationDocument:
     return PublicationDocument(
         *common(RENDER_PLAN_ARTIFACT_PATH),  # type: ignore[arg-type]
@@ -209,6 +239,7 @@ class PipelineModuleContractTests(unittest.TestCase):
             "TrackDocument",
             "TranslationDocument",
             "TtsDocument",
+            "RenderChunkPlanDocument",
             "RenderPlanDocument",
             "PublicationDocument",
             "CheckpointDocument",
@@ -219,6 +250,7 @@ class PipelineModuleContractTests(unittest.TestCase):
             "parse_track_document_bytes",
             "parse_translation_document_bytes",
             "parse_tts_document_bytes",
+            "parse_render_chunk_plan_document_bytes",
             "parse_render_plan_document_bytes",
             "parse_publication_document_bytes",
             "parse_checkpoint_document_bytes",
@@ -237,6 +269,7 @@ class PipelineModuleContractTests(unittest.TestCase):
             "TrackDocument",
             "TranslationDocument",
             "TtsDocument",
+            "RenderChunkPlanDocument",
             "RenderPlanDocument",
             "PublicationDocument",
             "CheckpointDocument",
@@ -247,6 +280,7 @@ class PipelineModuleContractTests(unittest.TestCase):
             "parse_track_document_bytes",
             "parse_translation_document_bytes",
             "parse_tts_document_bytes",
+            "parse_render_chunk_plan_document_bytes",
             "parse_render_plan_document_bytes",
             "parse_publication_document_bytes",
             "parse_checkpoint_document_bytes",
@@ -320,6 +354,20 @@ class PipelineModuleContractTests(unittest.TestCase):
                 "cues",
                 "audio_path",
                 "audio_digest",
+            ),
+            "RenderChunkPlanDocument": (
+                "schema_version",
+                "job_id",
+                "media_digest",
+                "frame_count",
+                "width",
+                "height",
+                "dependency_path",
+                "dependency_digest",
+                "render_fingerprint",
+                "chunks",
+                "parts",
+                "output_has_audio",
             ),
             "RenderPlanDocument": (
                 "schema_version",
@@ -634,13 +682,14 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
         self.assertEqual(payload["duration_seconds"], {"denominator": 1, "numerator": 30})
         self.assertEqual(payload["source_fps"], {"denominator": 1001, "numerator": 30000})
 
-    def test_serializer_accepts_exactly_the_eight_document_types(self) -> None:
+    def test_serializer_accepts_exactly_the_nine_document_types(self) -> None:
         documents = (
             media(),
             ocr(),
             track(),
             translation(),
             tts(),
+            render_chunk_plan(),
             render_plan(),
             publication(),
             checkpoint(),
@@ -669,6 +718,7 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
             (track(), parse_track_document_bytes),
             (translation(), parse_translation_document_bytes),
             (tts(), parse_tts_document_bytes),
+            (render_chunk_plan(), parse_render_chunk_plan_document_bytes),
             (render_plan(), parse_render_plan_document_bytes),
             (publication(), parse_publication_document_bytes),
             (checkpoint(), parse_checkpoint_document_bytes),
@@ -700,6 +750,10 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
                         self.assertIs(type(region.kind), RegionKind)
                         self.assertIs(type(region.interval), FrameInterval)
                         self.assertIs(type(region.box), BoundingBox)
+                    for chunk in getattr(actual, "chunks", ()):
+                        self.assertIs(type(chunk), RenderChunk)
+                        self.assertIs(type(chunk.index), int)
+                        self.assertIs(type(chunk.interval), FrameInterval)
                     for part in getattr(actual, "parts", ()):
                         self.assertIs(type(part), Part)
                         self.assertIs(type(part.part_index), int)
@@ -710,6 +764,64 @@ class PipelineCanonicalSerializationTests(unittest.TestCase):
                             all(type(index) is int for index in part.chunk_indexes)
                         )
                     self.assertEqual(canonical_document_bytes(actual), raw)
+
+    def test_render_chunk_plan_round_trips_and_verifies_its_tts_dependency(
+        self,
+    ) -> None:
+        upstream = replace(tts(), frame_count=601)
+        document = render_chunk_plan()
+        raw = canonical_document_bytes(document)
+
+        self.assertEqual(
+            parse_render_chunk_plan_document_bytes(raw, upstream),
+            document,
+        )
+        self.assertEqual(
+            canonical_document_bytes(
+                parse_render_chunk_plan_document_bytes(raw)
+            ),
+            raw,
+        )
+
+    def test_render_chunk_plan_parser_rejects_malformed_chunk_topology(
+        self,
+    ) -> None:
+        upstream = replace(tts(), frame_count=601)
+        invalid_payloads: list[dict[str, object]] = []
+
+        unknown = json.loads(canonical_document_bytes(render_chunk_plan()))
+        unknown["chunks"][0]["unexpected"] = True
+        invalid_payloads.append(unknown)
+
+        non_contiguous = json.loads(canonical_document_bytes(render_chunk_plan()))
+        non_contiguous["chunks"][1]["interval"]["start_frame"] = 301
+        invalid_payloads.append(non_contiguous)
+
+        missing_index = json.loads(canonical_document_bytes(render_chunk_plan()))
+        missing_index["chunks"][1]["index"] = 2
+        invalid_payloads.append(missing_index)
+
+        wrong_dependency = json.loads(canonical_document_bytes(render_chunk_plan()))
+        wrong_dependency["dependency_digest"]["sha256"] = "d" * 64
+        invalid_payloads.append(wrong_dependency)
+
+        part_mismatch = json.loads(canonical_document_bytes(render_chunk_plan()))
+        part_mismatch["parts"][0]["chunk_indexes"] = [0, 2]
+        invalid_payloads.append(part_mismatch)
+
+        duplicate = canonical_document_bytes(render_chunk_plan()).replace(
+            b'{"chunks":',
+            b'{"chunks":[],"chunks":',
+            1,
+        )
+
+        for raw in (
+            *(canonical_payload(item) for item in invalid_payloads),
+            duplicate,
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(DomainInvariantError):
+                    parse_render_chunk_plan_document_bytes(raw, upstream)
 
     def test_parsers_reject_non_bytes_noncanonical_and_wrong_document_types(self) -> None:
         raw = canonical_document_bytes(media())

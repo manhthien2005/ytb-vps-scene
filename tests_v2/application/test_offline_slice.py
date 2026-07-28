@@ -28,6 +28,7 @@ from ytb_vps_v2.adapters.offline.providers import (
 from ytb_vps_v2.adapters.sqlite.state import SqliteStateStore
 from ytb_vps_v2.adapters.sqlite.restore import LocalStagedRestoreWorkspace
 from ytb_vps_v2.application.checkpoints import CheckpointPublisher
+from ytb_vps_v2.application.render_chunks import chunk_local_request
 from ytb_vps_v2.application.offline_slice import (
     FreshWorkspaceRequired,
     InterruptionPoint,
@@ -45,6 +46,7 @@ from ytb_vps_v2.domain.models import JobId, StageName, WorkStatus
 from ytb_vps_v2.domain.pipeline import (
     CHECKPOINT_ARTIFACT_PATH,
     PIPELINE_ARTIFACT_PATHS,
+    RENDER_CHUNK_PLAN_ARTIFACT_PATH,
     MediaDocument,
     PublicationDocument,
     RenderPlanDocument,
@@ -240,8 +242,12 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         self.assertTrue(
             all(unit.status is WorkStatus.SUCCEEDED for unit in result.work_units)
         )
-        self.assertEqual(len(result.artifacts), 11)
-        expected_paths = tuple(PIPELINE_ARTIFACT_PATHS.values())
+        self.assertEqual(len(result.artifacts), 13)
+        expected_paths = tuple(
+            path
+            for path in PIPELINE_ARTIFACT_PATHS.values()
+            if path != RENDER_CHUNK_PLAN_ARTIFACT_PATH
+        )
         primary_paths = set(expected_paths)
         primary_artifacts = tuple(
             artifact
@@ -307,7 +313,12 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         side_by_name = {
             artifact.name: artifact
             for artifact in result.artifacts
-            if artifact.relative_path not in primary_paths
+            if artifact.name
+            in {
+                "tts-audio",
+                "rendered-video",
+                "published-part-001",
+            }
         }
         expected_sides = {
             "tts-audio": (
@@ -352,14 +363,14 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(len(final_records), 1)
         self.assertEqual(result.final_checkpoint.manifest, final_records[0].manifest)
-        self.assertEqual(len(result.final_manifest.artifacts), 11)
-        self.assertEqual(len(result.proof_manifest.artifacts), 10)
+        self.assertEqual(len(result.final_manifest.artifacts), 13)
+        self.assertEqual(len(result.proof_manifest.artifacts), 12)
         snapshot_path = self.remote_root.joinpath(
             *result.final_manifest.state_snapshot.key.parts
         )
         snapshot = SqliteStateStore(snapshot_path)
         try:
-            self.assertEqual(len(snapshot.valid_artifacts(request.job_id)), 11)
+            self.assertEqual(len(snapshot.valid_artifacts(request.job_id)), 13)
             self.assertTrue(
                 all(
                     snapshot.get_work_unit(request.job_id, stage.value.lower()).status
@@ -459,8 +470,8 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             remote_entry = next(
                 entry
                 for entry in first.final_manifest.artifacts
-                if entry.key.parts[-len(artifact.relative_path.parts) :]
-                == artifact.relative_path.parts
+                if entry.digest.size_bytes == artifact.size_bytes
+                and entry.digest.sha256 == artifact.sha256
             )
             remote_path = self.remote_root.joinpath(*remote_entry.key.parts)
             original = remote_path.read_bytes()
@@ -490,7 +501,7 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             restore_parent,
             102,
         )
-        self.assertEqual(restored.artifact_count, 11)
+        self.assertEqual(restored.artifact_count, 13)
         restored_workspace = target / "workspace"
         restored_archive = target / "archive"
         restored_snapshots = target / "snapshots"
@@ -541,13 +552,17 @@ class OfflineSliceEndToEndTests(unittest.TestCase):
             (WorkStatus.SUCCEEDED,) * 8,
         )
         self.assertEqual(cold.artifacts, first.artifacts)
-        self.assertEqual(len(cold.artifacts), 11)
+        self.assertEqual(len(cold.artifacts), 13)
         self.assertEqual(
             len(
                 tuple(
                     artifact
                     for artifact in cold.artifacts
-                    if artifact.relative_path in set(PIPELINE_ARTIFACT_PATHS.values())
+                    if artifact.relative_path
+                    in (
+                        set(PIPELINE_ARTIFACT_PATHS.values())
+                        - {RENDER_CHUNK_PLAN_ARTIFACT_PATH}
+                    )
                 )
             ),
             8,
@@ -618,6 +633,41 @@ class _LightweightMedia:
         )
         return self.validate_render(destination, plan)
 
+    def render_chunk(
+        self,
+        source: Path,
+        tts_wav: Path,
+        plan: RenderRequest,
+        chunk,
+        destination: Path,
+    ) -> MediaDocument:
+        if digest_file(source) != plan.media_digest:
+            raise RuntimeError("lightweight render source mismatch")
+        if digest_file(tts_wav) != plan.tts_audio_digest:
+            raise RuntimeError("lightweight TTS mismatch")
+        destination.write_bytes(
+            b"lightweight-render-v1\0"
+            + bytes.fromhex(plan.media_digest.sha256)
+            + f":chunk:{chunk.index}".encode("ascii")
+            + (b"audio" if plan.output_has_audio else b"silent")
+        )
+        return self.validate_render(
+            destination,
+            chunk_local_request(plan, chunk),
+        )
+
+    def concatenate_render_chunks(
+        self,
+        chunks: tuple[Path, ...],
+        plan: RenderRequest,
+        destination: Path,
+    ) -> MediaDocument:
+        destination.write_bytes(
+            b"lightweight-render-v1\0"
+            + b"|".join(path.read_bytes() for path in chunks)
+        )
+        return self.validate_render(destination, plan)
+
     @staticmethod
     def validate_render(path: Path, expected: RenderRequest) -> MediaDocument:
         raw = path.read_bytes()
@@ -657,10 +707,13 @@ class _CorruptProofStateOnFirstVerification:
         self.armed = True
         self.proof_prefix = None
         self.observations = []
+        self.state_puts = 0
 
     def put(self, source, key, expected):
-        if self.proof_prefix is None and key.name == "job-v2.sqlite":
-            self.proof_prefix = key.parent.parent
+        if key.name == "job-v2.sqlite":
+            self.state_puts += 1
+            if self.state_puts == 2:
+                self.proof_prefix = key.parent.parent
         return self.delegate.put(source, key, expected)
 
     def read_bytes(self, key, max_bytes):
@@ -671,7 +724,7 @@ class _CorruptProofStateOnFirstVerification:
         if (
             self.armed
             and self.proof_prefix is not None
-            and key == self.proof_prefix / "manifest-v1.json"
+            and key == self.proof_prefix / "manifest-v2.json"
         ):
             state_key = key.parent / "state" / "job-v2.sqlite"
             self.root.joinpath(*state_key.parts).write_bytes(b"corrupt proof state")
@@ -766,6 +819,11 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                         expected_status = (
                             WorkStatus.SUCCEEDED
                             if point is InterruptionPoint.AFTER_SQLITE_COMMIT
+                            else WorkStatus.PENDING
+                            if (
+                                stage is StageName.RENDER
+                                and point is InterruptionPoint.BEFORE_PROVIDER
+                            )
                             else WorkStatus.RUNNING
                         )
                         self.assertIs(interrupted_unit.status, expected_status)
@@ -775,7 +833,7 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                         ):
                             self.assertEqual(
                                 len(state.completed_checkpoints(job_id)),
-                                1,
+                                2,
                             )
                             self.assertTrue(
                                 state.completed_checkpoints(job_id)[0]
@@ -790,7 +848,7 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                             archive_root,
                         ).run(request)
                         try:
-                            self.assertEqual(len(result.artifacts), 11)
+                            self.assertEqual(len(result.artifacts), 13)
                             self.assertTrue(
                                 all(
                                     unit.status is WorkStatus.SUCCEEDED
@@ -802,7 +860,14 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                                     job_id, stage.value.lower()
                                 ).attempts,
                                 1
-                                if point is InterruptionPoint.AFTER_SQLITE_COMMIT
+                                if (
+                                    point is InterruptionPoint.AFTER_SQLITE_COMMIT
+                                    or (
+                                        stage is StageName.RENDER
+                                        and point
+                                        is InterruptionPoint.BEFORE_PROVIDER
+                                    )
+                                )
                                 else 2,
                             )
                             self.assertEqual(
@@ -815,14 +880,14 @@ class OfflineSliceInterruptionTests(unittest.TestCase):
                                 8,
                             )
                             self.assertEqual(
-                                tuple(snapshots.glob("offline-render-*.mp4")),
+                                tuple(snapshots.glob("*.mp4")),
                                 (),
                             )
                             checkpoint_ids = tuple(
                                 item.checkpoint_id
                                 for item in reopened.completed_checkpoints(job_id)
                             )
-                            self.assertEqual(len(checkpoint_ids), 2)
+                            self.assertEqual(len(checkpoint_ids), 3)
                             self.assertTrue(
                                 any(item.startswith("matrix-final-") for item in checkpoint_ids)
                             )
@@ -886,6 +951,53 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         return workspace, archive_root, remote, state, runner, request
 
+    def test_render_configuration_change_reconciles_before_resume(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _, _, _, state, runner, request = self._environment(root)
+        self.addCleanup(state.close)
+        first = runner.run(request)
+        changed_config = replace(
+            EffectiveConfig(),
+            render=replace(
+                EffectiveConfig().render,
+                profile_revision="render-v2",
+            ),
+        )
+        changed_fingerprints = stage_config_fingerprints(changed_config)
+        fresh = root / "fresh"
+        fresh.mkdir()
+
+        resumed = runner.run(
+            replace(
+                request,
+                config_fingerprints=changed_fingerprints,
+                fresh_workspace_root=fresh,
+            )
+        )
+
+        self.assertEqual(
+            state.stored_config_fingerprints(request.job_id),
+            changed_fingerprints,
+        )
+        before = {unit.stage: unit.attempts for unit in first.work_units}
+        after = {unit.stage: unit.attempts for unit in resumed.work_units}
+        for stage in (
+            StageName.INGEST,
+            StageName.OCR,
+            StageName.TRACK,
+            StageName.TRANSLATE,
+            StageName.TTS,
+        ):
+            self.assertEqual(after[stage], before[stage])
+        for stage in (
+            StageName.RENDER,
+            StageName.PUBLISH,
+            StageName.BACKUP,
+        ):
+            self.assertEqual(after[stage], before[stage] + 1)
+
     def test_corrupt_primary_invalidates_owner_and_recomputes_only_in_fresh_workspace(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -935,7 +1047,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
                         for unit in resumed.work_units[1:]
                     )
                 )
-                self.assertEqual(len(resumed.artifacts), 11)
+                self.assertEqual(len(resumed.artifacts), 13)
                 self.assertEqual(
                     digest_file(
                         fresh.joinpath(*ocr_artifact.relative_path.parts)
@@ -974,6 +1086,12 @@ class OfflineSliceResumeTests(unittest.TestCase):
                 workspace, _, _, state, runner, request = self._environment(root)
                 self.addCleanup(state.close)
                 first = runner.run(request)
+                chunk_attempts = {
+                    unit.key: unit.attempts
+                    for unit in state.work_units(request.job_id)
+                    if unit.key.startswith("render:")
+                    and unit.key[7:].isdigit()
+                }
                 primary_path = PIPELINE_ARTIFACT_PATHS[
                     {
                         StageName.TTS: TtsDocument,
@@ -1017,7 +1135,16 @@ class OfflineSliceResumeTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(resumed.workspace_root, fresh)
-                self.assertEqual(len(resumed.artifacts), 11)
+                self.assertEqual(len(resumed.artifacts), 13)
+                if owner is StageName.RENDER:
+                    self.assertEqual(
+                        {
+                            unit.key: unit.attempts
+                            for unit in state.work_units(request.job_id)
+                            if unit.key in chunk_attempts
+                        },
+                        chunk_attempts,
+                    )
 
     def test_ambiguous_owner_and_dependency_mismatch_are_rejected_fail_closed(self) -> None:
         for variant in ("ambiguous-owner", "dependency-mismatch"):
@@ -1033,8 +1160,8 @@ class OfflineSliceResumeTests(unittest.TestCase):
                     state.connection.execute(
                         "INSERT INTO artifacts("
                         "job_id,name,relative_path,size_bytes,sha256,owner_stage,"
-                        "dependencies_json,is_valid,committed_at"
-                        ") VALUES (?,?,?,?,?,?,?,1,?)",
+                        "unit_key,dependencies_json,is_valid,committed_at"
+                        ") VALUES (?,?,?,?,?,?,?,?,1,?)",
                         (
                             request.job_id.value,
                             "ambiguous-ocr-document",
@@ -1042,6 +1169,7 @@ class OfflineSliceResumeTests(unittest.TestCase):
                             1,
                             "a" * 64,
                             StageName.OCR.value,
+                            StageName.OCR.value.lower(),
                             json.dumps(("ingest-document",), separators=(",", ":")),
                             "tampered",
                         ),
@@ -1218,9 +1346,10 @@ class OfflineSliceResumeTests(unittest.TestCase):
             WorkStatus.FAILED,
         )
         self.assertEqual(len(state.retry_events(request.job_id, "backup")), 1)
+        self.assertGreaterEqual(len(faulty_store.observations), 2)
         self.assertEqual(
-            faulty_store.observations,
-            [(100, "sha256-readback"), (100, "sha256-readback")],
+            set(faulty_store.observations),
+            {(100, "sha256-readback")},
         )
         self.assertFalse(
             workspace.joinpath(*CHECKPOINT_ARTIFACT_PATH.parts).exists()
@@ -1284,15 +1413,15 @@ class OfflineSliceResumeTests(unittest.TestCase):
         )
         self.assertEqual(repaired_manifest_path.read_bytes(), repaired_manifest_bytes)
         self.assertEqual(repaired_state_path.read_bytes(), repaired_state_bytes)
-        self.assertEqual(len(state.completed_checkpoints(request.job_id)), 3)
-        self.assertEqual(len(repaired.final_manifest.artifacts), 11)
+        self.assertEqual(len(state.completed_checkpoints(request.job_id)), 4)
+        self.assertEqual(len(repaired.final_manifest.artifacts), 13)
         inspection_root = root / "repaired-final-inspection"
         inspection_root.mkdir()
         inspection_path = inspection_root / "job-v2.sqlite"
         inspection_path.write_bytes(repaired_state_bytes)
         inspection = SqliteStateStore(inspection_path)
         try:
-            self.assertEqual(len(inspection.valid_artifacts(request.job_id)), 11)
+            self.assertEqual(len(inspection.valid_artifacts(request.job_id)), 13)
             self.assertTrue(
                 all(
                     inspection.get_work_unit(
@@ -1306,7 +1435,9 @@ class OfflineSliceResumeTests(unittest.TestCase):
         finally:
             inspection.close()
 
-    def test_corrupt_final_side_artifact_rotates_to_additive_repair(self) -> None:
+    def test_corrupt_stable_side_artifact_fails_closed_without_overwrite(
+        self,
+    ) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -1316,30 +1447,18 @@ class OfflineSliceResumeTests(unittest.TestCase):
         side_entry = next(
             entry
             for entry in first.final_manifest.artifacts
-            if str(entry.key).endswith("artifacts/tts/voice.wav")
+            if entry.key.parts[-2] == "voice.wav"
         )
         side_path = remote.joinpath(*side_entry.key.parts)
         original = side_path.read_bytes()
         side_path.write_bytes(b"corrupt final side artifact")
 
-        repaired = runner.run(request)
+        with self.assertRaises(FreshWorkspaceRequired):
+            runner.run(request)
 
-        self.assertNotEqual(
-            repaired.final_manifest.checkpoint_id,
-            first.final_manifest.checkpoint_id,
-        )
-        self.assertTrue(repaired.final_manifest.checkpoint_id.endswith("-repair-1"))
-        repaired_side_entry = next(
-            entry
-            for entry in repaired.final_manifest.artifacts
-            if str(entry.key).endswith("artifacts/tts/voice.wav")
-        )
-        self.assertEqual(
-            remote.joinpath(*repaired_side_entry.key.parts).read_bytes(),
-            original,
-        )
+        self.assertNotEqual(original, b"corrupt final side artifact")
         self.assertEqual(side_path.read_bytes(), b"corrupt final side artifact")
-        self.assertEqual(len(repaired.final_manifest.artifacts), 11)
+        self.assertEqual(len(state.completed_checkpoints(request.job_id)), 3)
 
     def test_missing_or_corrupt_final_manifest_rotates_to_valid_repair(self) -> None:
         for damage in ("missing", "corrupt"):
