@@ -750,15 +750,44 @@ class FfmpegRenderValidationTests(unittest.TestCase):
             stem="silent-source-tts",
         )
         destination = self.root / "render-silent-source.mp4"
+        filter_graphs: list[str] = []
+        subtitle_documents: list[str] = []
+        run = self.adapter._run
 
-        rendered = self.adapter.render(
-            self.silent_source,
-            tts_wav,
-            plan,
-            destination,
-        )
+        def capture_render_assets(
+            arguments: list[str],
+            **kwargs: object,
+        ) -> bytes:
+            if "-filter_complex_script" in arguments:
+                script = Path(
+                    arguments[arguments.index("-filter_complex_script") + 1]
+                )
+                filter_graphs.append(script.read_text(encoding="utf-8"))
+                subtitle_documents.extend(
+                    path.read_text(encoding="utf-8")
+                    for path in script.parent.glob("*.ass")
+                )
+            return run(arguments, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(
+            self.adapter,
+            "_run",
+            side_effect=capture_render_assets,
+        ):
+            rendered = self.adapter.render(
+                self.silent_source,
+                tts_wav,
+                plan,
+                destination,
+            )
 
         self.assert_render_identity(rendered, has_audio=True)
+        self.assertEqual(len(filter_graphs), 1)
+        self.assertIn("subtitles=", filter_graphs[0])
+        self.assertNotIn("[0:a]", filter_graphs[0])
+        self.assertTrue(
+            any("vi:OFFLINE CUE ONE" in document for document in subtitle_documents)
+        )
 
     def test_output_audio_policy_can_explicitly_disable_audio(self) -> None:
         tts_wav, plan = self.make_plan(

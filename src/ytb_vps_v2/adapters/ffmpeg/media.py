@@ -14,6 +14,17 @@ from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from ytb_vps_v2.adapters.ffmpeg.audio_graph import (
+    AudioMixPolicy,
+    VoiceSegment,
+    build_audio_graph,
+)
+from ytb_vps_v2.adapters.ffmpeg.filter_graph import MaskRegion, build_video_graph
+from ytb_vps_v2.adapters.ffmpeg.subtitles_ass import (
+    SubtitleRectangle,
+    SubtitleStyle,
+    build_ass_document,
+)
 from ytb_vps_v2.domain.backup import FileDigest
 from ytb_vps_v2.domain.errors import DomainInvariantError
 from ytb_vps_v2.domain.models import JobId
@@ -23,6 +34,21 @@ from ytb_vps_v2.domain.timeline import Timeline
 
 class FfmpegMediaError(RuntimeError):
     """Raised when FFmpeg media work cannot be completed or verified."""
+
+
+@dataclass(frozen=True, slots=True)
+class RenderInputs:
+    source: Path
+    subtitle_path: Path | None
+    voice_paths: tuple[Path, ...]
+    voice_starts: tuple[Fraction, ...]
+    source_has_audio: bool = True
+
+    def __post_init__(self) -> None:
+        if len(self.voice_paths) != len(self.voice_starts):
+            raise FfmpegMediaError("Each voice input needs exactly one start time")
+        if not isinstance(self.source_has_audio, bool):
+            raise FfmpegMediaError("Source audio presence must be a bool")
 
 
 @dataclass(slots=True)
@@ -570,8 +596,8 @@ class FfmpegMediaAdapter:
         ffprobe: str = "ffprobe",
         fixture_timeout_seconds: float = 120.0,
         probe_timeout_seconds: float = 30.0,
-        render_timeout_seconds: float = 120.0,
-        decode_timeout_seconds: float = 120.0,
+        render_timeout_seconds: float = 7200.0,
+        decode_timeout_seconds: float = 7200.0,
         diagnostic_limit: int = 4096,
         probe_output_limit: int = 65536,
     ) -> None:
@@ -984,17 +1010,204 @@ class FfmpegMediaAdapter:
             and media.height == plan.height
         )
 
+    @staticmethod
+    def _mask_regions(plan: RenderRequest, target_fps: int) -> list[MaskRegion]:
+        regions: list[MaskRegion] = []
+        for region in plan.blur_regions:
+            covers_everything = (
+                region.interval.start_frame == 0
+                and region.interval.end_frame >= plan.frame_count
+            )
+            intervals = () if covers_everything else (
+                (
+                    Fraction(region.interval.start_frame, target_fps),
+                    Fraction(region.interval.end_frame, target_fps),
+                ),
+            )
+            regions.append(
+                MaskRegion(
+                    box=region.box,
+                    glyph_height=max(
+                        1,
+                        (region.box.ymax - region.box.ymin) // 2,
+                    ),
+                    intervals=intervals,
+                    always_on=covers_everything,
+                )
+            )
+        return regions
+
+    @staticmethod
+    def _externalize_filter_graph(
+        arguments: list[str],
+        script_path: Path,
+    ) -> list[str]:
+        if arguments.count("-filter_complex") != 1:
+            raise FfmpegMediaError("Render needs exactly one inline filter graph")
+        index = arguments.index("-filter_complex")
+        graph = arguments[index + 1]
+        try:
+            script_path.write_text(graph, encoding="utf-8", newline="")
+        except OSError as exc:
+            raise FfmpegMediaError("Render filter script could not be written") from exc
+        externalized = list(arguments)
+        externalized[index:index + 2] = [
+            "-filter_complex_script",
+            str(script_path),
+        ]
+        return externalized
+
+    def render_arguments(
+        self,
+        plan: RenderRequest,
+        inputs: RenderInputs,
+        *,
+        canvas_width: int,
+        canvas_height: int,
+        target_fps: int,
+        destination: Path,
+        encoder: str = "libx264",
+    ) -> list[str]:
+        if type(plan) is not RenderRequest:
+            raise FfmpegMediaError("Render plan must be a RenderRequest")
+        if not isinstance(inputs, RenderInputs):
+            raise FfmpegMediaError("Render inputs must be RenderInputs")
+        if not isinstance(target_fps, int) or isinstance(target_fps, bool) or target_fps <= 0:
+            raise FfmpegMediaError("Render target FPS must be positive")
+        duration = Fraction(plan.frame_count, target_fps)
+
+        arguments = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(inputs.source),
+        ]
+        if plan.output_has_audio:
+            for path in inputs.voice_paths:
+                arguments += ["-i", str(path)]
+
+        video = build_video_graph(
+            self._mask_regions(plan, target_fps),
+            width=canvas_width,
+            height=canvas_height,
+            subtitle_path=(
+                None
+                if inputs.subtitle_path is None
+                else str(inputs.subtitle_path)
+            ),
+        )
+        graphs = [video]
+        if plan.output_has_audio:
+            segments = tuple(
+                VoiceSegment(index + 1, start)
+                for index, start in enumerate(inputs.voice_starts)
+            )
+            graphs.append(
+                build_audio_graph(
+                    segments,
+                    source_input_index=0 if inputs.source_has_audio else None,
+                    duration_seconds=duration,
+                    policy=AudioMixPolicy(),
+                )
+            )
+
+        arguments += [
+            "-filter_complex",
+            ";".join(graphs),
+            "-map",
+            "[vout]",
+        ]
+        if plan.output_has_audio:
+            arguments += [
+                "-map",
+                "[aout]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+            ]
+        else:
+            arguments.append("-an")
+
+        arguments += [
+            "-frames:v",
+            str(plan.frame_count),
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(target_fps),
+            "-c:v",
+            encoder,
+        ]
+        if encoder == "h264_nvenc":
+            arguments += [
+                "-preset",
+                "p5",
+                "-rc",
+                "vbr",
+                "-cq",
+                "21",
+                "-b:v",
+                "0",
+            ]
+        else:
+            arguments += [
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            ]
+        arguments += [
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-metadata",
+            "creation_time=2000-01-01T00:00:00Z",
+            "-metadata",
+            "encoder=ytb-vps-v2",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ]
+        return arguments
+
     def render(
         self,
         source: Path,
         tts_wav: Path,
         plan: RenderRequest,
         destination: Path,
+        *,
+        subtitle_path: Path | None = None,
+        target_fps: int = 30,
+        encoder: str = "libx264",
     ) -> MediaDocument:
         if type(plan) is not RenderRequest:
             raise FfmpegMediaError("Render plan must be a RenderRequest")
         anonymous: _AnonymousPosixRender | None = None
         named: _OwnedRenderStaging | None = None
+        render_assets: tempfile.TemporaryDirectory[str] | None = None
         final_output: Path
         if os.name != "nt":
             final_output = self._destination(destination)
@@ -1015,6 +1228,48 @@ class FfmpegMediaAdapter:
                 raise FfmpegMediaError(
                     "Render TTS input does not match the typed render plan"
                 )
+            render_assets = tempfile.TemporaryDirectory(
+                prefix="ytb-vps-render-",
+            )
+            asset_root = Path(render_assets.name)
+            prepared_subtitle = subtitle_path
+            if prepared_subtitle is not None:
+                if (
+                    not isinstance(prepared_subtitle, Path)
+                    or not prepared_subtitle.is_file()
+                    or prepared_subtitle.is_symlink()
+                ):
+                    raise FfmpegMediaError(
+                        "Render subtitle input must be a regular file"
+                    )
+            elif any(
+                cue.target_text is not None and cue.target_text.strip()
+                for cue in plan.cues
+            ):
+                prepared_subtitle = asset_root / "subtitles.ass"
+                document = build_ass_document(
+                    plan.cues,
+                    canvas_width=plan.width,
+                    canvas_height=plan.height,
+                    target_fps=target_fps,
+                    rectangle=SubtitleRectangle(
+                        Fraction(5, 100),
+                        Fraction(78, 100),
+                        Fraction(90, 100),
+                        Fraction(16, 100),
+                    ),
+                    style=SubtitleStyle(),
+                )
+                try:
+                    prepared_subtitle.write_text(
+                        document,
+                        encoding="utf-8",
+                        newline="",
+                    )
+                except OSError as exc:
+                    raise FfmpegMediaError(
+                        "Render subtitle document could not be written"
+                    ) from exc
             if anonymous is None:
                 final_output = self._destination(destination)
                 named = _OwnedRenderStaging.create(final_output)
@@ -1025,90 +1280,28 @@ class FfmpegMediaAdapter:
                 output = anonymous.fd_path
                 pass_fds = (anonymous.render_fd,)
                 overwrite_policy = "-y"
-            arguments = [
-                self.ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                overwrite_policy,
-                "-i",
-                str(source),
-            ]
-            if plan.output_has_audio:
-                arguments.extend(["-i", str(tts_wav)])
-            arguments.extend(
-                [
-                    "-map",
-                    "0:v:0",
-                    "-vf",
-                    f"fps=30,scale={plan.width}:{plan.height}:flags=bicubic,format=yuv420p",
-                    "-frames:v",
-                    "900",
-                    "-fps_mode",
-                    "cfr",
-                    "-r",
-                    "30",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-threads:v",
-                    "1",
-                    "-g",
-                    "60",
-                    "-keyint_min",
-                    "60",
-                    "-sc_threshold",
-                    "0",
-                    "-x264-params",
-                    "threads=1:lookahead_threads=1:sliced_threads=0",
-                ]
+            arguments = self.render_arguments(
+                plan,
+                RenderInputs(
+                    source=source,
+                    subtitle_path=prepared_subtitle,
+                    voice_paths=(tts_wav,) if plan.output_has_audio else (),
+                    voice_starts=(Fraction(0),) if plan.output_has_audio else (),
+                    source_has_audio=source_media.has_audio,
+                ),
+                canvas_width=plan.width,
+                canvas_height=plan.height,
+                target_fps=target_fps,
+                destination=Path(str(output)),
+                encoder=encoder,
             )
-            if plan.output_has_audio:
-                arguments.extend(
-                    [
-                        "-map",
-                        "1:a:0",
-                        "-af",
-                        "apad=whole_dur=30",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "96k",
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "1",
-                        "-threads:a",
-                        "1",
-                    ]
-                )
-            else:
-                arguments.append("-an")
-            arguments.extend(
-                [
-                    "-map_metadata",
-                    "-1",
-                    "-map_chapters",
-                    "-1",
-                    "-metadata",
-                    "creation_time=2000-01-01T00:00:00Z",
-                    "-metadata",
-                    "encoder=ytb-vps-v2",
-                    "-t",
-                    "30",
-                    "-movflags",
-                    "+faststart",
-                ]
-            )
+            arguments[arguments.index("-y")] = overwrite_policy
             if anonymous is not None:
-                arguments.extend(["-f", "mp4"])
-            arguments.append(str(output))
+                arguments[-1:] = ["-f", "mp4", str(output)]
+            arguments = self._externalize_filter_graph(
+                arguments,
+                asset_root / "filter_complex.txt",
+            )
             self._run(
                 arguments,
                 timeout=self.render_timeout_seconds,
@@ -1121,7 +1314,15 @@ class FfmpegMediaAdapter:
                 named.claim_output()
                 pinned = named.pin(final_output)
                 try:
-                    validated = self.validate_render(output, plan)
+                    validated = self.validate_render(
+                        output,
+                        plan,
+                        **(
+                            {"target_fps": target_fps}
+                            if target_fps != 30
+                            else {}
+                        ),
+                    )
                     pinned.verify(validated.source_digest)
                     pinned.publish()
                 finally:
@@ -1132,6 +1333,11 @@ class FfmpegMediaAdapter:
                     plan,
                     pass_fds=pass_fds,
                     logical_name=final_output.name,
+                    **(
+                        {"target_fps": target_fps}
+                        if target_fps != 30
+                        else {}
+                    ),
                 )
                 anonymous.verify(validated.source_digest)
                 anonymous.publish()
@@ -1140,6 +1346,8 @@ class FfmpegMediaAdapter:
                 source_path=PurePosixPath("inputs") / final_output.name,
             )
         finally:
+            if render_assets is not None:
+                render_assets.cleanup()
             if anonymous is not None:
                 anonymous.cleanup()
             elif named is not None:
@@ -1152,9 +1360,16 @@ class FfmpegMediaAdapter:
         *,
         pass_fds: tuple[int, ...] = (),
         logical_name: str | None = None,
+        target_fps: int = 30,
     ) -> MediaDocument:
         if type(expected) is not RenderRequest:
             raise FfmpegMediaError("Expected render identity must be a RenderRequest")
+        if (
+            not isinstance(target_fps, int)
+            or isinstance(target_fps, bool)
+            or target_fps <= 0
+        ):
+            raise FfmpegMediaError("Render target FPS must be positive")
         if pass_fds:
             if (
                 len(pass_fds) != 1
@@ -1187,12 +1402,12 @@ class FfmpegMediaAdapter:
             pass_fds=pass_fds,
             logical_name=logical_name,
         )
-        expected_duration = Fraction(expected.frame_count, 30)
+        expected_duration = Fraction(expected.frame_count, target_fps)
         if actual.width != expected.width or actual.height != expected.height:
             raise FfmpegMediaError("Rendered media dimensions do not match the plan")
-        if actual.source_fps != Fraction(30):
+        if actual.source_fps != Fraction(target_fps):
             raise FfmpegMediaError("Rendered media frame rate is not canonical")
-        if abs(actual.duration_seconds - expected_duration) > Fraction(1, 30):
+        if abs(actual.duration_seconds - expected_duration) > Fraction(1, target_fps):
             raise FfmpegMediaError("Rendered media duration differs by more than one frame")
         if actual.frame_count != expected.frame_count:
             raise FfmpegMediaError("Rendered media frame count does not match the plan")
